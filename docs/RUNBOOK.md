@@ -204,3 +204,72 @@ starts lying quietly.
 **ARG Total has no stored row.** It is the sum of the four divisions, computed at
 read time. A database constraint prevents an `ARG_TOTAL` row from being written
 to any fact table.
+
+---
+
+## Deploying to Vercel
+
+The project is a stock Next.js app; Vercel needs no build configuration. What it
+does need is the environment set, because two of the three variables change
+whether the app starts at all.
+
+### Fastest path — a demo instance, no database
+
+Useful for showing ARG the system before QuickBooks credentials exist.
+
+| Variable | Value |
+|---|---|
+| `AUTH_SECRET` | output of `openssl rand -base64 48` |
+| `DEMO_MODE` | `1` |
+
+That is the whole configuration. Each instance seeds itself in memory on first
+request from the same deterministic dataset the tie-out suite asserts against,
+so the figures on screen are the spec's published figures. Every page carries a
+banner saying the warehouse is in memory and resets on recycle.
+
+Two consequences to expect and not mistake for faults: the first request after
+an instance starts is slow (it is applying migrations and loading the seed), and
+a write made in one request may not be visible to the next, because the next
+request may land on a different instance.
+
+### Real path — a provisioned database
+
+| Variable | Value |
+|---|---|
+| `AUTH_SECRET` | output of `openssl rand -base64 48` |
+| `DATABASE_URL` | the Neon connection string |
+| `ANTHROPIC_API_KEY` | optional — enables the assistant; everything else works without it |
+
+Do **not** set `DEMO_MODE`. `DATABASE_URL` takes precedence over it anyway, so a
+real deployment cannot end up seeded by accident, but leaving it unset keeps the
+intent legible.
+
+Then, once, against that database:
+
+```bash
+DATABASE_URL=<neon-url> pnpm db:migrate
+DATABASE_URL=<neon-url> pnpm db:seed     # only if you want the demo dataset
+```
+
+Skip the seed for a real deployment — the warehouse fills from the connectors.
+
+### Before handing the URL to anyone at ARG
+
+Replace the seeded credentials. Four accounts ship with the password
+`westport2026` so a fresh clone is explorable, and they are development
+credentials in the plainest sense: a deployed instance with them still in place
+is open to anyone who reads this file.
+
+### If the deployment builds but every page 500s
+
+Almost always one of three things, in this order of likelihood:
+
+1. `AUTH_SECRET` is unset. The app refuses to start in production without it,
+   deliberately — a signing key that silently defaults is worse than a crash.
+2. `DATABASE_URL` is set but unreachable, or points at a database with no
+   migrations applied.
+3. Neither `DATABASE_URL` nor `DEMO_MODE` is set. The app then falls back to
+   PGlite against a read-only serverless filesystem and cannot write its data
+   directory.
+
+The build logs will not distinguish these; the runtime logs will.
