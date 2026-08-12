@@ -20,6 +20,7 @@ import {
   LAST_CLOSED_MONTH,
 } from '@/lib/seed/generate';
 import { hashPassword } from '@/lib/auth/password';
+import { persistFindings, runAllChecks } from '@/lib/recon/checks';
 
 const CHUNK = 400;
 
@@ -42,14 +43,14 @@ export const DEV_PASSWORD = 'westport2026';
 export const SEED_USERS = [
   {
     email: 'admin@westportfinancial.com',
-    name: 'System Administrator',
+    name: 'Systems Admin',
     role: 'ADMIN' as const,
     canViewConsolidated: true,
     divisions: [] as string[],
   },
   {
     email: 'cfo@westportfinancial.com',
-    name: 'Westport Financial (CFO of record)',
+    name: 'Westport Financial',
     role: 'CFO' as const,
     canViewConsolidated: true,
     divisions: [],
@@ -424,6 +425,12 @@ export async function seedDatabase(db: Database, options: SeedOptions = {}): Pro
     .set({ isClosed: true, closedAt: new Date(), closedBy: cfo?.id ?? null })
     .where(sql`period_month <= ${LAST_CLOSED_MONTH}`);
 
+  // Rule 1: the checks are standing controls that run on every refresh, so the
+  // seed leaves the warehouse with a real, visible pass/fail rather than an
+  // empty status chip.
+  const recon = await runAllChecks(db);
+  await persistFindings(db, recon.findings, loadRunId);
+
   // Read back from the database rather than trusting the in-memory dataset —
   // a seed that reports what it intended to write is not a verification.
   const [plCountRow] = await db
@@ -440,6 +447,7 @@ export async function seedDatabase(db: Database, options: SeedOptions = {}): Pro
   log(`  budget rows    ${dataset.budget.length}`);
   log(`  deals          ${dataset.deals.length}`);
   log(`  contacts       ${dataset.contacts.length}`);
+  log(`  recon checks   ${recon.passed} pass, ${recon.failed} fail`);
   log(`  meetings       ${dataset.meetings.length}`);
   log('');
   log(`  sign in as any of: ${SEED_USERS.map((u) => u.email).join(', ')}`);

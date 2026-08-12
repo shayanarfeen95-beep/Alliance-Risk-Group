@@ -30,10 +30,25 @@ export interface SessionUser {
   divisionCodes: string[];
 }
 
+/**
+ * Signing key for the session token.
+ *
+ * A fresh clone runs with `pnpm db:migrate && pnpm db:seed && pnpm dev` and no
+ * configuration at all — the same reason the database defaults to embedded
+ * PGlite. Outside development the absence of a real secret is fatal: a
+ * predictable signing key would let anyone mint a session.
+ */
+const DEV_FALLBACK_SECRET = 'arg-development-only-secret-do-not-use-in-production';
+
 function secret(): Uint8Array {
   const value = process.env.AUTH_SECRET;
   if (!value) {
-    throw new Error('AUTH_SECRET is not set. Copy .env.example to .env.');
+    if (process.env.NODE_ENV === 'production') {
+      throw new Error(
+        'AUTH_SECRET is not set. Generate one with `openssl rand -base64 48` and set it in the environment before deploying.',
+      );
+    }
+    return new TextEncoder().encode(DEV_FALLBACK_SECRET);
   }
   return new TextEncoder().encode(value);
 }
