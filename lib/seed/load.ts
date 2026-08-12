@@ -21,6 +21,9 @@ import {
 } from '@/lib/seed/generate';
 import { hashPassword } from '@/lib/auth/password';
 import { persistFindings, runAllChecks } from '@/lib/recon/checks';
+import { DEFAULT_GOALS, evaluateGoalsForUser, persistFindings as persistGoalFindings } from '@/lib/ai/goals';
+import { generateCommentary } from '@/lib/ai/commentary';
+import { openSemanticSession } from '@/lib/semantic/resolve';
 
 const CHUNK = 400;
 
@@ -227,6 +230,24 @@ export async function seedDatabase(db: Database, options: SeedOptions = {}): Pro
   });
   if (access.length) await db.insert(t.userDivisionAccess).values(access);
 
+  // --- Standing goals ------------------------------------------------------
+  // Every user starts with the default watch list, so the Executive exception
+  // panel is useful on day one rather than empty until somebody configures it.
+  // Each goal is scoped to its owner, so a division manager's goals can only
+  // ever produce findings about divisions that manager may see.
+  await db.insert(t.agentGoal).values(
+    insertedUsers.flatMap((user) =>
+      DEFAULT_GOALS.map((goal) => ({
+        userId: user.id,
+        name: goal.name,
+        instruction: goal.instruction,
+        evaluator: goal.evaluator,
+        params: goal.params as object | null,
+        cadence: goal.cadence,
+      })),
+    ),
+  );
+
   // --- Facts, through a real load run --------------------------------------
   const dataset = generateSeedDataset();
 
@@ -431,6 +452,47 @@ export async function seedDatabase(db: Database, options: SeedOptions = {}): Pro
   const recon = await runAllChecks(db);
   await persistFindings(db, recon.findings, loadRunId);
 
+  // Goals are evaluated on every refresh, and a seed is a refresh. Running them
+  // here means the exception panel reflects the data that was just loaded rather
+  // than waiting for the next overnight cycle.
+  let goalFindings = 0;
+  for (const user of insertedUsers) {
+    const seedUser = SEED_USERS.find((u) => u.email === user.email);
+    const findings = await evaluateGoalsForUser(
+      db,
+      {
+        id: user.id,
+        email: user.email,
+        name: user.name,
+        role: user.role as 'ADMIN',
+        canViewConsolidated: user.canViewConsolidated,
+        divisionCodes: seedUser?.divisions ?? [],
+      },
+      LAST_CLOSED_MONTH,
+    );
+    goalFindings += await persistGoalFindings(db, findings);
+
+    // Westport drafts and signs the narrative, so it is written once, for the
+    // last closed month, from the CFO's view. It lands unsigned.
+    if (user.email === 'cfo@westportfinancial.com') {
+      const session = await openSemanticSession(db, {
+        id: user.id,
+        email: user.email,
+        name: user.name,
+        role: user.role as 'CFO',
+        canViewConsolidated: user.canViewConsolidated,
+        divisionCodes: [],
+      }, LAST_CLOSED_MONTH);
+
+      const commentary = await generateCommentary(session, findings);
+      await db.insert(t.monthlyCommentary).values({
+        periodMonth: LAST_CLOSED_MONTH,
+        draft: commentary.body,
+        citations: commentary.facts as unknown as object,
+      });
+    }
+  }
+
   // Read back from the database rather than trusting the in-memory dataset —
   // a seed that reports what it intended to write is not a verification.
   const [plCountRow] = await db
@@ -448,6 +510,7 @@ export async function seedDatabase(db: Database, options: SeedOptions = {}): Pro
   log(`  deals          ${dataset.deals.length}`);
   log(`  contacts       ${dataset.contacts.length}`);
   log(`  recon checks   ${recon.passed} pass, ${recon.failed} fail`);
+  log(`  goal findings  ${goalFindings}`);
   log(`  meetings       ${dataset.meetings.length}`);
   log('');
   log(`  sign in as any of: ${SEED_USERS.map((u) => u.email).join(', ')}`);

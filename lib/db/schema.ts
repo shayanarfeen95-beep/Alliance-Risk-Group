@@ -777,7 +777,17 @@ export const agentGoal = pgTable('agent_goal', {
     .notNull()
     .references(() => users.id, { onDelete: 'cascade' }),
   name: text('name').notNull(),
+  /** What the owner wrote. Quoted back in findings; never interpreted as logic. */
   instruction: text('instruction').notNull(),
+  /**
+   * The built-in rule that actually runs, from `lib/ai/goals.ts`.
+   *
+   * Goals evaluate in TypeScript against `resolveKpi`, not by handing the
+   * instruction text to a model each night. An exception that lands on the CEO's
+   * dashboard has to fire for the same reason every time.
+   */
+  evaluator: text('evaluator').notNull(),
+  params: jsonb('params'),
   /** 'ON_REFRESH' | 'ON_CLOSE' | 'MONTHLY' */
   cadence: text('cadence').notNull().default('ON_REFRESH'),
   isActive: boolean('is_active').notNull().default(true),

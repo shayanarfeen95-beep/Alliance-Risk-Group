@@ -15,6 +15,13 @@
       "when": 1786531065600,
       "tag": "0001_guards",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1786531078000,
+      "tag": "0002_goal_rules",
+      "breakpoints": true
     }
   ]
 }

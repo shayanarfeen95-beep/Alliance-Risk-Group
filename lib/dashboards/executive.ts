@@ -6,6 +6,7 @@ import { resolveKpi, CONSOLIDATED_CODE, type SemanticSession } from '@/lib/seman
 import { formatMonthShort, type MonthKey } from '@/lib/semantic/periods';
 import { safeDiv } from '@/lib/money';
 import type { KpiTileProps } from '@/components/dashboard/kpi-tile';
+import { openFindings } from '@/lib/ai/goals';
 
 /** §9.1 — the eight headline tiles. */
 const EXECUTIVE_TILES: Array<{ id: string; hint: string }> = [
@@ -198,14 +199,11 @@ export async function loadExecutive(
     }
   }
 
-  const agentFindings = await db
-    .select()
-    .from(t.agentFinding)
-    .where(eq(t.agentFinding.isAcknowledged, false))
-    .orderBy(desc(t.agentFinding.createdAt))
-    .limit(10);
-
-  for (const finding of agentFindings) {
+  // Standing-goal findings, scoped to this reader. `openFindings` filters on
+  // both goal ownership and current division entitlements — a finding about a
+  // division the reader may no longer see must not appear here even though the
+  // goal that produced it was theirs.
+  for (const finding of (await openFindings(db, session.user, period.month)).slice(0, 10)) {
     exceptions.push({
       severity: finding.severity === 'critical' || finding.severity === 'serious' ? 'critical' : 'warning',
       headline: finding.headline,

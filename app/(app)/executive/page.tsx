@@ -8,6 +8,8 @@ import { formatNumber, formatSignedNumber, sentimentColorVar, sentimentOf } from
 import { KpiTile } from '@/components/dashboard/kpi-tile';
 import { ChartCard } from '@/components/charts/chart-card';
 import { Card, CardHeader, DataTable, EmptyState, SectionTitle, Td, Th } from '@/components/ui/primitives';
+import { CommentaryPanel } from '@/components/dashboard/commentary-panel';
+import { can } from '@/lib/auth/scope';
 
 export const metadata: Metadata = { title: 'Executive' };
 export const dynamic = 'force-dynamic';
@@ -235,23 +237,11 @@ export default async function ExecutivePage({
           Monthly summary
         </SectionTitle>
         <Card>
-          {model.commentary ? (
-            <>
-              <p className="whitespace-pre-wrap text-[12.5px] leading-relaxed">
-                {model.commentary.draft}
-              </p>
-              <p className="mt-3 border-t pt-3 text-[11px] text-[var(--text-muted)]" style={{ borderColor: 'var(--border)' }}>
-                {model.commentary.signedAt
-                  ? `Signed ${new Date(model.commentary.signedAt).toLocaleDateString()}`
-                  : 'Draft — not yet signed by Westport.'}
-              </p>
-            </>
-          ) : (
-            <EmptyState
-              title="No commentary drafted for this month"
-              detail="Ask the assistant to draft the month's variance narrative. It reads the account-level detail, so it can say which accounts drove a movement rather than only that one occurred."
-            />
-          )}
+          <CommentaryPanel
+            month={session.period.month}
+            initial={model.commentary}
+            canDraft={can(session.user, 'SIGN_COMMENTARY')}
+          />
         </Card>
       </section>
 
