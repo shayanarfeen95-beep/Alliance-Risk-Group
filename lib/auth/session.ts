@@ -11,7 +11,8 @@ import 'server-only';
 import { cookies } from 'next/headers';
 import { eq } from 'drizzle-orm';
 import { SignJWT, jwtVerify } from 'jose';
-import { getDb } from '@/lib/db/client';
+import { randomBytes } from 'node:crypto';
+import { getDb, isDemoMode } from '@/lib/db/client';
 import { sessions, users, userDivisionAccess } from '@/lib/db/schema';
 
 const COOKIE_NAME = 'arg_session';
@@ -40,9 +41,24 @@ export interface SessionUser {
  */
 const DEV_FALLBACK_SECRET = 'arg-development-only-secret-do-not-use-in-production';
 
+/**
+ * A per-process key, used only by a demo instance with no secret configured.
+ *
+ * Random rather than constant, so it is not a predictable signing key. Sessions
+ * do not survive an instance recycling — which is the same thing already true of
+ * a demo instance's data, so it is consistent rather than surprising. This never
+ * applies to a real deployment: demo mode requires DATABASE_URL to be unset, and
+ * a demo instance holds no real figures to protect.
+ */
+let ephemeralSecret: Uint8Array | null = null;
+
 function secret(): Uint8Array {
   const value = process.env.AUTH_SECRET;
   if (!value) {
+    if (isDemoMode()) {
+      ephemeralSecret ??= new Uint8Array(randomBytes(48));
+      return ephemeralSecret;
+    }
     if (process.env.NODE_ENV === 'production') {
       throw new Error(
         'AUTH_SECRET is not set. Generate one with `openssl rand -base64 48` and set it in the environment before deploying.',

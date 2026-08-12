@@ -1,0 +1,13 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "framework": "nextjs",
+  "env": {
+    "DEMO_MODE": "1"
+  },
+  "functions": {
+    "app/**": {
+      "memory": 2048,
+      "maxDuration": 60
+    }
+  }
+}
