@@ -94,12 +94,26 @@ export function isDemoMode(): boolean {
   return process.env.DEMO_MODE === '1' && !process.env.DATABASE_URL;
 }
 
-async function bootstrapDemo(db: Database): Promise<void> {
+/**
+ * Brings an embedded PGlite database up to schema, and seeds it in demo mode.
+ *
+ * Migration runs for *every* PGlite database, not only the demo one. Without
+ * that, `pnpm install && pnpm dev` — which is what anyone actually types —
+ * reaches a database with no tables, and the first-run screen fails on submit
+ * with a 500. Requiring `db:migrate` first is a step that exists only because
+ * the code did not do it, and the error it produces looks like a broken
+ * application rather than a missing command.
+ *
+ * The migrator records what it has applied, so this is a no-op on every
+ * subsequent start rather than repeated work.
+ */
+async function bootstrapEmbedded(db: Database, seed: boolean): Promise<void> {
   const { migrate } = await import('drizzle-orm/pglite/migrator');
-  const { seedDatabase } = await import('@/lib/seed/load');
-
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   await migrate(db as any, { migrationsFolder: 'lib/db/migrations' });
+
+  if (!seed) return;
+  const { seedDatabase } = await import('@/lib/seed/load');
   await seedDatabase(db, { quiet: true });
 }
 
@@ -107,18 +121,18 @@ export async function getDb(): Promise<Database> {
   if (!globalForDb.__argDb) {
     const db = await create();
 
-    if (isDemoMode()) {
+    if (!process.env.DATABASE_URL) {
       // Held as a promise rather than a boolean: concurrent requests during a
       // cold start must await the same bootstrap, not race to run four of them
       // against the same database.
-      globalForDb.__argBootstrap ??= bootstrapDemo(db).catch((error) => {
+      globalForDb.__argBootstrap ??= bootstrapEmbedded(db, isDemoMode()).catch((error) => {
         // A failed bootstrap must not be cached as done — the next request
         // should retry rather than serve an empty warehouse as if it were real.
         globalForDb.__argBootstrap = undefined;
         throw error;
       });
       await globalForDb.__argBootstrap;
-    } else if (process.env.DATABASE_URL) {
+    } else {
       // A real database brings itself up to schema on first use. An operator
       // pointing at an empty Neon database should get a working app, not
       // "relation does not exist" on every route until they remember to run a

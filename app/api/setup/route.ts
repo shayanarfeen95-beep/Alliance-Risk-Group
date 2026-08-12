@@ -1,4 +1,5 @@
 import { NextResponse } from 'next/server';
+import { randomBytes } from 'node:crypto';
 import { sql } from 'drizzle-orm';
 import { getDb } from '@/lib/db/client';
 import * as t from '@/lib/db/schema';
@@ -68,7 +69,25 @@ export async function POST(request: Request) {
   if (body.loadDemoData) {
     const { seedDatabase } = await import('@/lib/seed/load');
     await seedDatabase(db, { quiet: true });
-    await db.delete(t.users);
+
+    // Retire the seeded accounts rather than deleting them.
+    //
+    // Deleting is what you reach for first and it does not work: the demo data
+    // is *attributed* to those users — they closed the periods, locked the
+    // forecasts, signed the commentary — so the foreign keys hold them in
+    // place, and tearing those references out would leave a closed month with
+    // nobody who closed it.
+    //
+    // Retiring keeps the history coherent and still closes the hole that
+    // matters: these accounts ship with a password published in the README, and
+    // a deployment that loaded demo data must not be reachable through one.
+    // Both the login action and the session loader refuse an inactive user, and
+    // the scrambled hash means there is no password that would work even if
+    // somebody flipped the flag back.
+    await db.update(t.users).set({
+      isActive: false,
+      passwordHash: await hashPassword(randomBytes(32).toString('base64url')),
+    });
   } else {
     const { DIVISION_SEED } = await import('@/lib/divisions');
     const { SEED_CONFIG } = await import('@/lib/seed/load');

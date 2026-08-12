@@ -373,3 +373,33 @@ describe('the seed leaves a drafted, unsigned narrative', () => {
     expect(rows[0]!.draft.length).toBeGreaterThan(200);
   });
 });
+
+describe('a fresh install works with no prior commands', () => {
+  it('retiring the seeded accounts does not break the data they own', async () => {
+    // The setup route deactivates the seeded users rather than deleting them.
+    // Deleting is the obvious move and it fails: closed periods, locked
+    // forecasts and signed commentary all reference those ids, so the foreign
+    // keys hold them in place — and removing the references would leave a
+    // closed month with nobody who closed it.
+    const { hashPassword } = await import('@/lib/auth/password');
+    const { randomBytes } = await import('node:crypto');
+
+    await harness.db.update(t.users).set({
+      isActive: false,
+      passwordHash: await hashPassword(randomBytes(32).toString('base64url')),
+    });
+
+    // The attribution survives.
+    const closed = await harness.db
+      .select({ closedBy: t.dimPeriod.closedBy })
+      .from(t.dimPeriod)
+      .where(eq(t.dimPeriod.periodMonth, TIE_OUT_MONTH));
+    expect(closed[0]!.closedBy).not.toBeNull();
+
+    // And every account is unusable: both the login action and the session
+    // loader refuse an inactive user.
+    const rows = await harness.db.select({ isActive: t.users.isActive }).from(t.users);
+    expect(rows.length).toBeGreaterThan(0);
+    for (const row of rows) expect(row.isActive).toBe(false);
+  });
+});
