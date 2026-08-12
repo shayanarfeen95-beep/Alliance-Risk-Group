@@ -1,0 +1,105 @@
+@import 'tailwindcss';
+@import './tokens.css';
+
+/* Expose the tokens to Tailwind's utility generation so `bg-surface-1`,
+   `text-muted`, `border-default` etc. resolve to the same variables the charts
+   read. One source of colour truth for the whole app. */
+@theme inline {
+  --color-page: var(--page);
+  --color-surface-1: var(--surface-1);
+  --color-surface-2: var(--surface-2);
+  --color-surface-raised: var(--surface-raised);
+
+  --color-ink: var(--text-primary);
+  --color-ink-secondary: var(--text-secondary);
+  --color-ink-muted: var(--text-muted);
+  --color-ink-inverse: var(--text-inverse);
+
+  --color-line: var(--border);
+  --color-line-strong: var(--border-strong);
+  --color-grid: var(--grid);
+  --color-axis: var(--axis);
+
+  --color-series-1: var(--series-1);
+  --color-series-2: var(--series-2);
+  --color-series-3: var(--series-3);
+  --color-series-4: var(--series-4);
+
+  --color-good: var(--status-good);
+  --color-warning: var(--status-warning);
+  --color-serious: var(--status-serious);
+  --color-critical: var(--status-critical);
+
+  --color-delta-good: var(--delta-good);
+  --color-delta-bad: var(--delta-bad);
+
+  --font-sans: var(--font-sans);
+  --font-mono: var(--font-mono);
+
+  --radius-card: var(--radius-lg);
+}
+
+* {
+  border-color: var(--border);
+}
+
+html {
+  background: var(--page);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+body {
+  background: var(--page);
+  color: var(--text-primary);
+  font-family: var(--font-sans);
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+/* Financial figures align vertically in every table and axis. Standalone hero
+   numbers keep proportional figures — tabular-nums is for columns. */
+.tnum {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Wide content scrolls inside its own container. The page body never scrolls
+   horizontally — a P&L block with six columns per division is wide. */
+.scroll-x {
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+}
+
+::selection {
+  background: var(--series-1-wash);
+}
+
+:focus-visible {
+  outline: 2px solid var(--series-1);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
+}
+
+/* Recharts draws its own focus ring on hover surfaces; we supply our own. */
+.recharts-wrapper :focus {
+  outline: none;
+}
+
+.recharts-cartesian-axis-tick text {
+  fill: var(--text-muted);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.recharts-cartesian-grid line {
+  stroke: var(--grid);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}
