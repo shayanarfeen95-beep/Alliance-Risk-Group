@@ -11,6 +11,7 @@ import { drizzle } from 'drizzle-orm/pglite';
 import { migrate } from 'drizzle-orm/pglite/migrator';
 import * as schema from '@/lib/db/schema';
 import type { Database } from '@/lib/db/client';
+import type { SessionUser } from '@/lib/auth/session';
 
 export interface TestDb {
   db: Database;
@@ -52,3 +53,32 @@ export const CLAIMS_MANAGER_USER = {
   canViewConsolidated: false,
   divisionCodes: ['CLAIMS'],
 };
+
+/**
+ * Loads a seeded user as a real `SessionUser`.
+ *
+ * The personas above are fine for pure entitlement logic, but anything that
+ * writes a row referencing `users.id` needs the actual seeded identity — a
+ * synthetic UUID trips the foreign key, which is the constraint doing its job.
+ */
+export async function loadSeededUser(db: Database, email: string): Promise<SessionUser> {
+  const { users, userDivisionAccess } = await import('@/lib/db/schema');
+  const { eq, sql } = await import('drizzle-orm');
+
+  const [row] = await db.select().from(users).where(sql`lower(${users.email}) = lower(${email})`).limit(1);
+  if (!row) throw new Error(`Seeded user ${email} not found.`);
+
+  const access = await db
+    .select({ divisionCode: userDivisionAccess.divisionCode })
+    .from(userDivisionAccess)
+    .where(eq(userDivisionAccess.userId, row.id));
+
+  return {
+    id: row.id,
+    email: row.email,
+    name: row.name,
+    role: row.role as SessionUser['role'],
+    canViewConsolidated: row.canViewConsolidated,
+    divisionCodes: access.map((a) => a.divisionCode),
+  };
+}
