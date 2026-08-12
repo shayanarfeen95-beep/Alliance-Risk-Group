@@ -1,6 +1,6 @@
 import type { Metadata } from 'next';
 import { desc, sql } from 'drizzle-orm';
-import { CircleAlert, CircleCheck, CircleHelp, Plug, Unplug } from 'lucide-react';
+import { CircleAlert, CircleCheck, CircleHelp, Download, Plug, Unplug } from 'lucide-react';
 import { getDb } from '@/lib/db/client';
 import * as t from '@/lib/db/schema';
 import { getSessionUser } from '@/lib/auth/session';
@@ -46,6 +46,13 @@ export default async function AdminPage() {
 
   const connectors = connectorStatuses();
 
+  // The pack is anchored on the configured reporting month rather than today's
+  // date: exporting an unclosed month by accident is the sort of thing that
+  // makes it into a board deck.
+  const packMonth = (
+    config.find((row) => row.key === 'DEFAULT_REPORTING_MONTH')?.value ?? ''
+  ).slice(0, 7);
+
   return (
     <div className="space-y-6">
       <header>
@@ -54,6 +61,32 @@ export default async function AdminPage() {
           Connections, controls, open decisions and the audit trail
         </p>
       </header>
+
+      {/* --- Audit pack ---------------------------------------------------- */}
+      <section>
+        <SectionTitle hint="Everything a reviewer needs to check a figure without this app">
+          Audit pack
+        </SectionTitle>
+        <Card padded>
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <p className="max-w-xl text-[12px] leading-relaxed text-[var(--text-muted)]">
+              A zip containing every metric as the dashboards resolved it, the definition and
+              formula behind each one, the underlying profit-and-loss rows, the reconciliation
+              controls run fresh at export, the provenance of every load, the forecast lock history,
+              and the full assistant log including refusals. It contains what you can see and
+              nothing more.
+            </p>
+            <a
+              href={`/api/export/audit-pack?month=${packMonth}`}
+              className="flex shrink-0 items-center gap-1.5 rounded-[5px] border px-3 py-1.5 text-[12px] font-medium transition-colors hover:bg-[var(--surface-2)]"
+              style={{ borderColor: 'var(--border)' }}
+            >
+              <Download size={13} aria-hidden />
+              Download {packMonth} pack
+            </a>
+          </div>
+        </Card>
+      </section>
 
       {/* --- Connectors --------------------------------------------------- */}
       <section>

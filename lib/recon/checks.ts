@@ -489,6 +489,22 @@ export async function persistFindings(
 ): Promise<void> {
   if (findings.length === 0) return;
 
+  // One timestamp for the whole run, set here rather than left to the column
+  // default.
+  //
+  // This is load-bearing. Every reader — the status chip, the Admin table, the
+  // agent's recon tool, the audit pack — selects the latest run with
+  // `ran_at = (select max(ran_at) ...)`. The rows are inserted in chunks, and
+  // each chunk is its own transaction, so a column default of `now()` stamps
+  // each chunk with a different time and `max(ran_at)` returns only the last
+  // one. A failing control in any earlier chunk would then be invisible
+  // everywhere, while the chip reported a confident green.
+  //
+  // Rule 2 is that a dashboard says so when a check fails rather than quietly
+  // displaying a wrong number. A partitioned run breaks that silently, which is
+  // the worst way for it to break.
+  const ranAt = new Date();
+
   const rows = findings.map((f) => ({
     checkId: f.checkId,
     checkName: f.checkName,
@@ -500,6 +516,7 @@ export async function persistFindings(
     variance: f.variance ? f.variance.toFixed(4) : null,
     detail: f.detail,
     loadRunId: loadRunId ?? null,
+    ranAt,
   }));
 
   for (let i = 0; i < rows.length; i += 400) {

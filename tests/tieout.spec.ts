@@ -31,7 +31,9 @@ import {
   DIVISION_CODES,
   TIE_OUT_MONTH,
 } from '@/lib/seed/reference';
-import { runAllChecks } from '@/lib/recon/checks';
+import { runAllChecks, persistFindings } from '@/lib/recon/checks';
+import { sql } from 'drizzle-orm';
+import * as t from '@/lib/db/schema';
 import { KPI_REGISTRY } from '@/lib/semantic/registry';
 import { ScopeError } from '@/lib/auth/scope';
 
@@ -268,6 +270,48 @@ describe('Test 3 & 4 — balance sheet and aging controls', () => {
     const failures = summary.findings.filter((f) => f.status === 'FAIL');
     expect(failures.map((f) => `${f.checkName} ${f.periodMonth ?? ''} ${f.divisionCode ?? ''}`)).toEqual([]);
     expect(summary.passed).toBeGreaterThan(500);
+  });
+
+  it('a persisted run is readable as one run, not as its last chunk', async () => {
+    // The findings are inserted in chunks, and every reader in the app selects
+    // the latest run with `ran_at = (select max(ran_at) ...)`. If each chunk got
+    // its own timestamp, that query would return only the final chunk — and a
+    // failing control in an earlier one would be invisible everywhere while the
+    // status chip reported green. Rule 2 says a failing check must surface.
+    const summary = await runAllChecks(harness.db);
+    expect(summary.findings.length).toBeGreaterThan(400); // more than one chunk
+
+    await persistFindings(harness.db, summary.findings);
+
+    const [latest] = await harness.db
+      .select({ count: sql<number>`count(*)::int` })
+      .from(t.reconResult)
+      .where(sql`ran_at = (select max(ran_at) from recon_result)`);
+
+    expect(latest!.count).toBe(summary.findings.length);
+  });
+
+  it('a failing check in the first chunk is still visible after persisting', async () => {
+    const summary = await runAllChecks(harness.db);
+    const findings = [...summary.findings];
+
+    // Plant a failure at the very front, where the old chunking bug buried it.
+    findings[0] = {
+      ...findings[0]!,
+      status: 'FAIL',
+      detail: 'Planted failure — must remain visible to the latest-run query.',
+    };
+
+    await persistFindings(harness.db, findings);
+
+    const visible = await harness.db
+      .select({ detail: t.reconResult.detail })
+      .from(t.reconResult)
+      .where(sql`status = 'FAIL' and ran_at = (select max(ran_at) from recon_result)`);
+
+    expect(visible.map((row) => row.detail)).toContain(
+      'Planted failure — must remain visible to the latest-run query.',
+    );
   });
 
   it('DSO uses actual calendar days and the month-end A/R balance', () => {
