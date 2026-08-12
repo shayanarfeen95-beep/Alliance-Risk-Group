@@ -1,7 +1,8 @@
 import { Suspense } from 'react';
+import { TriangleAlert } from 'lucide-react';
 import { redirect } from 'next/navigation';
 import { getSessionUser } from '@/lib/auth/session';
-import { getDb } from '@/lib/db/client';
+import { getDb, isDemoMode } from '@/lib/db/client';
 import { canSeeConsolidated, scopeDivisions } from '@/lib/auth/scope';
 import { loadShellData } from '@/lib/dashboards/shell';
 import { GlobalControls } from '@/components/shell/global-controls';
@@ -36,6 +37,30 @@ export default async function AppLayout({ children }: { children: React.ReactNod
         <Suspense fallback={<div className="h-[49px] border-b" style={{ borderColor: 'var(--border)' }} />}>
           <GlobalControls shell={shell} />
         </Suspense>
+
+        {/* A demo instance says so, on every page. The figures are the spec's
+            published ones and the controls are real, but the warehouse is
+            in-memory and resets — and a reader who assumed otherwise would
+            reasonably treat this as ARG's live reporting. */}
+        {isDemoMode() && (
+          <div
+            className="flex items-center gap-2 border-b px-6 py-2 text-[11.5px]"
+            style={{
+              borderColor: 'var(--border)',
+              background: 'var(--status-warning-wash)',
+              color: 'var(--text-secondary)',
+            }}
+          >
+            <TriangleAlert size={13} className="shrink-0" style={{ color: 'var(--status-warning)' }} aria-hidden />
+            <span>
+              <strong className="font-semibold">Demonstration instance.</strong> The warehouse is
+              seeded in memory from the build spec&rsquo;s published figures and resets when the
+              instance recycles. QuickBooks, HubSpot and Sheets are not connected. Set{' '}
+              <code className="font-[var(--font-mono)]">DATABASE_URL</code> to point this at a real
+              Postgres.
+            </span>
+          </div>
+        )}
         {/* Bottom padding clears the floating assistant launcher. */}
         <main className="min-w-0 flex-1 px-6 pb-24 pt-5">{children}</main>
       </div>

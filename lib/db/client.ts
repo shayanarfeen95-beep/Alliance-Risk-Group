@@ -23,6 +23,7 @@ export type Database = PgliteDatabase<typeof schema> | PostgresJsDatabase<typeof
 const globalForDb = globalThis as unknown as {
   __argDb?: Database;
   __argDbClose?: () => Promise<void>;
+  __argBootstrap?: Promise<void>;
 };
 
 export const DATA_DIR = process.env.PGLITE_DATA_DIR ?? '.pgdata';
@@ -40,8 +41,12 @@ async function create(): Promise<Database> {
   }
 
   const { PGlite } = await import('@electric-sql/pglite');
-  // ':memory:' keeps the test suite hermetic; the dev server persists to disk.
-  const dataDir = process.env.PGLITE_IN_MEMORY === '1' ? undefined : DATA_DIR;
+  // In-memory keeps the test suite hermetic; the dev server persists to disk.
+  // Demo mode is always in-memory — a serverless filesystem is read-only, and
+  // an instance that cannot write its data directory fails at import time with
+  // an error that looks nothing like its cause.
+  const dataDir =
+    process.env.PGLITE_IN_MEMORY === '1' || isDemoMode() ? undefined : DATA_DIR;
   const client = await PGlite.create(dataDir);
   globalForDb.__argDbClose = async () => {
     await client.close();
@@ -49,9 +54,60 @@ async function create(): Promise<Database> {
   return drizzlePglite(client, { schema });
 }
 
+/**
+ * Demo mode.
+ *
+ * With `DEMO_MODE=1` and no `DATABASE_URL`, an instance brings up its own
+ * in-memory Postgres, applies the real migrations and loads the seed on first
+ * use. That makes the app explorable from a bare deployment with no database
+ * provisioned — which is the only way a reviewer sees it before ARG's own
+ * QuickBooks credentials exist.
+ *
+ * Two things are true of this mode and both matter:
+ *
+ *   - It is **ephemeral**. Each serverless instance holds its own copy, so a
+ *     write in one request may not be visible to the next, and everything
+ *     resets when the instance recycles. It is a demonstration, not a
+ *     deployment.
+ *   - It is **opt-in**. Setting `DATABASE_URL` takes precedence and this code
+ *     never runs. A real deployment cannot accidentally end up seeded, and a
+ *     seeded instance cannot be mistaken for one — the app labels it.
+ *
+ * The seed is the same deterministic dataset the test suite ties out against,
+ * so the figures on a demo instance are the spec's published figures rather
+ * than plausible-looking noise.
+ */
+export function isDemoMode(): boolean {
+  return process.env.DEMO_MODE === '1' && !process.env.DATABASE_URL;
+}
+
+async function bootstrapDemo(db: Database): Promise<void> {
+  const { migrate } = await import('drizzle-orm/pglite/migrator');
+  const { seedDatabase } = await import('@/lib/seed/load');
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  await migrate(db as any, { migrationsFolder: 'lib/db/migrations' });
+  await seedDatabase(db, { quiet: true });
+}
+
 export async function getDb(): Promise<Database> {
   if (!globalForDb.__argDb) {
-    globalForDb.__argDb = await create();
+    const db = await create();
+
+    if (isDemoMode()) {
+      // Held as a promise rather than a boolean: concurrent requests during a
+      // cold start must await the same bootstrap, not race to run four of them
+      // against the same database.
+      globalForDb.__argBootstrap ??= bootstrapDemo(db).catch((error) => {
+        // A failed bootstrap must not be cached as done — the next request
+        // should retry rather than serve an empty warehouse as if it were real.
+        globalForDb.__argBootstrap = undefined;
+        throw error;
+      });
+      await globalForDb.__argBootstrap;
+    }
+
+    globalForDb.__argDb = db;
   }
   return globalForDb.__argDb;
 }
