@@ -520,7 +520,7 @@ const listSources: ToolDefinition = {
   async run() {
     return {
       result: {
-        sources: connectorStatuses().map((connector) => ({
+        sources: (await connectorStatuses()).map((connector) => ({
           source: connector.sourceSystem,
           label: connector.label,
           connected: connector.isConfigured,
@@ -602,7 +602,7 @@ const planExtraction: ToolDefinition = {
           reason: input.reason ?? null,
           months: months.length,
           closedMonths: closed,
-          connected: connector.isConfigured(),
+          connected: await connector.isConfigured(),
         },
       })
       .returning();
@@ -615,9 +615,9 @@ const planExtraction: ToolDefinition = {
         entity,
         window: `${windowStart.slice(0, 7)} → ${windowEnd.slice(0, 7)}`,
         months: months.length,
-        connected: connector.isConfigured(),
+        connected: await connector.isConfigured(),
         closedMonthsInWindow: closed.map((month) => month.slice(0, 7)),
-        instruction: connector.isConfigured()
+        instruction: (await connector.isConfigured())
           ? 'Nothing has been written. Tell the user what you plan to pull and that they must confirm it. The confirm control is already on screen — do not ask them to type anything.'
           : `${connector.label} has no credentials configured, so this pull cannot run yet. Say so plainly and stop; do not pretend to have pulled anything.`,
       },
@@ -626,7 +626,7 @@ const planExtraction: ToolDefinition = {
         label: `Pull ${entity.replace(/_/g, ' ')} from ${connector.label}`,
         detail: `${windowStart.slice(0, 7)} through ${windowEnd.slice(0, 7)} · ${months.length} month${months.length === 1 ? '' : 's'}${
           closed.length ? ` · ${closed.length} closed month${closed.length === 1 ? '' : 's'} will be skipped` : ''
-        }${connector.isConfigured() ? '' : ' · source not connected'}`,
+        }${(await connector.isConfigured()) ? '' : ' · source not connected'}`,
       },
       activity: `Prepared a ${connector.label} extraction for review`,
     };
@@ -708,7 +708,7 @@ export async function confirmExtraction(
   }
 
   const connector = getConnector(run.sourceSystem as SourceSystemCode);
-  if (!connector.isConfigured()) {
+  if (!(await connector.isConfigured())) {
     await db
       .update(t.loadRun)
       .set({

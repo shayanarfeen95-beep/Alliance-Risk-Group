@@ -49,8 +49,14 @@ export interface SourceConnector {
   readonly label: string;
   /** Entities this connector can fetch — surfaced to the agent as options. */
   entities(): EntityDescriptor[];
-  /** True when credentials are present. Drives the "not connected" UI state. */
-  isConfigured(): boolean;
+  /**
+   * True when usable credentials exist, from the store or the environment.
+   *
+   * Asynchronous because credentials live in the database once somebody has
+   * clicked Connect. A synchronous version could only read `process.env`, and
+   * would report a connected source as unconnected — or worse, the reverse.
+   */
+  isConfigured(): Promise<boolean>;
   fetch(entity: string, window: FetchWindow): Promise<RawBatch>;
 }
 

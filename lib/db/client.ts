@@ -33,7 +33,20 @@ async function create(): Promise<Database> {
 
   if (url) {
     const { default: postgres } = await import('postgres');
-    const client = postgres(url, { max: 10, prepare: false });
+
+    // Serverless changes the right pool shape. Each instance handles one
+    // request at a time, so a pool of ten opens nine idle connections per
+    // instance and exhausts Neon's connection limit under any real traffic.
+    // `prepare: false` is required by pgbouncer in transaction mode, which is
+    // what Neon's pooled endpoint runs.
+    const serverless = Boolean(process.env.VERCEL);
+    const client = postgres(url, {
+      max: serverless ? 1 : 10,
+      prepare: false,
+      idle_timeout: serverless ? 20 : undefined,
+      connect_timeout: 15,
+    });
+
     globalForDb.__argDbClose = async () => {
       await client.end();
     };
@@ -105,6 +118,13 @@ export async function getDb(): Promise<Database> {
         throw error;
       });
       await globalForDb.__argBootstrap;
+    } else if (process.env.DATABASE_URL) {
+      // A real database brings itself up to schema on first use. An operator
+      // pointing at an empty Neon database should get a working app, not
+      // "relation does not exist" on every route until they remember to run a
+      // migration from their laptop.
+      const { ensureSchema } = await import('./bootstrap');
+      await ensureSchema(db);
     }
 
     globalForDb.__argDb = db;

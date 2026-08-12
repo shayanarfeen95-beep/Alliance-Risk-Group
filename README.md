@@ -17,6 +17,36 @@ pnpm dev                            # http://localhost:3000
 
 Sign in as `cfo@westportfinancial.com` / `westport2026` (development only).
 
+## Deploying
+
+Three env vars, in increasing order of seriousness:
+
+| Want | Set |
+|---|---|
+| A live demo, no database | `DEMO_MODE=1` (already in `vercel.json`) |
+| A real deployment | `DATABASE_URL` — a Neon pooled connection string |
+| Connectable sources | `CREDENTIAL_KEY`, plus each provider's client id/secret |
+
+`DATABASE_URL` takes precedence over `DEMO_MODE`, so the same deployment starts
+as a self-seeding demo and becomes real the moment a database is attached —
+nothing to un-set. Migrations apply themselves on first request behind a
+Postgres advisory lock, and the first visit offers a setup screen to create the
+first administrator.
+
+**Postgres specifically, not Redis.** The guarantees in the table below are
+database objects — a trigger, CHECK constraints, plpgsql. A key-value store
+cannot hold them, so it would not be the same system.
+
+## Connecting QuickBooks, HubSpot and Sheets
+
+From **Admin → Source connections**: OAuth for QuickBooks and HubSpot, a pasted
+private-app token for HubSpot if you prefer, a service account for Sheets.
+Credentials are AES-256-GCM encrypted before they reach the database, verified
+against the provider before they are stored, and QuickBooks' rotating refresh
+token is written back on every refresh — the omission that kills a QBO
+integration months after anyone last looked at it. See
+[`docs/RUNBOOK.md`](docs/RUNBOOK.md).
+
 ---
 
 ## The decision everything else follows from

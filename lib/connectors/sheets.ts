@@ -17,6 +17,7 @@ import {
   type RawRecord,
   type SourceConnector,
 } from './types';
+import { isConnected, loadCredential } from './credentials';
 
 const TOKEN_URL = 'https://oauth2.googleapis.com/token';
 const SCOPE = 'https://www.googleapis.com/auth/spreadsheets.readonly';
@@ -53,8 +54,9 @@ let tokenCache: TokenCache | null = null;
 async function accessToken(): Promise<string> {
   if (tokenCache && tokenCache.expiresAt > Date.now() + 60_000) return tokenCache.accessToken;
 
-  const email = process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL;
-  const rawKey = process.env.GOOGLE_PRIVATE_KEY;
+  const credential = await loadCredential('SHEETS');
+  const email = credential?.data.clientEmail;
+  const rawKey = credential?.data.privateKey;
   if (!email || !rawKey) throw new ConnectorNotConfiguredError('SHEETS');
 
   // Env vars carry the PEM with literal \n sequences.
@@ -115,20 +117,17 @@ export const sheetsConnector: SourceConnector = {
 
   entities: () => ENTITIES,
 
-  isConfigured: () =>
-    Boolean(
-      process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL &&
-        process.env.GOOGLE_PRIVATE_KEY &&
-        process.env.GOOGLE_BUDGET_SPREADSHEET_ID,
-    ),
+  isConfigured: () => isConnected('SHEETS'),
 
   async fetch(entity: string, window: FetchWindow): Promise<RawBatch> {
-    if (!sheetsConnector.isConfigured()) throw new ConnectorNotConfiguredError('SHEETS');
+    if (!(await sheetsConnector.isConfigured())) throw new ConnectorNotConfiguredError('SHEETS');
 
     const range = RANGES[entity];
     if (!range) throw new Error(`Unknown Sheets entity "${entity}".`);
 
-    const values = await readRange(process.env.GOOGLE_BUDGET_SPREADSHEET_ID!, range);
+    const spreadsheetId = (await loadCredential('SHEETS'))?.data.spreadsheetId;
+    if (!spreadsheetId) throw new ConnectorNotConfiguredError('SHEETS');
+    const values = await readRange(spreadsheetId, range);
     const records: RawRecord[] = [{ entity, key: range, payload: { range, values } }];
 
     return { sourceSystem: 'SHEETS', entity, window, records, fetchedAt: new Date() };

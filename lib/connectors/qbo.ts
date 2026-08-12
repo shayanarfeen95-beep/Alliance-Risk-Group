@@ -19,6 +19,7 @@ import {
   type RawRecord,
   type SourceConnector,
 } from './types';
+import { isConnected, loadCredential, saveCredential } from './credentials';
 
 const TOKEN_URL = 'https://oauth.platform.intuit.com/oauth2/v1/tokens/bearer';
 
@@ -87,9 +88,10 @@ async function accessToken(): Promise<string> {
     return tokenCache.accessToken;
   }
 
-  const clientId = process.env.QBO_CLIENT_ID;
-  const clientSecret = process.env.QBO_CLIENT_SECRET;
-  const refreshToken = process.env.QBO_REFRESH_TOKEN;
+  const credential = await loadCredential('QBO');
+  if (!credential) throw new ConnectorNotConfiguredError('QBO');
+
+  const { clientId, clientSecret, refreshToken } = credential.data;
   if (!clientId || !clientSecret || !refreshToken) throw new ConnectorNotConfiguredError('QBO');
 
   const response = await requestWithRetry(
@@ -106,7 +108,28 @@ async function accessToken(): Promise<string> {
     'QBO',
   );
 
-  const json = (await response.json()) as { access_token: string; expires_in: number };
+  const json = (await response.json()) as {
+    access_token: string;
+    expires_in: number;
+    refresh_token?: string;
+  };
+
+  // Intuit ROTATES the refresh token on every use and expires the old one. If
+  // the new value is not written back, the connection works today and dies
+  // silently the next time the cached access token lapses. This one line is the
+  // difference between a connector that lasts and one that fails in a month.
+  if (json.refresh_token && json.refresh_token !== refreshToken && credential.origin === 'database') {
+    await saveCredential({
+      sourceSystem: 'QBO',
+      authMethod: 'OAUTH',
+      data: { ...credential.data, refreshToken: json.refresh_token },
+      accountLabel: credential.accountLabel,
+      accountId: credential.accountId,
+      scopes: credential.scopes,
+      expiresAt: new Date(Date.now() + json.expires_in * 1000),
+    });
+  }
+
   tokenCache = {
     accessToken: json.access_token,
     expiresAt: Date.now() + json.expires_in * 1000,
@@ -115,7 +138,8 @@ async function accessToken(): Promise<string> {
 }
 
 async function callApi(path: string, params: Record<string, string>): Promise<unknown> {
-  const realmId = process.env.QBO_REALM_ID;
+  const credential = await loadCredential('QBO');
+  const realmId = credential?.data.realmId;
   if (!realmId) throw new ConnectorNotConfiguredError('QBO');
 
   const url = new URL(`${baseUrl()}/v3/company/${realmId}/${path}`);
@@ -167,16 +191,10 @@ export const qboConnector: SourceConnector = {
 
   entities: () => ENTITIES,
 
-  isConfigured: () =>
-    Boolean(
-      process.env.QBO_CLIENT_ID &&
-        process.env.QBO_CLIENT_SECRET &&
-        process.env.QBO_REFRESH_TOKEN &&
-        process.env.QBO_REALM_ID,
-    ),
+  isConfigured: () => isConnected('QBO'),
 
   async fetch(entity: string, window: FetchWindow): Promise<RawBatch> {
-    if (!qboConnector.isConfigured()) throw new ConnectorNotConfiguredError('QBO');
+    if (!(await qboConnector.isConfigured())) throw new ConnectorNotConfiguredError('QBO');
 
     let records: RawRecord[];
 

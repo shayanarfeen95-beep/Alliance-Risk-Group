@@ -18,6 +18,7 @@ import {
   type RawRecord,
   type SourceConnector,
 } from './types';
+import { isConnected, loadCredential } from './credentials';
 
 const API = 'https://api.hubapi.com';
 
@@ -70,8 +71,9 @@ const ENTITIES: EntityDescriptor[] = [
   },
 ];
 
-function token(): string {
-  const value = process.env.HUBSPOT_ACCESS_TOKEN;
+async function token(): Promise<string> {
+  const credential = await loadCredential('HUBSPOT');
+  const value = credential?.data.accessToken;
   if (!value) throw new ConnectorNotConfiguredError('HUBSPOT');
   return value;
 }
@@ -95,7 +97,7 @@ async function fetchAll(
 
     const response = await requestWithRetry(
       url.toString(),
-      { headers: { Authorization: `Bearer ${token()}`, Accept: 'application/json' } },
+      { headers: { Authorization: `Bearer ${(await token())}`, Accept: 'application/json' } },
       'HUBSPOT',
     );
 
@@ -119,10 +121,10 @@ export const hubspotConnector: SourceConnector = {
 
   entities: () => ENTITIES,
 
-  isConfigured: () => Boolean(process.env.HUBSPOT_ACCESS_TOKEN),
+  isConfigured: () => isConnected('HUBSPOT'),
 
   async fetch(entity: string, window: FetchWindow): Promise<RawBatch> {
-    if (!hubspotConnector.isConfigured()) throw new ConnectorNotConfiguredError('HUBSPOT');
+    if (!(await hubspotConnector.isConfigured())) throw new ConnectorNotConfiguredError('HUBSPOT');
 
     let records: RawRecord[];
 

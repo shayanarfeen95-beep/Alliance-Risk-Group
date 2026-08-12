@@ -319,3 +319,43 @@ describe('every tool call is logged for the audit pass', () => {
     expect(after.length).toBe(before.length + 1);
   });
 });
+
+describe('connection state is resolved, never assumed', () => {
+  it('every connector reports connection state asynchronously', async () => {
+    // Credentials live in the database once somebody clicks Connect, so a
+    // synchronous answer could only read process.env. Any connector returning a
+    // plain boolean here is reporting a guess.
+    for (const connector of CONNECTORS) {
+      const result = connector.isConfigured();
+      expect(result, connector.sourceSystem).toBeInstanceOf(Promise);
+      expect(await result, connector.sourceSystem).toBe(false);
+    }
+  });
+
+  it('confirming an extraction against a disconnected source writes nothing', async () => {
+    const tool = toolByName('plan_extraction')!;
+    const planned = await tool.run(
+      { source: 'QBO', entity: 'profit_and_loss', fromMonth: '2026-03', toMonth: '2026-03' },
+      context,
+    );
+    const runId = (planned.result as { loadRunId: string }).loadRunId;
+
+    const outcome = await confirmExtraction(harness.db, CFO_USER, runId);
+    expect(outcome.ok).toBe(false);
+    expect(outcome.message).toMatch(/not connected|credentials/i);
+
+    // The run is closed out as failed rather than left dangling in RUNNING,
+    // and no raw payload was landed.
+    const [row] = await harness.db
+      .select({ status: t.loadRun.status })
+      .from(t.loadRun)
+      .where(eq(t.loadRun.id, runId));
+    expect(row!.status).toBe('FAILED');
+
+    const payloads = await harness.db
+      .select({ id: t.rawPayload.id })
+      .from(t.rawPayload)
+      .where(eq(t.rawPayload.loadRunId, runId));
+    expect(payloads).toHaveLength(0);
+  });
+});

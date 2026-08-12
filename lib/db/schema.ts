@@ -883,3 +883,52 @@ export const appConfig = pgTable('app_config', {
   updatedBy: uuid('updated_by').references(() => users.id),
   updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
 });
+
+// ---------------------------------------------------------------------------
+// Source credentials
+// ---------------------------------------------------------------------------
+
+/**
+ * Credentials for a source system, one row per source.
+ *
+ * `secret` is ciphertext (see lib/crypto/secrets.ts), never a token. Everything
+ * else is deliberately readable: an operator has to be able to see which
+ * QuickBooks company is linked and when the token expires without decrypting
+ * anything, or nobody will trust the connection state shown on screen.
+ */
+export const connectorCredential = pgTable('connector_credential', {
+  sourceSystem: text('source_system').primaryKey(),
+  /** 'CONNECTED' | 'EXPIRED' | 'ERROR' */
+  status: text('status').notNull().default('CONNECTED'),
+  /** 'OAUTH' | 'TOKEN' | 'SERVICE_ACCOUNT' */
+  authMethod: text('auth_method').notNull(),
+  secret: text('secret').notNull(),
+  /** Human-readable target, e.g. the QuickBooks company name. */
+  accountLabel: text('account_label'),
+  /** Provider-side identifier — QBO realm id, HubSpot portal id, sheet id. */
+  accountId: text('account_id'),
+  scopes: text('scopes'),
+  expiresAt: timestamp('expires_at', { withTimezone: true }),
+  lastRefreshedAt: timestamp('last_refreshed_at', { withTimezone: true }),
+  lastError: text('last_error'),
+  connectedByUserId: uuid('connected_by_user_id').references(() => users.id),
+  connectedAt: timestamp('connected_at', { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+});
+
+/** Single-use CSRF state for the OAuth round trip. Deleted on use. */
+export const oauthState = pgTable(
+  'oauth_state',
+  {
+    state: text('state').primaryKey(),
+    sourceSystem: text('source_system').notNull(),
+    userId: uuid('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    redirectTo: text('redirect_to'),
+    codeVerifier: text('code_verifier'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
+  },
+  (t) => [index('oauth_state_expiry_idx').on(t.expiresAt)],
+);

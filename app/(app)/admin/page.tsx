@@ -1,6 +1,8 @@
 import type { Metadata } from 'next';
 import { desc, sql } from 'drizzle-orm';
-import { CircleAlert, CircleCheck, CircleHelp, Download, Plug, Unplug } from 'lucide-react';
+import { CircleAlert, CircleCheck, CircleHelp, Download } from 'lucide-react';
+import { ConnectorCard } from '@/components/admin/connector-card';
+import { can } from '@/lib/auth/scope';
 import { getDb } from '@/lib/db/client';
 import * as t from '@/lib/db/schema';
 import { getSessionUser } from '@/lib/auth/session';
@@ -18,7 +20,15 @@ export const dynamic = 'force-dynamic';
  * guesses. They live here as data, visible, rather than being silently assumed
  * somewhere in the code.
  */
-export default async function AdminPage() {
+export default async function AdminPage({
+  searchParams,
+}: {
+  searchParams: Promise<Record<string, string | string[] | undefined>>;
+}) {
+  const query = await searchParams;
+  const connectError = typeof query.connect_error === 'string' ? query.connect_error : null;
+  const justConnected = typeof query.connected === 'string' ? query.connected : null;
+
   const user = await getSessionUser();
   if (!user) redirect('/login');
 
@@ -44,7 +54,7 @@ export default async function AdminPage() {
     db.select().from(t.auditEvent).orderBy(desc(t.auditEvent.createdAt)).limit(15),
   ]);
 
-  const connectors = connectorStatuses();
+  const connectors = await connectorStatuses();
 
   // The pack is anchored on the configured reporting month rather than today's
   // date: exporting an unclosed month by accident is the sort of thing that
@@ -90,41 +100,46 @@ export default async function AdminPage() {
 
       {/* --- Connectors --------------------------------------------------- */}
       <section>
-        <SectionTitle hint="Sources are read-only — no connector exposes a write operation">
+        <SectionTitle hint="Read-only by construction — no connector exposes a write operation">
           Source connections
         </SectionTitle>
+
+        {/* The result of a connect attempt arrives as a query parameter, because
+            the OAuth callback is a redirect and has nowhere else to put it. */}
+        {connectError && (
+          <div
+            className="mb-3 flex items-start gap-2 rounded-[var(--radius)] border p-3 text-[11.5px] leading-relaxed"
+            style={{ borderColor: 'var(--border)', background: 'var(--status-critical-wash)' }}
+          >
+            <CircleAlert size={13} className="mt-0.5 shrink-0" style={{ color: 'var(--status-critical)' }} aria-hidden />
+            <span>{connectError}</span>
+          </div>
+        )}
+        {justConnected && (
+          <div
+            className="mb-3 flex items-start gap-2 rounded-[var(--radius)] border p-3 text-[11.5px] leading-relaxed"
+            style={{ borderColor: 'var(--border)', background: 'var(--status-good-wash)' }}
+          >
+            <CircleCheck size={13} className="mt-0.5 shrink-0" style={{ color: 'var(--status-good)' }} aria-hidden />
+            <span>
+              {justConnected} is connected. Ask the assistant to pull a month, or wait for the
+              overnight refresh — nothing is written until you confirm it.
+            </span>
+          </div>
+        )}
+
         <div className="grid gap-3 lg:grid-cols-3">
           {connectors.map((connector) => (
-            <Card key={connector.sourceSystem}>
-              <CardHeader
-                title={connector.label}
-                action={
-                  connector.isConfigured ? (
-                    <Chip tone="good" icon={<Plug size={12} aria-hidden />}>
-                      Connected
-                    </Chip>
-                  ) : (
-                    <Chip
-                      tone="warning"
-                      icon={<Unplug size={12} aria-hidden />}
-                      title="No credentials in the environment. The connector reports as not connected rather than returning empty data — an empty result and a missing connection must never look the same."
-                    >
-                      Not configured
-                    </Chip>
-                  )
-                }
-              />
-              <ul className="space-y-1.5">
-                {connector.entities.map((entity) => (
-                  <li key={entity.entity} className="text-[11.5px] leading-snug">
-                    <span className="font-medium">{entity.label}</span>
-                    <span className="ml-1.5 text-[var(--text-muted)]">
-                      {entity.cadence.toLowerCase().replace('_', ' ')}
-                    </span>
-                  </li>
-                ))}
-              </ul>
-            </Card>
+            <ConnectorCard
+              key={connector.sourceSystem}
+              sourceSystem={connector.sourceSystem}
+              label={connector.label}
+              entities={connector.entities}
+              credential={connector.credential}
+              oauthAvailable={connector.oauthAvailable}
+              oauthBlockedReason={connector.oauthBlockedReason}
+              canManage={can(user, 'EDIT_MAPPINGS')}
+            />
           ))}
         </div>
       </section>

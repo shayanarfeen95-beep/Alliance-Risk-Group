@@ -273,3 +273,66 @@ Almost always one of three things, in this order of likelihood:
    directory.
 
 The build logs will not distinguish these; the runtime logs will.
+
+---
+
+## Connecting the source systems
+
+Sources are connected from **Admin → Source connections**. Nothing is typed into
+a config file and no token passes through a developer.
+
+Before anything can be connected, set `CREDENTIAL_KEY` (`openssl rand -base64 32`).
+Credentials are encrypted with AES-256-GCM before they reach the database, and
+without the key the app refuses to store them rather than writing a token in the
+clear — a credential that *looks* protected and is not is worse than an obviously
+unprotected one, because nobody goes back to check.
+
+### QuickBooks Online — one-click
+
+1. Create an app at developer.intuit.com.
+2. Register `https://<your-domain>/api/connect/qbo/callback` as a redirect URI.
+3. Set `QBO_CLIENT_ID` and `QBO_CLIENT_SECRET`.
+4. Admin → **Connect QuickBooks Online** → authorise → done.
+
+The company name and realm id are captured on the callback and shown on the
+card, so it is visible at a glance *which* set of books is connected.
+
+**Intuit rotates the refresh token on every use** and expires the old one. The
+new value is written back automatically on each refresh. Without that the
+connection works for a while and then dies quietly, which is the single most
+common way a QuickBooks integration fails months after anyone touched it.
+
+### HubSpot — one-click, or a pasted token
+
+Either register an OAuth app (`HUBSPOT_CLIENT_ID` / `HUBSPOT_CLIENT_SECRET`) and
+click Connect, or create a private app in HubSpot with the deals, contacts and
+companies **read** scopes and paste its token. For a single portal the private
+app is simpler and there is no reason to prefer OAuth.
+
+### Google Sheets — service account
+
+1. Create a service account in Google Cloud, enable the Sheets API, download the
+   JSON key.
+2. **Share the spreadsheet with the service account's email address** (Viewer).
+3. Admin → **Use a service account** → paste the JSON and the spreadsheet id.
+
+Step 2 is the one that gets forgotten. The credential is therefore verified by
+actually reading the sheet before it is stored — a connection that says
+"connected" and 403s at 3am is worse than one that refuses while you are looking
+at it.
+
+A service account rather than a user grant because the spreadsheet belongs to
+ARG: a service account keeps working when the person who authorised it leaves.
+
+### What disconnecting does
+
+Removes the credential and nothing else. Figures already loaded stay — they are
+ARG's history, they reconciled when they landed, and deleting closed months over
+an administrative action would be indefensible. The source simply stops
+refreshing, and every view already states when it last did.
+
+### Scopes
+
+Read scopes only. Intuit offers no read-only accounting scope, so for QuickBooks
+the guarantee is held where it can be: no connector in this codebase exposes a
+write method (§2 Rule 7).
