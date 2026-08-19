@@ -746,11 +746,33 @@ export async function confirmExtraction(
       );
     }
 
+    // Conform: raw landing → facts. Without this step a load "succeeds" and
+    // not one figure on a dashboard moves, which is the most misleading outcome
+    // a pipeline can produce.
+    let conformLine = '';
+    let rowsWritten = 0;
+
+    if (run.sourceSystem === 'HUBSPOT') {
+      const { conformHubspot, describeConform } = await import('@/lib/etl/hubspot');
+      const conformed = await conformHubspot(
+        db,
+        loadRunId,
+        run.entity,
+        batch.records.map((record) => ({ payload: record.payload })),
+      );
+      rowsWritten = conformed.written;
+      conformLine = ` ${describeConform(conformed)}`;
+    } else {
+      conformLine =
+        ` They are landed and queryable, but ${connector.label} conform is not built yet — no dashboard figure has changed.`;
+    }
+
     await db
       .update(t.loadRun)
       .set({
         status: 'SUCCEEDED',
         rowsRead: batch.records.length,
+        rowsWritten,
         finishedAt: new Date(),
       })
       .where(eq(t.loadRun.id, loadRunId));
@@ -760,12 +782,17 @@ export async function confirmExtraction(
       action: 'AGENT_EXTRACTION_CONFIRMED',
       entity: 'load_run',
       entityId: loadRunId,
-      detail: { source: run.sourceSystem, entity: run.entity, records: batch.records.length },
+      detail: {
+        source: run.sourceSystem,
+        entity: run.entity,
+        records: batch.records.length,
+        rowsWritten,
+      },
     });
 
     return {
       ok: true,
-      message: `Pulled ${batch.records.length} record${batch.records.length === 1 ? '' : 's'} from ${connector.label} and landed them for conforming. Reconciliation runs next.`,
+      message: `Pulled ${batch.records.length} record${batch.records.length === 1 ? '' : 's'} from ${connector.label}.${conformLine} Reconciliation runs next.`,
     };
   } catch (error) {
     await db

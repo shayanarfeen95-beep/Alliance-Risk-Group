@@ -2,6 +2,7 @@ import type { Metadata } from 'next';
 import { desc, eq, sql } from 'drizzle-orm';
 import { CircleAlert, CircleCheck, CircleHelp, Download } from 'lucide-react';
 import { ConnectorCard } from '@/components/admin/connector-card';
+import { HubspotMapping } from '@/components/admin/hubspot-mapping';
 import { UserManager } from '@/components/admin/user-manager';
 import { can } from '@/lib/auth/scope';
 import { getDb } from '@/lib/db/client';
@@ -9,6 +10,11 @@ import * as t from '@/lib/db/schema';
 import { getSessionUser } from '@/lib/auth/session';
 import { redirect } from 'next/navigation';
 import { connectorStatuses } from '@/lib/connectors';
+import {
+  ATTRIBUTION_RULES,
+  loadHubspotMapping,
+  observedAttributionValues,
+} from '@/lib/connectors/hubspot-mapping';
 import { Card, CardHeader, Chip, DataTable, SectionTitle, Td, Th } from '@/components/ui/primitives';
 
 export const metadata: Metadata = { title: 'Admin' };
@@ -70,6 +76,15 @@ export default async function AdminPage({
   }));
 
   const connectors = await connectorStatuses();
+
+  // Open item 2, made operable: the rule, the values HubSpot actually holds, and
+  // how many deals each of them covers.
+  const hubspotMapping = await loadHubspotMapping(db);
+  const hubspotObserved = await observedAttributionValues(
+    db,
+    hubspotMapping,
+    divisionRows.map((row) => row.divisionCode),
+  );
 
   // The pack is anchored on the configured reporting month rather than today's
   // date: exporting an unclosed month by accident is the sort of thing that
@@ -157,6 +172,37 @@ export default async function AdminPage({
             />
           ))}
         </div>
+      </section>
+
+      {/* --- HubSpot division mapping -------------------------------------- */}
+      <section>
+        <SectionTitle hint="Open item 2 — the rule that decides which division a HubSpot deal belongs to">
+          HubSpot division mapping
+        </SectionTitle>
+        <Card padded>
+          <p className="mb-4 max-w-3xl text-[12px] leading-relaxed text-[var(--text-muted)]">
+            A deal attributed to the wrong division moves revenue between two divisional P&amp;Ls and
+            is invisible at ARG Total, which is how that kind of error survives a year. So the rule
+            lives here as data rather than in code, the values come from what HubSpot actually sent,
+            and anything unmapped stays unattributed rather than being guessed into a division.
+            Saving re-applies the mapping to every deal already landed — no re-fetch.
+          </p>
+          <HubspotMapping
+            rule={hubspotMapping.rule}
+            isConfirmed={hubspotMapping.isConfirmed}
+            property={hubspotMapping.property}
+            values={hubspotMapping.values}
+            observed={hubspotObserved.values}
+            sampledDeals={hubspotObserved.sampledDeals}
+            lastLandedAt={hubspotObserved.lastLandedAt}
+            divisions={divisionRows.map((row) => ({
+              divisionCode: row.divisionCode,
+              divisionName: row.divisionName,
+            }))}
+            rules={ATTRIBUTION_RULES.map((rule) => ({ ...rule }))}
+            canManage={can(user, 'EDIT_MAPPINGS')}
+          />
+        </Card>
       </section>
 
       {/* --- Open items --------------------------------------------------- */}

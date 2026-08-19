@@ -98,6 +98,20 @@ export const SEED_CONFIG = [
     isConfirmed: true,
   },
   {
+    key: 'HUBSPOT_DIVISION_PROPERTY',
+    value: 'division',
+    description:
+      'The HubSpot deal property carrying the division, used when the attribution rule is deal_property. Set from Admin → HubSpot division mapping; it is also added to the properties requested from the HubSpot API on the next pull.',
+    isConfirmed: true,
+  },
+  {
+    key: 'HUBSPOT_DIVISION_MAP',
+    value: '{}',
+    description:
+      'HubSpot source value → ARG division code, as JSON. Empty means nothing has been mapped by hand yet: a value that exactly equals a division code still resolves, and everything else stays unattributed rather than being guessed into a division. Maintained from Admin → HubSpot division mapping.',
+    isConfirmed: true,
+  },
+  {
     key: 'CLAIMS_SYSTEM_OF_RECORD',
     value: '',
     description: 'Open item 3 — the Claims operational system, not yet identified.',
