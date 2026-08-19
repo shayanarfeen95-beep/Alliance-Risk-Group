@@ -18,6 +18,7 @@ import * as t from '@/lib/db/schema';
 import { getSessionUser, type SessionUser } from '@/lib/auth/session';
 import { openSemanticSession, CONSOLIDATED_CODE, type SemanticSession } from '@/lib/semantic/resolve';
 import type { MonthKey } from '@/lib/semantic/periods';
+import { resolveRange, type DateRange } from './range';
 
 export type SearchParams = Record<string, string | string[] | undefined>;
 
@@ -30,6 +31,15 @@ export interface DashboardContext {
   availableMonths: MonthKey[];
   divisions: Array<{ divisionCode: string; divisionName: string; sortOrder: number }>;
   recon: { failed: number; total: number };
+  /**
+   * The beginning/end filter. Scopes dated event lists and trends; it never
+   * moves the P&L, which stays anchored on the reporting month.
+   */
+  range: DateRange;
+  /** Salespeople with at least one deal, for the Sales owner filter. */
+  owners: string[];
+  /** The selected salesperson, or null for everyone. */
+  ownerName: string | null;
 }
 
 function first(value: string | string[] | undefined): string | undefined {
@@ -97,6 +107,29 @@ export async function loadDashboardContext(
       sql`ran_at = (select max(ran_at) from recon_result)`,
     );
 
+  const range = resolveRange(
+    {
+      from: first(searchParams.from),
+      to: first(searchParams.to),
+      range: first(searchParams.range),
+    },
+    month,
+    availableMonths,
+  );
+
+  // The owner list comes from the deals this user can actually see, so a
+  // division manager's filter does not name reps working other divisions.
+  const owners = [
+    ...new Set(
+      session.bundle.deals
+        .map((deal) => deal.ownerName)
+        .filter((name): name is string => Boolean(name)),
+    ),
+  ].sort();
+
+  const requestedOwner = first(searchParams.owner);
+  const ownerName = requestedOwner && owners.includes(requestedOwner) ? requestedOwner : null;
+
   return {
     user,
     session,
@@ -104,6 +137,9 @@ export async function loadDashboardContext(
     availableMonths,
     divisions: session.bundle.divisions,
     recon: { failed: reconRow?.failed ?? 0, total: reconRow?.total ?? 0 },
+    range,
+    owners,
+    ownerName,
   };
 }
 

@@ -6,7 +6,8 @@ import { formatMonth } from '@/lib/semantic/periods';
 import { formatNumber } from '@/lib/format';
 import { KpiTile } from '@/components/dashboard/kpi-tile';
 import { ChartCard } from '@/components/charts/chart-card';
-import { Card, CardHeader, DataTable, Td, Th, Unavailable } from '@/components/ui/primitives';
+import { Card, CardHeader, DataTable, SectionTitle, Td, Th, Unavailable } from '@/components/ui/primitives';
+import { OwnerFilter } from '@/components/dashboard/owner-filter';
 
 export const metadata: Metadata = { title: 'Sales' };
 export const dynamic = 'force-dynamic';
@@ -17,9 +18,9 @@ export default async function SalesPage({
   searchParams: Promise<SearchParams>;
 }) {
   const context = await loadDashboardContext(await searchParams);
-  const { session, divisionCode } = context;
+  const { session, divisionCode, range, owners, ownerName } = context;
   const colors = buildDivisionColorMap(session.bundle.divisions);
-  const model = loadSales(session, divisionCode, colors);
+  const model = loadSales(session, divisionCode, colors, { range, ownerName });
 
   const divisionLabel =
     divisionCode === 'ARG_TOTAL'
@@ -107,17 +108,69 @@ export default async function SalesPage({
         height={240}
       />
 
+      {/* Per-salesperson performance — the leaderboard leadership asked for. */}
+      <section>
+        <SectionTitle hint="Closed in the selected date range, by the person who owns the deal">
+          By salesperson
+        </SectionTitle>
+        <Card>
+          {model.bySalesperson.length === 0 ? (
+            <p className="text-[12px] text-[var(--text-muted)]">
+              No deals closed or open in {model.dealScope.rangeLabel}.
+            </p>
+          ) : (
+            <DataTable>
+              <thead>
+                <tr>
+                  <Th align="left">Salesperson</Th>
+                  <Th>Won</Th>
+                  <Th>Value won</Th>
+                  <Th>Lost</Th>
+                  <Th>Win rate</Th>
+                  <Th>Open</Th>
+                  <Th>Open value</Th>
+                </tr>
+              </thead>
+              <tbody>
+                {model.bySalesperson.map((row) => (
+                  <tr key={row.owner}>
+                    <Td align="left" numeric={false}>
+                      {row.owner}
+                    </Td>
+                    <Td>{row.won}</Td>
+                    <Td>{formatNumber(row.wonValue, 'currency')}</Td>
+                    <Td muted>{row.lost}</Td>
+                    {/* Null rather than 0% when nothing closed — a rep with no
+                        closed deals has no win rate, which is not the same as
+                        losing every one. */}
+                    <Td muted>{row.winRate === null ? '—' : `${Math.round(row.winRate * 100)}%`}</Td>
+                    <Td muted>{row.open}</Td>
+                    <Td muted>{formatNumber(row.openValue, 'currency')}</Td>
+                  </tr>
+                ))}
+              </tbody>
+            </DataTable>
+          )}
+        </Card>
+      </section>
+
       {/* §9.3: a deal-level table behind every tile. */}
       <Card>
         <CardHeader
           title="Deals"
-          subtitle={`Deals closed in ${formatMonth(session.period.month)}, plus everything still open. Sales leadership will not trust an aggregate they cannot open.`}
+          subtitle={
+            model.dealScope.ownerName
+              ? `${model.dealScope.ownerName}'s deals closed in ${model.dealScope.rangeLabel}, plus everything still open.`
+              : `Deals closed in ${model.dealScope.rangeLabel}, plus everything still open. Sales leadership will not trust an aggregate they cannot open.`
+          }
+          action={<OwnerFilter owners={owners} selected={ownerName} />}
         />
-        <DataTable>
+        <DataTable maxHeight={520}>
           <thead>
             <tr>
               <Th align="left">Deal</Th>
               <Th align="left">Division</Th>
+              <Th align="left">Salesperson</Th>
               <Th align="left">Stage</Th>
               <Th align="left">Status</Th>
               <Th>Amount</Th>
@@ -134,6 +187,9 @@ export default async function SalesPage({
                 </Td>
                 <Td align="left" numeric={false} muted>
                   {deal.divisionCode ?? 'Unattributed'}
+                </Td>
+                <Td align="left" numeric={false} muted>
+                  {deal.owner}
                 </Td>
                 <Td align="left" numeric={false} muted>
                   {deal.dealstage}
@@ -172,8 +228,14 @@ export default async function SalesPage({
           </tbody>
         </DataTable>
         {model.deals.length === 0 ? (
-          <p className="pt-3 text-[12px] text-[var(--text-muted)]">No deals in scope.</p>
-        ) : null}
+          <p className="pt-3 text-[12px] text-[var(--text-muted)]">
+            No deals match these filters in {model.dealScope.rangeLabel}.
+          </p>
+        ) : (
+          <p className="pt-3 text-[11px] text-[var(--text-muted)]">
+            Showing {model.dealScope.shown} of {model.dealScope.total} deals, largest first.
+          </p>
+        )}
       </Card>
     </div>
   );

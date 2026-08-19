@@ -154,6 +154,7 @@ export interface DealRow {
   closedate: Date | null;
   enteredProposalAt: Date | null;
   ownerId: string;
+  ownerName: string;
   contactId: string;
 }
 
@@ -722,7 +723,20 @@ const LEAD_SOURCES = [
   'OFFLINE',
 ] as const;
 
-const OWNERS = ['owner-1', 'owner-2', 'owner-3', 'owner-4', 'owner-5'];
+/**
+ * ARG's sales reps.
+ *
+ * Named rather than numbered because leadership asked to filter sales by
+ * person, and a dropdown of "owner-3" is a dropdown nobody opens. The ids stay
+ * provider-shaped so the seed and a real HubSpot pull have the same structure.
+ */
+const OWNERS: Array<{ ownerId: string; ownerName: string }> = [
+  { ownerId: 'owner-1', ownerName: 'Dana Whitfield' },
+  { ownerId: 'owner-2', ownerName: 'Marcus Ellery' },
+  { ownerId: 'owner-3', ownerName: 'Priya Raghunathan' },
+  { ownerId: 'owner-4', ownerName: 'Tom Bassett' },
+  { ownerId: 'owner-5', ownerName: 'Lena Ortiz' },
+];
 
 interface HubspotData {
   deals: DealRow[];
@@ -788,7 +802,9 @@ function buildHubspot(pl: PlRow[], rand: () => number): HubspotData {
         );
 
         const contactId = `contact-d${dealCounter}`;
-        const ownerId = OWNERS[Math.floor(rand() * OWNERS.length)]!;
+        const owner = OWNERS[Math.floor(rand() * OWNERS.length)]!;
+        const ownerId = owner.ownerId;
+        const ownerName = owner.ownerName;
 
         deals.push({
           dealId,
@@ -803,6 +819,7 @@ function buildHubspot(pl: PlRow[], rand: () => number): HubspotData {
           closedate: isClosed ? closedate : null,
           enteredProposalAt,
           ownerId,
+          ownerName,
           contactId,
         });
 

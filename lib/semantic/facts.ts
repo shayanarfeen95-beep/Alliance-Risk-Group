@@ -72,6 +72,7 @@ export interface DealRecord {
   closedate: Date | null;
   enteredProposalAt: Date | null;
   ownerId: string | null;
+  ownerName: string | null;
 }
 
 export interface ContactRecord {
@@ -411,6 +412,7 @@ export async function loadFactBundle(
       closedate: row.closedate,
       enteredProposalAt: row.enteredProposalAt,
       ownerId: row.ownerId,
+      ownerName: row.ownerName,
     })),
     proposalEntries: proposalRows.filter((row) => inScope(row.divisionCode)),
     contacts: contactRows.filter((row) => inScope(row.divisionCode)).map((row) => ({

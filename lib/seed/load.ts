@@ -375,6 +375,7 @@ export async function seedDatabase(db: Database, options: SeedOptions = {}): Pro
       closedate: r.closedate,
       enteredProposalAt: r.enteredProposalAt,
       ownerId: r.ownerId,
+      ownerName: r.ownerName,
       contactId: r.contactId,
       loadRunId,
     })),

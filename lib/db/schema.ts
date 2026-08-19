@@ -535,12 +535,18 @@ export const factDeal = pgTable(
     /** §6 Sales: from stage history, not current stage. */
     enteredProposalAt: timestamp('entered_proposal_at', { withTimezone: true }),
     ownerId: text('owner_id'),
+    /**
+     * The salesperson's name. Nullable — an unassigned deal is a real state and
+     * must read as "unassigned" rather than vanishing from a filtered view.
+     */
+    ownerName: text('owner_name'),
     contactId: text('contact_id'),
     loadRunId: uuid('load_run_id').references(() => loadRun.id),
   },
   (t) => [
     index('fact_deal_closedate_idx').on(t.closedate),
     index('fact_deal_division_idx').on(t.divisionCode),
+    index('fact_deal_owner_idx').on(t.ownerName),
   ],
 );
 

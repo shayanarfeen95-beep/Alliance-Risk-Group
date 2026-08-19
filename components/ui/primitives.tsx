@@ -191,9 +191,28 @@ export function EmptyState({ title, detail }: { title: string; detail: string })
 // Tables
 // ---------------------------------------------------------------------------
 
-export function DataTable({ children, className = '' }: { children: ReactNode; className?: string }) {
+export function DataTable({
+  children,
+  className = '',
+  maxHeight,
+}: {
+  children: ReactNode;
+  className?: string;
+  /**
+   * Caps the table's height and scrolls inside it.
+   *
+   * A long list rendered at full height turns the page into something you
+   * navigate by scrollbar rather than by reading — the deal table alone ran to
+   * thirteen thousand pixels before this existed. Header cells stay pinned so
+   * the columns remain identifiable at row 80.
+   */
+  maxHeight?: number;
+}) {
   return (
-    <div className={`scroll-x -mx-5 px-5 ${className}`}>
+    <div
+      className={`scroll-x -mx-5 px-5 ${maxHeight ? 'overflow-y-auto' : ''} ${className}`}
+      style={maxHeight ? { maxHeight } : undefined}
+    >
       <table className="w-full min-w-max border-collapse text-[12px]">{children}</table>
     </div>
   );
@@ -213,11 +232,12 @@ export function Th({
   return (
     <th
       title={title}
-      className={`whitespace-nowrap border-b px-3 py-2 text-[10.5px] font-semibold uppercase tracking-[0.06em] ${className}`}
+      className={`sticky top-0 z-10 whitespace-nowrap border-b px-3 py-2 text-[10.5px] font-semibold uppercase tracking-[0.06em] ${className}`}
       style={{
         textAlign: align,
         borderColor: 'var(--border)',
         color: 'var(--text-muted)',
+        background: 'var(--surface-1)',
       }}
     >
       {children}

@@ -21,6 +21,8 @@ import { useTransition } from 'react';
 import { CircleAlert, CircleCheck, Clock, Lock, LockOpen, LoaderCircle } from 'lucide-react';
 import { formatMonth } from '@/lib/semantic/periods';
 import type { ShellData } from '@/lib/dashboards/shell';
+import { resolveRange } from '@/lib/dashboards/range';
+import { ActiveFilters, DateRangeControl, type ActiveFilter } from './filter-bar';
 
 const CONSOLIDATED = 'ARG_TOTAL';
 
@@ -36,6 +38,27 @@ export function GlobalControls({ shell }: { shell: ShellData }) {
 
   const selected = shell.months.find((m) => m.periodMonth === month);
   const isClosed = selected?.isClosed ?? false;
+
+  // Resolved with the same function the server uses, so the control can never
+  // display a range different from the one the page was rendered for.
+  const range = resolveRange(
+    {
+      from: searchParams.get('from') ?? undefined,
+      to: searchParams.get('to') ?? undefined,
+      range: searchParams.get('range') ?? undefined,
+    },
+    month,
+    shell.months.map((m) => m.periodMonth),
+  );
+
+  const owner = searchParams.get('owner');
+
+  const activeFilters: ActiveFilter[] = [
+    ...(range.preset !== 'ytd'
+      ? [{ param: 'range', label: 'Dates', value: range.label, icon: 'date' as const }]
+      : []),
+    ...(owner ? [{ param: 'owner', label: 'Salesperson', value: owner, icon: 'person' as const }] : []),
+  ];
 
   function update(key: string, value: string) {
     const params = new URLSearchParams(searchParams.toString());
@@ -87,6 +110,8 @@ export function GlobalControls({ shell }: { shell: ShellData }) {
           ))}
         </select>
 
+        <DateRangeControl range={range} months={shell.months} />
+
         {pending ? (
           <LoaderCircle size={13} className="animate-spin text-[var(--text-muted)]" aria-label="Loading" />
         ) : null}
@@ -106,6 +131,15 @@ export function GlobalControls({ shell }: { shell: ShellData }) {
           <RefreshBadge iso={shell.lastRefreshedAt} />
         </div>
       </div>
+
+      {activeFilters.length > 0 && (
+        <div
+          className="border-t px-6 py-2"
+          style={{ borderColor: 'var(--border)', background: 'var(--surface-2)' }}
+        >
+          <ActiveFilters filters={activeFilters} />
+        </div>
+      )}
     </div>
   );
 }

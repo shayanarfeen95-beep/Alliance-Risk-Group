@@ -29,6 +29,13 @@
       "when": 1786531090000,
       "tag": "0003_connector_credentials",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1786531100000,
+      "tag": "0004_deal_owner_name",
+      "breakpoints": true
     }
   ]
 }
