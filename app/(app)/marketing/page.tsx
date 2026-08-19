@@ -29,6 +29,9 @@ export default async function MarketingPage({
     <div className="space-y-6">
       <header>
         <h1 className="text-[19px] font-semibold tracking-tight">Marketing</h1>
+        <p className="mt-1 max-w-2xl text-[12.5px] leading-relaxed text-[var(--text-secondary)]">
+          What marketing spend produced — leads, cost per lead, and what it returned.
+        </p>
         <p className="mt-0.5 text-[12px] text-[var(--text-muted)]">
           {divisionLabel} · {formatMonth(session.period.month)} · HubSpot leads against QuickBooks
           spend

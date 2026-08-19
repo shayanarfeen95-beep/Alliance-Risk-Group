@@ -41,6 +41,9 @@ export default async function FinancePage({
     <div className="space-y-6">
       <header>
         <h1 className="text-[19px] font-semibold tracking-tight">Finance</h1>
+        <p className="mt-1 max-w-2xl text-[12.5px] leading-relaxed text-[var(--text-secondary)]">
+          The full profit and loss, balance sheet and working capital, by division.
+        </p>
         <p className="mt-0.5 text-[12px] text-[var(--text-muted)]">
           {divisionLabel} · {formatMonth(period.month)} · {session.accountingBasis} basis ·{' '}
           {session.periodIsClosed ? 'closed period' : 'open period, figures preliminary'}

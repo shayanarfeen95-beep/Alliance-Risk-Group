@@ -15,14 +15,36 @@ import {
 } from 'lucide-react';
 import { useEffect, useState } from 'react';
 
-const NAV = [
-  { href: '/executive', label: 'Executive', icon: LayoutDashboard },
-  { href: '/finance', label: 'Finance', icon: Wallet },
-  { href: '/sales', label: 'Sales', icon: TrendingUp },
-  { href: '/marketing', label: 'Marketing', icon: Megaphone },
-  { href: '/forecast', label: 'Forecast', icon: ChartPie },
-  { href: '/kpi-dictionary', label: 'KPI dictionary', icon: BookOpen },
-  { href: '/admin', label: 'Admin', icon: Settings },
+/**
+ * Navigation, grouped by what you came here to do.
+ *
+ * A flat list of seven asks the reader to hold the whole app in their head to
+ * find anything. Grouping separates the three genuinely different reasons
+ * somebody opens this: to see how the business did, to plan what happens next,
+ * and to set the thing up. The items and their order are unchanged — only the
+ * headings are new.
+ */
+const NAV_GROUPS: Array<{ label: string; items: Array<{ href: string; label: string; icon: typeof Wallet }> }> = [
+  {
+    label: 'Dashboards',
+    items: [
+      { href: '/executive', label: 'Executive', icon: LayoutDashboard },
+      { href: '/finance', label: 'Finance', icon: Wallet },
+      { href: '/sales', label: 'Sales', icon: TrendingUp },
+      { href: '/marketing', label: 'Marketing', icon: Megaphone },
+    ],
+  },
+  {
+    label: 'Planning',
+    items: [{ href: '/forecast', label: 'Forecast', icon: ChartPie }],
+  },
+  {
+    label: 'Reference & setup',
+    items: [
+      { href: '/kpi-dictionary', label: 'KPI dictionary', icon: BookOpen },
+      { href: '/admin', label: 'Admin', icon: Settings },
+    ],
+  },
 ];
 
 export function Sidebar({ userName, userRole }: { userName: string; userRole: string }) {
@@ -57,29 +79,41 @@ export function Sidebar({ userName, userRole }: { userName: string; userRole: st
         </div>
       </div>
 
-      <ul className="flex-1 space-y-0.5 px-2.5 py-2">
-        {NAV.map((item) => {
-          const active = pathname === item.href || pathname.startsWith(`${item.href}/`);
-          const Icon = item.icon;
-          return (
-            <li key={item.href}>
-              <Link
-                href={`${item.href}${suffix}`}
-                aria-current={active ? 'page' : undefined}
-                className="flex items-center gap-2.5 rounded-[var(--radius)] px-2.5 py-1.5 text-[12.5px] transition-colors"
-                style={{
-                  background: active ? 'var(--surface-2)' : 'transparent',
-                  color: active ? 'var(--text-primary)' : 'var(--text-secondary)',
-                  fontWeight: active ? 600 : 400,
-                }}
-              >
-                <Icon size={15} aria-hidden />
-                {item.label}
-              </Link>
-            </li>
-          );
-        })}
-      </ul>
+      <div className="flex-1 overflow-y-auto px-2.5 py-2">
+        {NAV_GROUPS.map((group) => (
+          <div key={group.label} className="mb-3 last:mb-0">
+            <p
+              className="px-2.5 pb-1 text-[10px] font-semibold uppercase tracking-[0.07em]"
+              style={{ color: 'var(--text-muted)' }}
+            >
+              {group.label}
+            </p>
+            <ul className="space-y-0.5">
+              {group.items.map((item) => {
+                const active = pathname === item.href || pathname.startsWith(`${item.href}/`);
+                const Icon = item.icon;
+                return (
+                  <li key={item.href}>
+                    <Link
+                      href={`${item.href}${suffix}`}
+                      aria-current={active ? 'page' : undefined}
+                      className="flex items-center gap-2.5 rounded-[var(--radius)] px-2.5 py-1.5 text-[12.5px] transition-colors"
+                      style={{
+                        background: active ? 'var(--surface-2)' : 'transparent',
+                        color: active ? 'var(--text-primary)' : 'var(--text-secondary)',
+                        fontWeight: active ? 600 : 400,
+                      }}
+                    >
+                      <Icon size={15} aria-hidden />
+                      {item.label}
+                    </Link>
+                  </li>
+                );
+              })}
+            </ul>
+          </div>
+        ))}
+      </div>
 
       <div className="border-t px-4 py-3" style={{ borderColor: 'var(--border)' }}>
         <div className="mb-2.5">

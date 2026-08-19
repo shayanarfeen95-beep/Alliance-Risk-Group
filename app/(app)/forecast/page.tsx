@@ -81,6 +81,9 @@ export default async function ForecastPage({
       <header className="flex flex-wrap items-start justify-between gap-3">
         <div>
           <h1 className="text-[19px] font-semibold tracking-tight">Forecast</h1>
+          <p className="mt-1 max-w-2xl text-[12.5px] leading-relaxed text-[var(--text-secondary)]">
+            Set next month's assumptions, compare scenarios, and lock the official forecast.
+          </p>
           <p className="mt-0.5 text-[12px] text-[var(--text-muted)]">
             {formatMonth(period.month)} · assumptions in, projected P&amp;L out
           </p>

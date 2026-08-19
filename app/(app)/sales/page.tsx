@@ -32,6 +32,9 @@ export default async function SalesPage({
     <div className="space-y-6">
       <header>
         <h1 className="text-[19px] font-semibold tracking-tight">Sales</h1>
+        <p className="mt-1 max-w-2xl text-[12.5px] leading-relaxed text-[var(--text-secondary)]">
+          What was booked, what is in the pipeline, and who closed it.
+        </p>
         <p className="mt-0.5 text-[12px] text-[var(--text-muted)]">
           {divisionLabel} · {formatMonth(session.period.month)} · sourced from HubSpot
         </p>
