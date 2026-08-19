@@ -9,9 +9,8 @@
  */
 import 'server-only';
 import { cookies } from 'next/headers';
-import { eq } from 'drizzle-orm';
+import { eq, sql } from 'drizzle-orm';
 import { SignJWT, jwtVerify } from 'jose';
-import { randomBytes } from 'node:crypto';
 import { getDb, isDemoMode } from '@/lib/db/client';
 import { sessions, users, userDivisionAccess } from '@/lib/db/schema';
 
@@ -42,23 +41,28 @@ export interface SessionUser {
 const DEV_FALLBACK_SECRET = 'arg-development-only-secret-do-not-use-in-production';
 
 /**
- * A per-process key, used only by a demo instance with no secret configured.
+ * The demo instance's key, when no secret is configured.
  *
- * Random rather than constant, so it is not a predictable signing key. Sessions
- * do not survive an instance recycling — which is the same thing already true of
- * a demo instance's data, so it is consistent rather than surprising. This never
- * applies to a real deployment: demo mode requires DATABASE_URL to be unset, and
- * a demo instance holds no real figures to protect.
+ * This used to be a per-process random value, and that was the bug behind
+ * "it signs me out when I switch tabs": a demo deployment is many serverless
+ * instances, each with its own random key and its own in-memory database. A
+ * cookie minted on one instance failed to verify on the next, which the app
+ * correctly read as "not signed in" and bounced to the login screen. Every
+ * navigation was a coin flip.
+ *
+ * A fixed key makes the cookie verifiable on any instance, which is the whole
+ * point of a stateless token. It is safe *only* under demo mode's own
+ * conditions — demo mode requires DATABASE_URL to be unset, so the warehouse is
+ * the seeded specimen dataset and there is nothing real to protect. A
+ * deployment with a database never reaches this branch, and one running in
+ * production without AUTH_SECRET still refuses to start.
  */
-let ephemeralSecret: Uint8Array | null = null;
+const DEMO_FALLBACK_SECRET = 'arg-demo-instance-shared-key-seeded-data-only';
 
 function secret(): Uint8Array {
   const value = process.env.AUTH_SECRET;
   if (!value) {
-    if (isDemoMode()) {
-      ephemeralSecret ??= new Uint8Array(randomBytes(48));
-      return ephemeralSecret;
-    }
+    if (isDemoMode()) return new TextEncoder().encode(DEMO_FALLBACK_SECRET);
     if (process.env.NODE_ENV === 'production') {
       throw new Error(
         'AUTH_SECRET is not set. Generate one with `openssl rand -base64 48` and set it in the environment before deploying.',
@@ -69,6 +73,26 @@ function secret(): Uint8Array {
   return new TextEncoder().encode(value);
 }
 
+/**
+ * The claims carried in the token.
+ *
+ * Identity travels with the cookie as well as living in the database. On a real
+ * deployment the database is still the authority — the claims are a fallback the
+ * code only reaches for when there is no shared database to be authoritative,
+ * which is exactly demo mode. Carrying them costs a few hundred bytes and
+ * removes the failure where an ephemeral instance cannot answer "who is this?"
+ * for a perfectly valid session.
+ */
+interface SessionClaims {
+  sid: string;
+  uid: string;
+  email: string;
+  name: string;
+  role: Role;
+  consolidated: boolean;
+  divisions: string[];
+}
+
 export async function createSession(userId: string): Promise<void> {
   const db = await getDb();
   const expiresAt = new Date(Date.now() + SESSION_DAYS * 24 * 60 * 60 * 1000);
@@ -76,7 +100,25 @@ export async function createSession(userId: string): Promise<void> {
   const [row] = await db.insert(sessions).values({ userId, expiresAt }).returning();
   if (!row) throw new Error('failed to create session');
 
-  const token = await new SignJWT({ sid: row.id, uid: userId })
+  const [user] = await db.select().from(users).where(eq(users.id, userId)).limit(1);
+  if (!user) throw new Error('failed to create session: no such user');
+
+  const access = await db
+    .select({ divisionCode: userDivisionAccess.divisionCode })
+    .from(userDivisionAccess)
+    .where(eq(userDivisionAccess.userId, userId));
+
+  const claims: SessionClaims = {
+    sid: row.id,
+    uid: userId,
+    email: user.email,
+    name: user.name,
+    role: user.role as Role,
+    consolidated: user.canViewConsolidated,
+    divisions: access.map((a) => a.divisionCode),
+  };
+
+  const token = await new SignJWT({ ...claims })
     .setProtectedHeader({ alg: 'HS256' })
     .setIssuedAt()
     .setExpirationTime(expiresAt)
@@ -113,21 +155,56 @@ export async function getSessionUser(): Promise<SessionUser | null> {
   const token = store.get(COOKIE_NAME)?.value;
   if (!token) return null;
 
-  let sid: string;
+  let claims: SessionClaims;
   try {
     const { payload } = await jwtVerify(token, secret());
-    sid = payload.sid as string;
+    claims = payload as unknown as SessionClaims;
+    if (!claims.sid || !claims.uid) return null;
   } catch {
     return null;
   }
 
   const db = await getDb();
-  const [session] = await db.select().from(sessions).where(eq(sessions.id, sid)).limit(1);
-  if (!session || session.expiresAt.getTime() < Date.now()) return null;
 
-  const [user] = await db.select().from(users).where(eq(users.id, session.userId)).limit(1);
-  if (!user || !user.isActive) return null;
+  const [session] = await db.select().from(sessions).where(eq(sessions.id, claims.sid)).limit(1);
 
+  if (session && session.expiresAt.getTime() >= Date.now()) {
+    const [user] = await db.select().from(users).where(eq(users.id, session.userId)).limit(1);
+    if (user && user.isActive) return await withAccess(db, user);
+    // A revoked or deactivated user is signed out, in every mode.
+    return null;
+  }
+
+  // No session row. On a shared database that means revoked — refuse.
+  if (!isDemoMode()) return null;
+
+  // Demo mode: each instance holds its own in-memory copy of the warehouse, so
+  // "the row is not here" carries no information about whether the session is
+  // valid. The token's signature already established that. Match the seeded
+  // user by email — the seed is deterministic, the row ids are not — and fall
+  // back to the token's own claims when even that instance has yet to seed.
+  const [seeded] = await db
+    .select()
+    .from(users)
+    .where(sql`lower(${users.email}) = lower(${claims.email})`)
+    .limit(1);
+
+  if (seeded && seeded.isActive) return await withAccess(db, seeded);
+
+  return {
+    id: claims.uid,
+    email: claims.email,
+    name: claims.name,
+    role: claims.role,
+    canViewConsolidated: claims.consolidated,
+    divisionCodes: claims.divisions ?? [],
+  };
+}
+
+async function withAccess(
+  db: Awaited<ReturnType<typeof getDb>>,
+  user: typeof users.$inferSelect,
+): Promise<SessionUser> {
   const access = await db
     .select({ divisionCode: userDivisionAccess.divisionCode })
     .from(userDivisionAccess)

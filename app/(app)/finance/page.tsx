@@ -6,6 +6,7 @@ import { buildDivisionColorMap } from '@/lib/charts/colors';
 import { formatMonth, formatMonthShort } from '@/lib/semantic/periods';
 import { formatNumber, formatSignedNumber, sentimentColorVar, sentimentOf } from '@/lib/format';
 import { ChartCard } from '@/components/charts/chart-card';
+import { BoxFilter } from '@/components/dashboard/box-filter';
 import {
   Card,
   CardHeader,
@@ -28,7 +29,8 @@ export default async function FinancePage({
   const context = await loadDashboardContext(await searchParams);
   const { session, divisionCode } = context;
   const colors = buildDivisionColorMap(session.bundle.divisions);
-  const model = loadFinance(session, divisionCode, colors);
+  const model = loadFinance(session, divisionCode, colors, context.boxScope);
+  const boxOptions = context.boxFilterOptions;
   const { period } = session;
 
   const divisionLabel =
@@ -55,6 +57,7 @@ export default async function FinancePage({
         <CardHeader
           title="Profit & loss"
           subtitle={`Prior month (${formatMonthShort(period.priorMonth)}) and prior year (${formatMonthShort(period.priorYearMonth)}) against actual and budget. Payroll rows are memo lines — they are components of COGS and OpEx, never deducted again.`}
+          action={<BoxFilter state={model.boxes.pl} options={boxOptions} />}
         />
         <DataTable>
           <thead>
@@ -81,7 +84,11 @@ export default async function FinancePage({
       <div className="grid gap-4 xl:grid-cols-3">
         {/* --- Ratio block ------------------------------------------------ */}
         <Card>
-          <CardHeader title="Ratios" subtitle="As a share of revenue for the month" />
+          <CardHeader
+            title="Ratios"
+            subtitle="As a share of revenue for the month"
+            action={<BoxFilter state={model.boxes.ratios} options={boxOptions} />}
+          />
           <ul className="space-y-2">
             {model.ratios.map((ratio) => (
               <li
@@ -101,7 +108,11 @@ export default async function FinancePage({
 
         {/* --- Change block ----------------------------------------------- */}
         <Card>
-          <CardHeader title="Change" subtitle="Month over month and year over year" />
+          <CardHeader
+            title="Change"
+            subtitle="Month over month and year over year"
+            action={<BoxFilter state={model.boxes.changes} options={boxOptions} />}
+          />
           <DataTable>
             <thead>
               <tr>
@@ -133,6 +144,7 @@ export default async function FinancePage({
           <CardHeader
             title="Working capital"
             subtitle="Cash runway is shown both ways: the single-month figure ties to the Excel, the trailing average removes the swing that Defect 6 describes."
+            action={<BoxFilter state={model.boxes.workingCapital} options={boxOptions} />}
           />
           {model.workingCapital.dso.unavailable ? (
             <Unavailable reason="NOT_AVAILABLE_BY_DIVISION" detail={model.workingCapital.dso.unavailable} />
@@ -153,6 +165,7 @@ export default async function FinancePage({
         <CardHeader
           title="Year to date"
           subtitle="Prior-year YTD covers comparable periods only — January through the same month last year, never a full prior year against a partial current one."
+          action={<BoxFilter state={model.boxes.ytd} options={boxOptions} />}
         />
         <DataTable>
           <thead>
@@ -178,6 +191,7 @@ export default async function FinancePage({
         <CardHeader
           title="10X plan"
           subtitle="Shown for 2026–2029 only, and blank outside that range."
+          action={<BoxFilter state={model.boxes.tenX} options={boxOptions} />}
         />
         {model.tenX ? (
           <DataTable>
@@ -227,7 +241,8 @@ export default async function FinancePage({
             title="Balance sheet"
             subtitle="Each line as a share of total assets, against prior year end and the same month last year."
             action={
-              model.balanceCheck ? (
+              <div className="flex items-center gap-2">
+              {model.balanceCheck ? (
                 <Chip
                   tone={model.balanceCheck.passes ? 'good' : 'critical'}
                   icon={
@@ -243,7 +258,9 @@ export default async function FinancePage({
                     ? 'Balances'
                     : `Out by ${formatNumber(model.balanceCheck.difference, 'currency')}`}
                 </Chip>
-              ) : undefined
+              ) : null}
+              <BoxFilter state={model.boxes.balanceSheet} options={boxOptions} />
+              </div>
             }
           />
           {model.balanceSheet ? (
@@ -286,7 +303,11 @@ export default async function FinancePage({
         </Card>
 
         <Card>
-          <CardHeader title="A/R and A/P aging" subtitle="Month-end balances by bucket" />
+          <CardHeader
+            title="A/R and A/P aging"
+            subtitle="Month-end balances by bucket"
+            action={<BoxFilter state={model.boxes.aging} options={boxOptions} />}
+          />
           <DataTable>
             <thead>
               <tr>
@@ -319,6 +340,7 @@ export default async function FinancePage({
         form="line"
         valueFormat="currency"
         height={280}
+        filter={<BoxFilter state={model.boxes.trend} options={boxOptions} />}
       />
 
       <SectionTitle hint="Every figure above resolves through the semantic layer and is drillable to its underlying accounts">

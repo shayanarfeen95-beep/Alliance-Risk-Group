@@ -4,6 +4,8 @@ import { safeDiv } from '@/lib/money';
 import { resolveKpi, CONSOLIDATED_CODE, type SemanticSession } from '@/lib/semantic/resolve';
 import { sumBs, sumPl, sumPlOverMonths, key } from '@/lib/semantic/facts';
 import { formatMonthShort, type MonthKey } from '@/lib/semantic/periods';
+import { boxState, type BoxScope, type BoxScopeResolver } from './context';
+import type { BoxFilterState } from './box-filter';
 
 /**
  * §9.2 — the Finance dashboard.
@@ -91,6 +93,17 @@ export interface WorkingCapital {
 }
 
 export interface FinanceViewModel {
+  boxes: {
+    pl: BoxFilterState;
+    ratios: BoxFilterState;
+    changes: BoxFilterState;
+    workingCapital: BoxFilterState;
+    ytd: BoxFilterState;
+    tenX: BoxFilterState;
+    balanceSheet: BoxFilterState;
+    aging: BoxFilterState;
+    trend: BoxFilterState;
+  };
   pl: PlRow[];
   ratios: RatioRow[];
   changes: ChangeRow[];
@@ -111,11 +124,79 @@ const num = (result: { value: Decimal | null }): number | null =>
 const dec = (value: Decimal | null | undefined): number | null =>
   value === null || value === undefined ? null : value.toNumber();
 
+/**
+ * The Finance dashboard, block by block, each at its own scope.
+ *
+ * Every block is computed by the same function; a box with its own filter is
+ * simply that function called with a different division or month. Computing a
+ * block twice costs nothing measurable — the facts are already in memory and
+ * `resolveKpi` is pure — and it means a per-box filter cannot produce a figure
+ * the page filter would not have produced.
+ */
 export function loadFinance(
   session: SemanticSession,
   divisionCode: string,
   divisionColors: Record<string, string>,
+  boxScope: BoxScopeResolver,
 ): FinanceViewModel {
+  const scopes = {
+    pl: boxScope('finance_pl'),
+    ratios: boxScope('finance_ratios'),
+    changes: boxScope('finance_changes'),
+    workingCapital: boxScope('finance_working_capital'),
+    ytd: boxScope('finance_ytd'),
+    tenX: boxScope('finance_tenx'),
+    balanceSheet: boxScope('finance_balance_sheet'),
+    aging: boxScope('finance_aging'),
+    trend: boxScope('finance_trend'),
+  };
+
+  const cache = new Map<string, FinanceBlocks>();
+  const at = (scope: BoxScope): FinanceBlocks => {
+    const cacheKey = `${scope.month}|${scope.divisionCode}`;
+    const existing = cache.get(cacheKey);
+    if (existing) return existing;
+    const built = buildFinanceBlocks(scope.session, scope.divisionCode, divisionColors);
+    cache.set(cacheKey, built);
+    return built;
+  };
+
+  const balance = at(scopes.balanceSheet);
+
+  return {
+    boxes: {
+      pl: boxState(scopes.pl),
+      ratios: boxState(scopes.ratios),
+      changes: boxState(scopes.changes),
+      workingCapital: boxState(scopes.workingCapital),
+      ytd: boxState(scopes.ytd),
+      tenX: boxState(scopes.tenX),
+      balanceSheet: boxState(scopes.balanceSheet),
+      aging: boxState(scopes.aging),
+      trend: boxState(scopes.trend),
+    },
+    pl: at(scopes.pl).pl,
+    ratios: at(scopes.ratios).ratios,
+    changes: at(scopes.changes).changes,
+    ytd: at(scopes.ytd).ytd,
+    tenX: at(scopes.tenX).tenX,
+    balanceSheet: balance.balanceSheet,
+    balanceCheck: balance.balanceCheck,
+    balanceSheetUnavailable: balance.balanceSheetUnavailable,
+    workingCapital: at(scopes.workingCapital).workingCapital,
+    aging: at(scopes.aging).aging,
+    trend: at(scopes.trend).trend,
+    trendSeries: at(scopes.trend).trendSeries,
+  };
+}
+
+type FinanceBlocks = Omit<FinanceViewModel, 'boxes'>;
+
+function buildFinanceBlocks(
+  session: SemanticSession,
+  divisionCode: string,
+  divisionColors: Record<string, string>,
+): FinanceBlocks {
   const { period, bundle } = session;
   const isConsolidated = divisionCode === CONSOLIDATED_CODE;
   const divisions = isConsolidated ? session.visibleDivisions : [divisionCode];

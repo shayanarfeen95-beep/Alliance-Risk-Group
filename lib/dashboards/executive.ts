@@ -7,6 +7,9 @@ import { formatMonthShort, type MonthKey } from '@/lib/semantic/periods';
 import { safeDiv } from '@/lib/money';
 import type { KpiTileProps } from '@/components/dashboard/kpi-tile';
 import { openFindings } from '@/lib/ai/goals';
+import { buildKpiTiles } from './tiles';
+import { boxState, type BoxScopeResolver } from './context';
+import type { BoxFilterState } from './box-filter';
 
 /** §9.1 — the eight headline tiles. */
 const EXECUTIVE_TILES: Array<{ id: string; hint: string }> = [
@@ -50,6 +53,13 @@ export interface ExceptionRow {
 
 export interface ExecutiveViewModel {
   tiles: KpiTileProps[];
+  /** Filter state for the boxes that are not tiles. */
+  boxes: {
+    contributions: BoxFilterState;
+    baselines: BoxFilterState;
+    trend: BoxFilterState;
+    commentary: BoxFilterState;
+  };
   contributions: DivisionContribution[];
   baselines: BaselineRow[];
   exceptions: ExceptionRow[];
@@ -66,58 +76,45 @@ export async function loadExecutive(
   session: SemanticSession,
   divisionCode: string,
   divisionColors: Record<string, string>,
+  boxScope: BoxScopeResolver,
 ): Promise<ExecutiveViewModel> {
   const db = await getDb();
   const { period } = session;
 
   // --- Tiles -------------------------------------------------------------
-  const tiles: KpiTileProps[] = EXECUTIVE_TILES.map(({ id, hint }) => {
-    const current = resolveKpi(session, id, divisionCode);
-    const priorMonth = resolveKpi(session, id, divisionCode, { month: period.priorMonth });
-    const priorYear = resolveKpi(session, id, divisionCode, { month: period.priorYearMonth });
+  // Each tile resolves at its own scope, so eight tiles can sit on eight
+  // different divisions or months without the page filter moving.
+  const tiles = buildKpiTiles(boxScope, EXECUTIVE_TILES, 'exec');
 
-    const currentValue = numberOrNull(current);
-    const pmValue = numberOrNull(priorMonth);
-    const pyValue = numberOrNull(priorYear);
-
-    return {
-      name: current.name,
-      formatted: current.formatted,
-      unavailable: current.unavailable,
-      higherIsBetter: current.higherIsBetter,
-      format: current.format,
-      deltaPriorMonth: currentValue !== null && pmValue !== null ? currentValue - pmValue : null,
-      deltaPriorYear: currentValue !== null && pyValue !== null ? currentValue - pyValue : null,
-      sparkline: period.trailingTwelveMonths.map((month) =>
-        numberOrNull(resolveKpi(session, id, divisionCode, { month })),
-      ),
-      href: current.verifyHref,
-      hint,
-    };
-  });
+  // Every other box on the page is scoped the same way.
+  const contributionScope = boxScope('exec_contributions');
+  const baselineScope = boxScope('exec_baselines');
+  const trendScope = boxScope('exec_trend');
+  const commentaryScope = boxScope('exec_commentary');
 
   // --- Division contribution --------------------------------------------
   // §7: "Division contribution % = division revenue ÷ ARG Total revenue. Net
   // profit contribution uses the ABSOLUTE VALUE of ARG Total net profit in the
   // denominator so the sign stays readable in a loss month."
-  const totalRevenue = session.consolidatedAvailable
-    ? numberOrNull(resolveKpi(session, 'revenue', CONSOLIDATED_CODE))
+  const contributionSession = contributionScope.session;
+  const totalRevenue = contributionSession.consolidatedAvailable
+    ? numberOrNull(resolveKpi(contributionSession, 'revenue', CONSOLIDATED_CODE))
     : null;
-  const totalNetProfit = session.consolidatedAvailable
-    ? numberOrNull(resolveKpi(session, 'net_profit', CONSOLIDATED_CODE))
+  const totalNetProfit = contributionSession.consolidatedAvailable
+    ? numberOrNull(resolveKpi(contributionSession, 'net_profit', CONSOLIDATED_CODE))
     : null;
   const totalNetProfitAbs = totalNetProfit === null ? null : Math.abs(totalNetProfit);
 
-  const contributions: DivisionContribution[] = session.bundle.divisions.map((division) => {
-    const revenue = numberOrNull(resolveKpi(session, 'revenue', division.divisionCode));
-    const netProfit = numberOrNull(resolveKpi(session, 'net_profit', division.divisionCode));
+  const contributions: DivisionContribution[] = contributionSession.bundle.divisions.map((division) => {
+    const revenue = numberOrNull(resolveKpi(contributionSession, 'revenue', division.divisionCode));
+    const netProfit = numberOrNull(resolveKpi(contributionSession, 'net_profit', division.divisionCode));
 
-    const ytdRevenue = period.ytdMonths.reduce<number | null>((sum, month) => {
-      const value = numberOrNull(resolveKpi(session, 'revenue', division.divisionCode, { month }));
+    const ytdRevenue = contributionSession.period.ytdMonths.reduce<number | null>((sum, month) => {
+      const value = numberOrNull(resolveKpi(contributionSession, 'revenue', division.divisionCode, { month }));
       return value === null ? sum : (sum ?? 0) + value;
     }, null);
-    const ytdNetProfit = period.ytdMonths.reduce<number | null>((sum, month) => {
-      const value = numberOrNull(resolveKpi(session, 'net_profit', division.divisionCode, { month }));
+    const ytdNetProfit = contributionSession.period.ytdMonths.reduce<number | null>((sum, month) => {
+      const value = numberOrNull(resolveKpi(contributionSession, 'net_profit', division.divisionCode, { month }));
       return value === null ? sum : (sum ?? 0) + value;
     }, null);
 
@@ -147,7 +144,7 @@ export async function loadExecutive(
       ['10X Plan', 'TENX'],
     ] as const
   ).map(([label, scenario]) => {
-    const result = resolveKpi(session, 'budget_attainment', divisionCode, {
+    const result = resolveKpi(baselineScope.session, 'budget_attainment', baselineScope.divisionCode, {
       options: { scenario, lineItem: 'revenue', scope: 'ytd' },
     });
     return {
@@ -212,8 +209,13 @@ export async function loadExecutive(
   }
 
   // --- Trend -------------------------------------------------------------
-  const trendMonths = period.trailingTwelveMonths;
-  const trendDivisions = session.bundle.divisions;
+  // The trend box's own filter moves its anchor month and, when a single
+  // division is chosen, narrows it to that one series.
+  const trendSession = trendScope.session;
+  const trendMonths = trendSession.period.trailingTwelveMonths;
+  const trendDivisions = trendScope.divisionOverridden && trendScope.divisionCode !== CONSOLIDATED_CODE
+    ? trendSession.bundle.divisions.filter((d) => d.divisionCode === trendScope.divisionCode)
+    : trendSession.bundle.divisions;
   const trendSeries = trendDivisions.map((division) => ({
     id: division.divisionCode,
     label: division.divisionName,
@@ -227,7 +229,7 @@ export async function loadExecutive(
     };
     for (const division of trendDivisions) {
       row[division.divisionCode] = numberOrNull(
-        resolveKpi(session, 'revenue', division.divisionCode, { month }),
+        resolveKpi(trendSession, 'revenue', division.divisionCode, { month }),
       );
     }
     return row;
@@ -237,11 +239,17 @@ export async function loadExecutive(
   const [commentaryRow] = await db
     .select()
     .from(t.monthlyCommentary)
-    .where(eq(t.monthlyCommentary.periodMonth, period.month))
+    .where(eq(t.monthlyCommentary.periodMonth, commentaryScope.month))
     .limit(1);
 
   return {
     tiles,
+    boxes: {
+      contributions: boxState(contributionScope),
+      baselines: boxState(baselineScope),
+      trend: boxState(trendScope),
+      commentary: boxState(commentaryScope),
+    },
     contributions,
     baselines,
     exceptions,

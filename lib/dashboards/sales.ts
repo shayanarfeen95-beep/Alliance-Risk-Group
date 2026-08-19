@@ -4,6 +4,9 @@ import { resolveKpi, CONSOLIDATED_CODE, type SemanticSession } from '@/lib/seman
 import { monthBounds, formatMonthShort } from '@/lib/semantic/periods';
 import type { KpiTileProps } from '@/components/dashboard/kpi-tile';
 import type { DateRange } from './range';
+import { buildKpiTiles } from './tiles';
+import { boxState, type BoxScopeResolver } from './context';
+import type { BoxFilterState } from './box-filter';
 
 /**
  * §9.3 — Sales dashboard, HubSpot driven.
@@ -60,6 +63,13 @@ export interface SalespersonRow {
 
 export interface SalesViewModel {
   tiles: KpiTileProps[];
+  boxes: {
+    bookedVsBudget: BoxFilterState;
+    pipeline: BoxFilterState;
+    bookingsTrend: BoxFilterState;
+    bySalesperson: BoxFilterState;
+    deals: BoxFilterState;
+  };
   bookingRateDenominator: { won: number; closed: number } | null;
   pipelineByStage: PipelineStageRow[];
   bookedVsBudget: Array<{ x: string; xLabel: string } & Record<string, number | null | string>>;
@@ -90,6 +100,8 @@ export interface SalesOptions {
   range: DateRange;
   /** Narrows the deal table to one salesperson. Null shows everyone. */
   ownerName: string | null;
+  /** Each box's own division and month. */
+  boxScope: BoxScopeResolver;
 }
 
 export function loadSales(
@@ -98,32 +110,16 @@ export function loadSales(
   divisionColors: Record<string, string>,
   options: SalesOptions,
 ): SalesViewModel {
-  const { period, bundle } = session;
-  const isConsolidated = divisionCode === CONSOLIDATED_CODE;
+  const { bundle } = session;
+  const { boxScope } = options;
 
-  const tiles: KpiTileProps[] = SALES_TILES.map(({ id, hint }) => {
-    const current = resolveKpi(session, id, divisionCode);
-    const priorMonth = resolveKpi(session, id, divisionCode, { month: period.priorMonth });
-    const priorYear = resolveKpi(session, id, divisionCode, { month: period.priorYearMonth });
+  const tiles = buildKpiTiles(boxScope, SALES_TILES, 'sales');
 
-    const value = num(current);
-    const pm = num(priorMonth);
-    const py = num(priorYear);
-
-    return {
-      name: current.name,
-      formatted: current.formatted,
-      unavailable: current.unavailable,
-      higherIsBetter: current.higherIsBetter,
-      format: current.format,
-      deltaPriorMonth: value !== null && pm !== null ? value - pm : null,
-      deltaPriorYear: value !== null && py !== null ? value - py : null,
-      sparkline: period.trailingTwelveMonths.map((month) =>
-        num(resolveKpi(session, id, divisionCode, { month })),
-      ),
-      hint,
-    };
-  });
+  const bookedVsBudgetScope = boxScope('sales_booked_vs_budget');
+  const pipelineScope = boxScope('sales_pipeline');
+  const bookingsTrendScope = boxScope('sales_bookings_trend');
+  const bySalespersonScope = boxScope('sales_by_salesperson');
+  const dealsScope = boxScope('sales_deals');
 
   const bookingRate = resolveKpi(session, 'booking_rate_pct', divisionCode);
   const bookingRateDenominator = bookingRate.components
@@ -137,13 +133,15 @@ export function loadSales(
   // ARG Total only — the KPI layer says so rather than inventing a rule.
   const unavailable = resolveKpi(session, 'dollars_booked', divisionCode).unavailable?.detail;
 
-  const inScope = (code: string | null) =>
-    isConsolidated || (code !== null && code === divisionCode);
+  /** Whether a deal belongs to one box's division. */
+  const inBoxScope = (boxDivision: string) => (code: string | null) =>
+    boxDivision === CONSOLIDATED_CODE || (code !== null && code === boxDivision);
 
   // --- Pipeline by stage -------------------------------------------------
+  const pipelineInScope = inBoxScope(pipelineScope.divisionCode);
   const stageTotals = new Map<string, { count: number; value: Decimal }>();
-  for (const deal of bundle.deals) {
-    if (deal.isClosed || !inScope(deal.divisionCode)) continue;
+  for (const deal of pipelineScope.session.bundle.deals) {
+    if (deal.isClosed || !pipelineInScope(deal.divisionCode)) continue;
     const stage = deal.dealstage ?? 'unknown';
     const entry = stageTotals.get(stage) ?? { count: 0, value: new Decimal(0) };
     entry.count += 1;
@@ -161,9 +159,12 @@ export function loadSales(
     .sort((a, b) => b.value - a.value);
 
   // --- Booked vs budgeted revenue by division ---------------------------
-  const divisions = isConsolidated
-    ? bundle.divisions
-    : bundle.divisions.filter((d) => d.divisionCode === divisionCode);
+  const divisions =
+    bookedVsBudgetScope.divisionCode === CONSOLIDATED_CODE
+      ? bookedVsBudgetScope.session.bundle.divisions
+      : bookedVsBudgetScope.session.bundle.divisions.filter(
+          (d) => d.divisionCode === bookedVsBudgetScope.divisionCode,
+        );
 
   const bookedVsBudgetSeries = [
     { id: 'booked', label: 'Booked (HubSpot)', color: 'var(--series-1)' },
@@ -171,7 +172,11 @@ export function loadSales(
   ];
 
   const bookedVsBudget = divisions.map((division) => {
-    const result = resolveKpi(session, 'budgeted_sales_vs_actual', division.divisionCode);
+    const result = resolveKpi(
+      bookedVsBudgetScope.session,
+      'budgeted_sales_vs_actual',
+      division.divisionCode,
+    );
     return {
       x: division.divisionCode,
       xLabel: division.divisionName,
@@ -184,10 +189,14 @@ export function loadSales(
   const bookingsTrendSeries = [
     { id: 'booked', label: 'Dollars booked', color: 'var(--series-1)' },
   ];
-  const bookingsTrend = period.trailingTwelveMonths.map((month) => ({
+  const bookingsTrend = bookingsTrendScope.session.period.trailingTwelveMonths.map((month) => ({
     x: month,
     xLabel: formatMonthShort(month),
-    booked: num(resolveKpi(session, 'dollars_booked', divisionCode, { month })),
+    booked: num(
+      resolveKpi(bookingsTrendScope.session, 'dollars_booked', bookingsTrendScope.divisionCode, {
+        month,
+      }),
+    ),
   }));
 
   // --- Deal-level table --------------------------------------------------
@@ -206,13 +215,18 @@ export function loadSales(
     return !deal.isClosed;
   };
 
-  const scopedDeals = bundle.deals.filter((deal) => inScope(deal.divisionCode) && inRange(deal));
+  const dealsFor = (scope: { session: SemanticSession; divisionCode: string }) => {
+    const test = inBoxScope(scope.divisionCode);
+    return scope.session.bundle.deals.filter((deal) => test(deal.divisionCode) && inRange(deal));
+  };
+
+  const scopedDeals = dealsFor(dealsScope);
 
   // --- By salesperson ----------------------------------------------------
   // Built before the owner filter is applied, so selecting one rep still shows
   // where they sit against the others rather than collapsing to a single row.
   const bySalespersonMap = new Map<string, SalespersonRow>();
-  for (const deal of scopedDeals) {
+  for (const deal of dealsFor(bySalespersonScope)) {
     const owner = deal.ownerName ?? 'Unassigned';
     const row =
       bySalespersonMap.get(owner) ??
@@ -264,6 +278,13 @@ export function loadSales(
 
   return {
     tiles,
+    boxes: {
+      bookedVsBudget: boxState(bookedVsBudgetScope),
+      pipeline: boxState(pipelineScope),
+      bookingsTrend: boxState(bookingsTrendScope),
+      bySalesperson: boxState(bySalespersonScope),
+      deals: boxState(dealsScope),
+    },
     bookingRateDenominator,
     pipelineByStage,
     bookedVsBudget,
