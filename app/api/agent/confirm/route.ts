@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import { getSessionUser } from '@/lib/auth/session';
-import { confirmExtraction } from '@/lib/ai/tools';
+import { confirmExtraction, confirmPendingAction } from '@/lib/ai/tools';
 import { getDb } from '@/lib/db/client';
 import { runAllChecks, persistFindings } from '@/lib/recon/checks';
 
@@ -31,6 +31,22 @@ export async function POST(request: Request) {
   }
 
   const db = await getDb();
+
+  // Two kinds of proposal reach this control: an extraction awaiting its pull,
+  // and a mapping change awaiting its apply. Both are stored server-side and
+  // both require this click; the id says which.
+  const pending = await confirmPendingAction(db, user, actionId);
+  if (pending.handled) {
+    return NextResponse.json({
+      ok: true,
+      message: {
+        role: 'assistant',
+        content: pending.message,
+        isRefusal: !pending.ok,
+      },
+    });
+  }
+
   const outcome = await confirmExtraction(db, user, actionId);
 
   if (!outcome.ok) {

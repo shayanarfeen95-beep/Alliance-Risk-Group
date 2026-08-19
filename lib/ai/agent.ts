@@ -40,6 +40,8 @@ export interface AgentTurnResult {
   content: string;
   citations: AgentCitation[];
   activity: Array<{ tool: string; summary: string }>;
+  /** Places to go, rendered as buttons rather than pasted URLs. */
+  links?: Array<{ label: string; href: string }>;
   view?: ChartCardProps;
   verifyHref?: string;
   isRefusal?: boolean;
@@ -86,6 +88,7 @@ export async function runAgentTurn(input: AgentTurnInput): Promise<AgentTurnResu
 
   const activity: AgentTurnResult['activity'] = [];
   const citations: AgentCitation[] = [];
+  const links: Array<{ label: string; href: string }> = [];
   let view: ChartCardProps | undefined;
   let pendingAction: AgentTurnResult['pendingAction'];
 
@@ -131,6 +134,7 @@ export async function runAgentTurn(input: AgentTurnInput): Promise<AgentTurnResu
         content: text || 'I could not produce an answer for that.',
         citations,
         activity,
+        links: links.length ? links : undefined,
         view,
         pendingAction,
       };
@@ -161,6 +165,7 @@ export async function runAgentTurn(input: AgentTurnInput): Promise<AgentTurnResu
         );
 
         if (outcome.activity) activity.push({ tool: tool.name, summary: outcome.activity });
+        if (outcome.links) links.push(...outcome.links);
         if (outcome.view) view = outcome.view;
         if (outcome.pendingAction) pendingAction = outcome.pendingAction;
         if (outcome.citations) citations.push(...outcome.citations);
@@ -198,6 +203,7 @@ export async function runAgentTurn(input: AgentTurnInput): Promise<AgentTurnResu
       'I worked through several steps but did not reach a settled answer. Narrowing the question to one metric, division and month usually gets there.',
     citations,
     activity,
+    links: links.length ? links : undefined,
     view,
     pendingAction,
   };

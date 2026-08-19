@@ -44,6 +44,14 @@ ARG-side task rather than a development one.
 **Status:** Seeded `deal_property` so the dashboards are exercised by division.
 **Westport confirms the real rule in week 1.**
 
+**Where it is set:** Admin → HubSpot division mapping. Pick the field that
+carries the division, then map each value HubSpot actually sent — shown with the
+number of deals carrying it — to an ARG division. Saving re-applies the mapping
+to every deal already landed, straight from the raw landing table, so a
+correction never leaves the warehouse half on the old rule. A value nobody maps
+stays unattributed and is counted on screen; it is never guessed into a division
+and never dropped.
+
 **If no reliable attribution exists:** set it to `none`. Sales and marketing
 metrics then report at **ARG Total only** for Phase 1.
 

@@ -7,6 +7,7 @@ import { formatMonth } from '@/lib/semantic/periods';
 import { formatNumber, formatSignedNumber, sentimentColorVar, sentimentOf } from '@/lib/format';
 import { KpiTile } from '@/components/dashboard/kpi-tile';
 import { BoxFilter } from '@/components/dashboard/box-filter';
+import { PinnedBoxes } from '@/components/dashboard/pinned-boxes';
 import { ChartCard } from '@/components/charts/chart-card';
 import { Card, CardHeader, DataTable, EmptyState, SectionTitle, Td, Th } from '@/components/ui/primitives';
 import { CommentaryPanel } from '@/components/dashboard/commentary-panel';
@@ -244,6 +245,9 @@ export default async function ExecutivePage({
         note="Each division keeps its colour across every chart in the app, so filtering never repaints the others."
         filter={<BoxFilter state={model.boxes.trend} options={boxOptions} />}
       />
+
+      {/* Boxes the assistant built for this reader. */}
+      <PinnedBoxes page="executive" context={context} />
 
       {/* §9.1 — AI-generated monthly summary. */}
       <section>

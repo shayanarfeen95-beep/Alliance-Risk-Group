@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { eq } from 'drizzle-orm';
+import { and, eq } from 'drizzle-orm';
 import { getSessionUser } from '@/lib/auth/session';
 import { getDb } from '@/lib/db/client';
 import * as t from '@/lib/db/schema';
@@ -12,6 +12,8 @@ export const maxDuration = 120;
 interface RequestBody {
   messages: Array<{ role: 'user' | 'assistant'; content: string }>;
   pageContext: { page: string; month?: string; division?: string };
+  /** The thread this exchange belongs to, when the client is continuing one. */
+  conversationId?: string | null;
 }
 
 function normaliseMonth(value: string | undefined): string | null {
@@ -61,15 +63,37 @@ export async function POST(request: Request) {
 
   const session = await openSemanticSession(db, user, month);
 
-  // One conversation row per exchange keeps the audit log navigable.
-  const [conversation] = await db
-    .insert(t.agentConversation)
-    .values({
-      userId: user.id,
-      title: body.messages[body.messages.length - 1]?.content.slice(0, 120) ?? null,
-      pageContext: body.pageContext as object,
-    })
-    .returning();
+  // The transcript survives navigation on the client, so the thread it belongs
+  // to has to survive on the server too — otherwise the audit log records a
+  // conversation as a dozen unrelated one-line exchanges. A supplied id is
+  // honoured only when it belongs to this user.
+  let conversation: { id: string } | undefined;
+
+  if (body.conversationId) {
+    const [existing] = await db
+      .select({ id: t.agentConversation.id })
+      .from(t.agentConversation)
+      .where(
+        and(
+          eq(t.agentConversation.id, body.conversationId),
+          eq(t.agentConversation.userId, user.id),
+        ),
+      )
+      .limit(1);
+    conversation = existing;
+  }
+
+  if (!conversation) {
+    const [created] = await db
+      .insert(t.agentConversation)
+      .values({
+        userId: user.id,
+        title: body.messages[body.messages.length - 1]?.content.slice(0, 120) ?? null,
+        pageContext: body.pageContext as object,
+      })
+      .returning();
+    conversation = created;
+  }
 
   await db.insert(t.aiQueryLog).values({
     conversationId: conversation!.id,
@@ -89,11 +113,13 @@ export async function POST(request: Request) {
 
     return NextResponse.json({
       ok: true,
+      conversationId: conversation!.id,
       message: {
         role: 'assistant',
         content: result.content,
         citations: result.citations,
         activity: result.activity,
+        links: result.links,
         view: result.view,
         verifyHref: result.verifyHref,
         isRefusal: result.isRefusal,

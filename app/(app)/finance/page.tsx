@@ -7,6 +7,7 @@ import { formatMonth, formatMonthShort } from '@/lib/semantic/periods';
 import { formatNumber, formatSignedNumber, sentimentColorVar, sentimentOf } from '@/lib/format';
 import { ChartCard } from '@/components/charts/chart-card';
 import { BoxFilter } from '@/components/dashboard/box-filter';
+import { PinnedBoxes } from '@/components/dashboard/pinned-boxes';
 import {
   Card,
   CardHeader,
@@ -342,6 +343,9 @@ export default async function FinancePage({
         height={280}
         filter={<BoxFilter state={model.boxes.trend} options={boxOptions} />}
       />
+
+      {/* Boxes the assistant built for this reader. */}
+      <PinnedBoxes page="finance" context={context} />
 
       <SectionTitle hint="Every figure above resolves through the semantic layer and is drillable to its underlying accounts">
         Notes

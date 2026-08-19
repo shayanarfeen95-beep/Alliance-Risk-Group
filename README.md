@@ -77,10 +77,28 @@ not to — because there is no mechanism by which it could.
 | ARG Total cannot drift | It is computed as the sum of four divisions. A database constraint prevents an `ARG_TOTAL` row from ever being stored. |
 | A locked forecast cannot be edited | A Postgres trigger raises on UPDATE and DELETE. Not a UI check. |
 
+## Filters
+
+The bar at the top sets the reporting month, the division and a date range for
+the whole page — §7's single global parameter, which everything else hangs off.
+
+Every box also has its own. The small control in a tile, chart or table's
+top-right corner scopes **that box alone** to another division or month, which is
+what reading a dashboard actually requires: this tile for LITS beside that one
+for SHRC, this month's cash beside last month's. A box that has been moved says
+so on its face and clears in one click, and all of it lives in the URL, so an
+arrangement of twelve boxes on six divisions is a link you can send.
+
+Entitlements are applied once, when the page context is built. An override
+naming a division the reader may not see is dropped and the box falls back to
+the page filter — a hand-edited URL cannot widen what anyone can look at.
+
 ## The agent
 
 Present on every page, already knowing the month, division, dashboard and the
-reader's entitlements. Three things it does:
+reader's entitlements. The conversation persists across navigation, because
+moving between dashboards is most of what anyone does here. Five things it
+does:
 
 **Go get it.** *"Pull March out of QuickBooks and show me where Claims lost
 money."* It picks the source and window, previews what it will pull, waits for
@@ -98,6 +116,21 @@ TypeScript, against `resolveKpi`, not by re-reading an instruction string each
 night. An exception that lands on the CEO's dashboard has to fire for the same
 reason every time.
 
+**Build it onto the dashboard.** *"Put cash runway for Claims on the executive
+page."* It saves a specification — never numbers, never markup — pinned to that
+dashboard for that reader, rendered by the same components and carrying the same
+per-box filter as everything else. Still there tomorrow; removable in one click.
+
+**Map the source.** *"Deals tagged 'Litigation Support' are LITS."* It reads the
+values HubSpot actually sent with their deal counts, proposes the mapping, and
+waits for a click. Applying it re-attributes every deal already landed. It will
+not propose a mapping because a value resembles a division name — that is the
+error the whole open-items apparatus exists to prevent.
+
+It also guides. For "how do I", "where is" or "why is this blank" it reads the
+app's current state — what is connected, what is unconfirmed, what this reader
+is permitted to do — rather than describing the app from memory.
+
 Without `ANTHROPIC_API_KEY`, every dashboard, export and control still works.
 Only the conversational layer is unavailable, and it says so.
 
@@ -106,11 +139,11 @@ Only the conversational layer is unavailable, and it says so.
 ```
 lib/semantic/     the KPI registry, period conventions, resolver — the heart
 lib/db/           schema, migrations, the three DB-level guards
-lib/connectors/   QBO, HubSpot, Sheets. Read-only adapters
-lib/etl/          conform, rollup, load provenance
+lib/connectors/   QBO, HubSpot, Sheets. Read-only adapters, and the division mapping
+lib/etl/          conform (HubSpot raw -> facts), rollup, load provenance
 lib/recon/        the five standing controls
 lib/forecast/     projection, scenarios, locking, accuracy scoring
-lib/ai/           tools, view-spec compiler, goals, commentary
+lib/ai/           tools, view specs, pinned boxes, goals, commentary, the guide
 lib/export/       the audit pack
 lib/seed/         deterministic dataset reproducing the spec's tie-out figures
 app/(app)/        Executive, Finance, Sales, Marketing, Forecast, Admin
@@ -121,7 +154,7 @@ docs/             RUNBOOK, OPEN_ITEMS, PHASE2_ASSESSMENT
 ## Verification
 
 ```bash
-pnpm test           # tie-out, agent, goals, export — 109 tests
+pnpm test           # tie-out, agent, boxes, HubSpot, goals, export — 142 tests
 pnpm verify:visual  # every page, both themes, checks overflow and console errors
 ```
 

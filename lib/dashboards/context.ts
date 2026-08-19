@@ -53,6 +53,9 @@ export interface BoxScope {
 
 export type BoxScopeResolver = (boxId: string) => BoxScope;
 
+/** The dashboards a box can be pinned to. */
+export type PinnablePageName = 'executive' | 'finance' | 'sales' | 'marketing';
+
 /** The part of a scope a client component may hold. */
 export function boxState(scope: BoxScope): BoxFilterState {
   return {

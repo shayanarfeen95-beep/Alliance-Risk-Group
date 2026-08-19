@@ -9,6 +9,7 @@ import { ChartCard } from '@/components/charts/chart-card';
 import { Card, CardHeader, DataTable, SectionTitle, Td, Th, Unavailable } from '@/components/ui/primitives';
 import { OwnerFilter } from '@/components/dashboard/owner-filter';
 import { BoxFilter } from '@/components/dashboard/box-filter';
+import { PinnedBoxes } from '@/components/dashboard/pinned-boxes';
 
 export const metadata: Metadata = { title: 'Sales' };
 export const dynamic = 'force-dynamic';
@@ -181,6 +182,9 @@ export default async function SalesPage({
           )}
         </Card>
       </section>
+
+      {/* Boxes the assistant built for this reader. */}
+      <PinnedBoxes page="sales" context={context} />
 
       {/* §9.3: a deal-level table behind every tile. */}
       <Card>

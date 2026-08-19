@@ -11,6 +11,23 @@ import { resolveKpi, CONSOLIDATED_CODE, type SemanticSession } from '@/lib/seman
 import { sumPl, key } from '@/lib/semantic/facts';
 import { connectorStatuses, getConnector, type SourceSystemCode } from '@/lib/connectors';
 import { executeViewSpec, viewSpecJsonSchema, ViewSpecError } from './viewspec';
+import {
+  BoxError,
+  createBox,
+  createBoxJsonSchema,
+  listBoxes,
+  removeBox,
+  validateBoxInput,
+  PINNABLE_PAGES,
+} from './boxes';
+import {
+  ATTRIBUTION_RULES,
+  loadHubspotMapping,
+  observedAttributionValues,
+  saveHubspotMapping,
+  type AttributionRule,
+} from '@/lib/connectors/hubspot-mapping';
+import { buildGuide } from './guide';
 import type { ChartCardProps } from '@/components/charts/chart-card';
 
 /**
@@ -49,6 +66,12 @@ export interface ToolOutcome {
   view?: ChartCardProps;
   /** A pending write awaiting human confirmation. */
   pendingAction?: { id: string; label: string; detail: string };
+  /**
+   * Somewhere to go — a filtered dashboard, a box that was just built, the
+   * mapping screen. Rendered as a button rather than a URL the reader has to
+   * assemble from an explanation.
+   */
+  links?: Array<{ label: string; href: string }>;
   /** One line describing what happened, shown as agent activity. */
   activity?: string;
   citations?: Array<{ label: string; value: string; source: string; periodMonth?: string; divisionCode?: string }>;
@@ -662,6 +685,361 @@ const getLoadHistory: ToolDefinition = {
 };
 
 // ---------------------------------------------------------------------------
+// Building boxes — the assistant as dashboard builder
+// ---------------------------------------------------------------------------
+
+const createDashboardBox: ToolDefinition = {
+  name: 'create_box',
+  description:
+    'Add a box — a KPI tile or a chart — to one of the dashboards, where it stays until removed. Use this whenever somebody asks for something to be ON a dashboard rather than answered in conversation: "put cash for Claims on the executive page", "add a chart of bookings by division to sales". What is saved is the specification, so the box re-resolves through the same definitions as every other figure and can never drift from them.',
+  input_schema: createBoxJsonSchema(),
+  async run(input, context) {
+    try {
+      const { page, title, spec } = validateBoxInput(context.session, input);
+      const box = await createBox(
+        context.db,
+        context.user,
+        context.conversationId,
+        page,
+        title,
+        spec,
+      );
+
+      const href = `/${page}?month=${context.session.period.month.slice(0, 7)}`;
+
+      return {
+        result: {
+          created: true,
+          boxId: box.id,
+          page,
+          title,
+          instruction:
+            'The box is saved to that dashboard. Say what you added and where, in one sentence. The link to open it is already on screen — do not paste a URL.',
+        },
+        links: [{ label: `Open the ${page} dashboard`, href }],
+        activity: `Added "${title}" to the ${page} dashboard`,
+      };
+    } catch (error) {
+      if (error instanceof BoxError) {
+        return { result: { created: false, error: error.message } };
+      }
+      throw error;
+    }
+  },
+};
+
+const listDashboardBoxes: ToolDefinition = {
+  name: 'list_boxes',
+  description:
+    'List the boxes this person has had you build, and which dashboard each is on. Call it before adding something similar, and before removing anything.',
+  input_schema: {
+    type: 'object',
+    properties: {
+      page: { type: 'string', enum: [...PINNABLE_PAGES], description: 'Optional filter.' },
+    },
+  },
+  async run(input, context) {
+    const boxes = await listBoxes(
+      context.db,
+      context.user,
+      input.page ? String(input.page) : undefined,
+    );
+    return {
+      result: {
+        count: boxes.length,
+        boxes: boxes.map((box) => ({
+          id: box.id,
+          title: box.title,
+          page: box.page,
+          kind: box.spec.kind,
+          created: box.createdAt,
+        })),
+      },
+    };
+  },
+};
+
+const removeDashboardBox: ToolDefinition = {
+  name: 'remove_box',
+  description:
+    'Remove a box you previously added. Takes the box id from list_boxes. Only removes boxes belonging to the person you are talking to.',
+  input_schema: {
+    type: 'object',
+    required: ['boxId'],
+    properties: { boxId: { type: 'string', description: 'Box id from list_boxes.' } },
+  },
+  async run(input, context) {
+    const removed = await removeBox(context.db, context.user, String(input.boxId));
+    return {
+      result: removed
+        ? { removed: true }
+        : { removed: false, error: 'No box of theirs has that id. Call list_boxes.' },
+      activity: removed ? 'Removed a box from the dashboard' : undefined,
+    };
+  },
+};
+
+// ---------------------------------------------------------------------------
+// Mapping — the assistant as data mapper
+// ---------------------------------------------------------------------------
+
+const inspectDivisionMapping: ToolDefinition = {
+  name: 'inspect_division_mapping',
+  description:
+    'Show how HubSpot deals are currently attributed to ARG divisions: the rule, the values HubSpot actually sent, how many deals carry each, and which of them are unmapped. Call this before proposing any mapping change, and whenever somebody asks why sales figures are missing for a division.',
+  input_schema: { type: 'object', properties: {} },
+  async run(_input, context) {
+    const mapping = await loadHubspotMapping(context.db);
+    const divisions = context.session.bundle.divisions.map((d) => d.divisionCode);
+    const observed = await observedAttributionValues(context.db, mapping, divisions);
+
+    const unmapped = observed.values.filter((row) => !row.mappedTo);
+
+    return {
+      result: {
+        rule: mapping.rule,
+        ruleOptions: ATTRIBUTION_RULES,
+        property: mapping.property,
+        confirmedByWestport: mapping.isConfirmed,
+        divisions,
+        landedDealsSampled: observed.sampledDeals,
+        values: observed.values,
+        unmappedValues: unmapped.map((row) => ({ value: row.value, deals: row.deals })),
+        unattributedDeals: unmapped.reduce((sum, row) => sum + row.deals, 0),
+        consequence:
+          mapping.rule === 'none' || !mapping.isConfirmed
+            ? 'Sales and marketing metrics report at ARG Total only. Divisional figures are withheld rather than computed on an unconfirmed rule.'
+            : 'Sales and marketing metrics break down by division for every mapped value. Unmapped values are counted at ARG Total and absent from division rows.',
+        instruction:
+          'Never propose a mapping for a value on resemblance alone. If it is not obvious which division a value belongs to, ask — an attribution nobody agreed to moves revenue between divisional P&Ls and is invisible at ARG Total.',
+      },
+      activity: `Inspected the HubSpot division mapping (${observed.values.length} distinct values)`,
+    };
+  },
+};
+
+const proposeDivisionMapping: ToolDefinition = {
+  name: 'propose_division_mapping',
+  description:
+    'Propose a change to the HubSpot division mapping. This writes nothing — it puts a confirmation control on screen and the user decides. Use it when somebody tells you which division a HubSpot value belongs to. Call inspect_division_mapping first so you propose against real values.',
+  input_schema: {
+    type: 'object',
+    required: ['rule'],
+    properties: {
+      rule: {
+        type: 'string',
+        enum: ['deal_property', 'pipeline', 'owner', 'none'],
+        description: 'Which field decides the division. "none" reports at ARG Total only.',
+      },
+      property: {
+        type: 'string',
+        description: 'The HubSpot deal property name, required when rule is deal_property.',
+      },
+      values: {
+        type: 'array',
+        description:
+          'The value-to-division mappings to set. Include every value that should be mapped — the list replaces what is stored.',
+        items: {
+          type: 'object',
+          required: ['value', 'division'],
+          properties: {
+            value: { type: 'string', description: 'The value exactly as HubSpot holds it.' },
+            division: { type: 'string', description: 'The ARG division code.' },
+          },
+        },
+      },
+      confirmRule: {
+        type: 'boolean',
+        description:
+          'Whether this marks the rule as confirmed by Westport. Only true if the user has said so — divisional metrics stay withheld until it is.',
+      },
+    },
+  },
+  async run(input, context) {
+    if (!can(context.user, 'EDIT_MAPPINGS')) {
+      return {
+        result: {
+          permitted: false,
+          explanation:
+            'This user cannot change the division mapping — an administrator or the CFO does. Tell them who, rather than attempting it.',
+        },
+      };
+    }
+
+    const rule = String(input.rule) as AttributionRule;
+    if (!ATTRIBUTION_RULES.some((candidate) => candidate.id === rule)) {
+      return { result: { error: `"${input.rule}" is not an attribution rule.` } };
+    }
+
+    const current = await loadHubspotMapping(context.db);
+    const property = input.property ? String(input.property) : current.property;
+    if (rule === 'deal_property' && !property) {
+      return {
+        result: {
+          error:
+            'Attributing by deal property needs the property name. Ask which HubSpot property carries the division.',
+        },
+      };
+    }
+
+    const divisions = context.session.bundle.divisions.map((d) => d.divisionCode);
+    const requested = Array.isArray(input.values) ? (input.values as Array<Record<string, unknown>>) : [];
+
+    const values: Record<string, string> = {};
+    const rejected: string[] = [];
+    for (const entry of requested) {
+      const value = String(entry.value ?? '').trim();
+      const division = String(entry.division ?? '').trim();
+      if (!value || !division) continue;
+      if (!divisions.includes(division)) {
+        rejected.push(`${value} → ${division}`);
+        continue;
+      }
+      values[value.toLowerCase()] = division;
+    }
+
+    if (rejected.length) {
+      return {
+        result: {
+          error: `These name a division that does not exist or is not visible to this user: ${rejected.join(', ')}. The divisions are ${divisions.join(', ')}.`,
+        },
+      };
+    }
+
+    const [action] = await context.db
+      .insert(t.agentPendingAction)
+      .values({
+        userId: context.user.id,
+        conversationId: context.conversationId,
+        kind: 'HUBSPOT_MAPPING',
+        label: 'Apply the HubSpot division mapping',
+        detail:
+          rule === 'none'
+            ? 'Attribution set to none — sales and marketing report at ARG Total only.'
+            : `${Object.keys(values).length} value${Object.keys(values).length === 1 ? '' : 's'} mapped by ${rule}${property ? ` (${property})` : ''}. Applies to every deal already landed.`,
+        payload: {
+          rule,
+          property,
+          values,
+          isConfirmed: Boolean(input.confirmRule),
+        },
+        status: 'PENDING',
+      })
+      .returning();
+
+    return {
+      result: {
+        proposed: true,
+        actionId: action!.id,
+        rule,
+        property,
+        mappings: values,
+        instruction:
+          'Nothing has been written. Summarise what the mapping would do, including any value left unmapped and what that means. The confirm control is already on screen — do not ask them to type anything.',
+      },
+      pendingAction: {
+        id: action!.id,
+        label: 'Apply the HubSpot division mapping',
+        detail: `${
+          rule === 'none'
+            ? 'Sales and marketing will report at ARG Total only.'
+            : `${Object.keys(values).length} value${Object.keys(values).length === 1 ? '' : 's'} mapped. Re-applied to every deal already landed.`
+        }`,
+      },
+      links: [{ label: 'Open the mapping screen', href: '/admin' }],
+      activity: 'Prepared a division mapping for review',
+    };
+  },
+};
+
+// ---------------------------------------------------------------------------
+// Guiding — the assistant as the person who knows the app
+// ---------------------------------------------------------------------------
+
+const guideMe: ToolDefinition = {
+  name: 'guide_me',
+  description:
+    'Get the map of this application as it currently stands: what each dashboard answers, how the filters work, what is connected, what decisions are still unconfirmed, what this person is permitted to do, and which boxes they have already had you build. Call it for any "how do I…", "where is…", "why is this blank" or "what can you do" question rather than describing the app from memory.',
+  input_schema: { type: 'object', properties: {} },
+  async run(_input, context) {
+    const guide = await buildGuide(context.db, context.user);
+    return {
+      result: {
+        ...guide,
+        instruction:
+          'Answer with the two or three steps that actually do the thing, naming the control on screen. Do not recite the whole feature list.',
+      },
+      activity: 'Read the current state of the app',
+    };
+  },
+};
+
+const openView: ToolDefinition = {
+  name: 'open_view',
+  description:
+    'Give the user a button that opens a dashboard at a specific month, division, date range or salesperson. Use it when the answer is easier seen than described, or when they ask to "show me" something a built dashboard already covers.',
+  input_schema: {
+    type: 'object',
+    required: ['page'],
+    properties: {
+      page: {
+        type: 'string',
+        enum: ['executive', 'finance', 'sales', 'marketing', 'forecast', 'kpi-dictionary', 'admin'],
+      },
+      division: DIVISION_ARG,
+      month: MONTH_ARG,
+      range: {
+        type: 'string',
+        enum: ['this_month', 'last_3_months', 'last_6_months', 'ytd', 'last_12_months'],
+        description: 'The date range for views that list dated events.',
+      },
+      owner: { type: 'string', description: 'A salesperson name, for the Sales deal table.' },
+      label: { type: 'string', description: 'What the button should say.' },
+    },
+  },
+  async run(input, context) {
+    const page = String(input.page);
+    const params = new URLSearchParams();
+
+    const month = normaliseMonth(input.month, context.session.period.month);
+    params.set('month', month.slice(0, 7));
+
+    if (typeof input.division === 'string') {
+      const division = input.division;
+      const permitted =
+        division === CONSOLIDATED_CODE
+          ? context.session.consolidatedAvailable
+          : context.session.visibleDivisions.includes(division);
+      if (!permitted) {
+        return {
+          result: {
+            error: `Not entitled to ${division}. Visible divisions: ${context.session.visibleDivisions.join(', ') || 'none'}.`,
+          },
+        };
+      }
+      params.set('division', division);
+    }
+
+    if (typeof input.range === 'string') params.set('range', input.range);
+    if (typeof input.owner === 'string') params.set('owner', input.owner);
+
+    const href = `/${page}?${params.toString()}`;
+    const label = typeof input.label === 'string' && input.label.trim() ? input.label : `Open ${page}`;
+
+    return {
+      result: {
+        opened: false,
+        href,
+        instruction:
+          'The button is on screen. Say in one sentence what they will see there; do not paste the URL.',
+      },
+      links: [{ label, href }],
+      activity: `Prepared a link to ${page}`,
+    };
+  },
+};
+
+// ---------------------------------------------------------------------------
 
 export const AGENT_TOOLS: ToolDefinition[] = [
   listKpis,
@@ -675,6 +1053,13 @@ export const AGENT_TOOLS: ToolDefinition[] = [
   listSources,
   planExtraction,
   getLoadHistory,
+  createDashboardBox,
+  listDashboardBoxes,
+  removeDashboardBox,
+  inspectDivisionMapping,
+  proposeDivisionMapping,
+  guideMe,
+  openView,
 ];
 
 export function toolByName(name: string): ToolDefinition | undefined {
@@ -809,6 +1194,81 @@ export async function confirmExtraction(
       message: `The pull failed and nothing was written: ${error instanceof Error ? error.message : 'unknown error'}`,
     };
   }
+}
+
+/**
+ * Applies a proposal the agent made and a human confirmed.
+ *
+ * The payload comes from the database rather than the request, so what is
+ * applied is exactly what was previewed. A confirmation that carried its own
+ * payload would make the preview a decoration.
+ */
+export async function confirmPendingAction(
+  db: Database,
+  user: SessionUser,
+  actionId: string,
+): Promise<{ handled: boolean; ok: boolean; message: string }> {
+  const [action] = await db
+    .select()
+    .from(t.agentPendingAction)
+    .where(and(eq(t.agentPendingAction.id, actionId), eq(t.agentPendingAction.status, 'PENDING')))
+    .limit(1);
+
+  if (!action) return { handled: false, ok: false, message: '' };
+
+  if (action.userId !== user.id) {
+    return {
+      handled: true,
+      ok: false,
+      message: 'That proposal belongs to someone else’s conversation.',
+    };
+  }
+
+  if (action.kind !== 'HUBSPOT_MAPPING') {
+    return { handled: true, ok: false, message: `Nothing knows how to apply "${action.kind}".` };
+  }
+
+  if (!can(user, 'EDIT_MAPPINGS')) {
+    return {
+      handled: true,
+      ok: false,
+      message:
+        'You are not permitted to change the division mapping — an administrator or the CFO is. Nothing was changed.',
+    };
+  }
+
+  const payload = action.payload as {
+    rule: AttributionRule;
+    property: string | null;
+    values: Record<string, string>;
+    isConfirmed: boolean;
+  };
+
+  await saveHubspotMapping(db, user, {
+    rule: payload.rule,
+    property: payload.property,
+    values: payload.values,
+    isConfirmed: payload.isConfirmed,
+  });
+
+  // Re-attribute what is already landed, so the warehouse is never half on the
+  // old rule and half on the new one.
+  const { reconformLandedHubspot, describeConform } = await import('@/lib/etl/hubspot');
+  const conformed = await reconformLandedHubspot(db, 'deals');
+
+  await db
+    .update(t.agentPendingAction)
+    .set({ status: 'APPLIED', appliedAt: new Date() })
+    .where(eq(t.agentPendingAction.id, actionId));
+
+  return {
+    handled: true,
+    ok: true,
+    message:
+      conformed.written === 0
+        ? 'Mapping saved. No HubSpot deals are landed yet, so there was nothing to re-attribute — it applies to the next pull.'
+        : `Mapping saved. ${describeConform(conformed)}`,
+  };
 }
 
 export { sumPl };

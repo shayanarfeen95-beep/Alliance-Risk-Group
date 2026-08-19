@@ -776,6 +776,38 @@ export const generatedView = pgTable('generated_view', {
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
 });
 
+/**
+ * A write the agent has proposed and a human has not yet confirmed.
+ *
+ * Ingestion already worked this way — `load_run` holds a PREVIEW row and
+ * nothing lands until somebody clicks confirm. Mapping changes join it, for a
+ * stronger reason: changing how a HubSpot deal is attributed silently restates
+ * every divisional sales figure in every prior month.
+ *
+ * The payload is stored server-side rather than round-tripped through the
+ * browser, so what gets applied is exactly what was shown.
+ */
+export const agentPendingAction = pgTable(
+  'agent_pending_action',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    userId: uuid('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    conversationId: uuid('conversation_id'),
+    /** 'HUBSPOT_MAPPING' today. Text, so a new kind needs no migration. */
+    kind: text('kind').notNull(),
+    label: text('label').notNull(),
+    detail: text('detail').notNull(),
+    payload: jsonb('payload').notNull(),
+    /** 'PENDING' | 'APPLIED' | 'CANCELLED' */
+    status: text('status').notNull().default('PENDING'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    appliedAt: timestamp('applied_at', { withTimezone: true }),
+  },
+  (t) => [index('agent_pending_action_user_idx').on(t.userId, t.status)],
+);
+
 /** Named standing goals the agent evaluates on refresh and on close. */
 export const agentGoal = pgTable('agent_goal', {
   id: uuid('id').primaryKey().defaultRandom(),

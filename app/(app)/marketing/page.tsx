@@ -5,6 +5,7 @@ import { formatMonth } from '@/lib/semantic/periods';
 import { formatNumber } from '@/lib/format';
 import { KpiTile } from '@/components/dashboard/kpi-tile';
 import { BoxFilter } from '@/components/dashboard/box-filter';
+import { PinnedBoxes } from '@/components/dashboard/pinned-boxes';
 import { ChartCard } from '@/components/charts/chart-card';
 import { Card, CardHeader, DataTable, Td, Th, Unavailable } from '@/components/ui/primitives';
 
@@ -79,6 +80,9 @@ export default async function MarketingPage({
           filter={<BoxFilter state={model.boxes.leadsTrend} options={boxOptions} />}
         />
       </div>
+
+      {/* Boxes the assistant built for this reader. */}
+      <PinnedBoxes page="marketing" context={context} />
 
       <div className="grid gap-4 xl:grid-cols-[2fr_1fr]">
         <Card>
