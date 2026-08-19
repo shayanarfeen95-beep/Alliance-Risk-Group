@@ -1,7 +1,8 @@
 import type { Metadata } from 'next';
-import { desc, sql } from 'drizzle-orm';
+import { desc, eq, sql } from 'drizzle-orm';
 import { CircleAlert, CircleCheck, CircleHelp, Download } from 'lucide-react';
 import { ConnectorCard } from '@/components/admin/connector-card';
+import { UserManager } from '@/components/admin/user-manager';
 import { can } from '@/lib/auth/scope';
 import { getDb } from '@/lib/db/client';
 import * as t from '@/lib/db/schema';
@@ -34,7 +35,7 @@ export default async function AdminPage({
 
   const db = await getDb();
 
-  const [config, recentRuns, reconSummary, failingChecks, auditTrail] = await Promise.all([
+  const [config, recentRuns, reconSummary, failingChecks, auditTrail, userRows, accessRows, divisionRows] = await Promise.all([
     db.select().from(t.appConfig).orderBy(t.appConfig.key),
     db.select().from(t.loadRun).orderBy(desc(t.loadRun.startedAt)).limit(10),
     db
@@ -52,7 +53,21 @@ export default async function AdminPage({
       .where(sql`status = 'FAIL' and ran_at = (select max(ran_at) from recon_result)`)
       .limit(25),
     db.select().from(t.auditEvent).orderBy(desc(t.auditEvent.createdAt)).limit(15),
+    db.select().from(t.users).orderBy(t.users.name),
+    db.select().from(t.userDivisionAccess),
+    db.select().from(t.dimDivision).where(eq(t.dimDivision.isActive, true)).orderBy(t.dimDivision.sortOrder),
   ]);
+
+  const managedUsers = userRows.map((row) => ({
+    id: row.id,
+    name: row.name,
+    email: row.email,
+    role: row.role as string,
+    canViewConsolidated: row.canViewConsolidated,
+    divisions: accessRows.filter((a) => a.userId === row.id).map((a) => a.divisionCode),
+    isActive: row.isActive,
+    lastLoginAt: row.lastLoginAt?.toISOString() ?? null,
+  }));
 
   const connectors = await connectorStatuses();
 
@@ -305,6 +320,25 @@ export default async function AdminPage({
           </DataTable>
         </Card>
       </section>
+
+      {/* --- People and access ---------------------------------------------- */}
+      {can(user, 'MANAGE_USERS') && (
+        <section>
+          <SectionTitle hint="Roles decide what someone can do; divisions decide what they can see">
+            People and access
+          </SectionTitle>
+          <Card padded>
+            <UserManager
+              users={managedUsers}
+              divisions={divisionRows.map((d) => ({
+                divisionCode: d.divisionCode,
+                divisionName: d.divisionName,
+              }))}
+              currentUserId={user.id}
+            />
+          </Card>
+        </section>
+      )}
 
       {/* --- Audit trail --------------------------------------------------- */}
       <section>
