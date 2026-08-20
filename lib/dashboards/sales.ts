@@ -3,6 +3,7 @@ import Decimal from 'decimal.js';
 import { resolveKpi, CONSOLIDATED_CODE, type SemanticSession } from '@/lib/semantic/resolve';
 import { monthBounds, formatMonthShort } from '@/lib/semantic/periods';
 import type { KpiTileProps } from '@/components/dashboard/kpi-tile';
+import { buildTiles } from './tiles';
 import type { DateRange } from './range';
 
 /**
@@ -101,29 +102,7 @@ export function loadSales(
   const { period, bundle } = session;
   const isConsolidated = divisionCode === CONSOLIDATED_CODE;
 
-  const tiles: KpiTileProps[] = SALES_TILES.map(({ id, hint }) => {
-    const current = resolveKpi(session, id, divisionCode);
-    const priorMonth = resolveKpi(session, id, divisionCode, { month: period.priorMonth });
-    const priorYear = resolveKpi(session, id, divisionCode, { month: period.priorYearMonth });
-
-    const value = num(current);
-    const pm = num(priorMonth);
-    const py = num(priorYear);
-
-    return {
-      name: current.name,
-      formatted: current.formatted,
-      unavailable: current.unavailable,
-      higherIsBetter: current.higherIsBetter,
-      format: current.format,
-      deltaPriorMonth: value !== null && pm !== null ? value - pm : null,
-      deltaPriorYear: value !== null && py !== null ? value - py : null,
-      sparkline: period.trailingTwelveMonths.map((month) =>
-        num(resolveKpi(session, id, divisionCode, { month })),
-      ),
-      hint,
-    };
-  });
+  const tiles: KpiTileProps[] = buildTiles(session, SALES_TILES, divisionCode);
 
   const bookingRate = resolveKpi(session, 'booking_rate_pct', divisionCode);
   const bookingRateDenominator = bookingRate.components

@@ -9,7 +9,13 @@ import { formatMonth, monthRange, addMonths, type MonthKey } from '@/lib/semanti
 import { KPI_REGISTRY, getKpiDefinition, isSpecKpi } from '@/lib/semantic/registry';
 import { resolveKpi, CONSOLIDATED_CODE, type SemanticSession } from '@/lib/semantic/resolve';
 import { sumPl, key } from '@/lib/semantic/facts';
-import { connectorStatuses, getConnector, type SourceSystemCode } from '@/lib/connectors';
+import {
+  connectorStatuses,
+  getConnector,
+  resolveConnector,
+  type SourceSystemCode,
+} from '@/lib/connectors';
+import { runSync } from '@/lib/etl/sync';
 import { executeViewSpec, viewSpecJsonSchema, ViewSpecError } from './viewspec';
 import type { ChartCardProps } from '@/components/charts/chart-card';
 
@@ -509,6 +515,280 @@ const makeChart: ToolDefinition = {
 };
 
 // ---------------------------------------------------------------------------
+// Source detail — records, never metrics
+// ---------------------------------------------------------------------------
+
+/**
+ * The three tools below answer "go and get me the actual rows".
+ *
+ * They exist because the honest answer to "pull the deals Scott closed in
+ * March" was previously "I can tell you the total" — which is not what was
+ * asked, and a system that cannot show its working is a system nobody audits.
+ *
+ * What keeps them from becoming a second definition of anything: each returns
+ * *records*, never an aggregate that a KPI already defines. There is no tool
+ * here that sums a column. If the model wants a total it must call `get_kpi`,
+ * exactly as before, and the guarantee that the assistant and the dashboard
+ * cannot disagree survives intact — because nothing here produces a figure that
+ * a dashboard also produces.
+ *
+ * Entitlements come for free: deals and accounts are read from the semantic
+ * session's bundle, which was loaded with the caller's division scope applied.
+ * A division manager cannot reach another division's deals through these,
+ * because those rows were never fetched.
+ */
+
+const queryDeals: ToolDefinition = {
+  name: 'query_deals',
+  description:
+    'List individual HubSpot deals matching a filter — by owner, stage, pipeline, status or close date. Use this when the user wants to see the deals themselves ("which deals did Scott close in March", "what is sitting in proposal"), not a total. For any total, use get_kpi instead; this tool deliberately does not sum anything.',
+  input_schema: {
+    type: 'object',
+    properties: {
+      owner: { type: 'string', description: 'Salesperson name, or "Unassigned". Partial names match.' },
+      stage: { type: 'string', description: 'HubSpot deal stage id, e.g. proposalsent.' },
+      pipeline: { type: 'string', description: 'HubSpot pipeline id.' },
+      status: {
+        type: 'string',
+        enum: ['won', 'lost', 'open', 'closed', 'any'],
+        description: 'Deal status. Defaults to any.',
+      },
+      division: DIVISION_ARG,
+      fromMonth: { type: 'string', description: 'Earliest close month, YYYY-MM. Applies to closed deals.' },
+      toMonth: { type: 'string', description: 'Latest close month, YYYY-MM.' },
+      limit: { type: 'number', description: 'How many to return, newest first. Defaults to 25, maximum 100.' },
+    },
+  },
+  async run(input, context) {
+    const { session } = context;
+    const status = (input.status as string) ?? 'any';
+    const division = typeof input.division === 'string' ? input.division : null;
+    const limit = Math.min(Math.max(Number(input.limit) || 25, 1), 100);
+
+    const from = input.fromMonth ? normaliseMonth(input.fromMonth, session.period.month) : null;
+    const to = input.toMonth ? normaliseMonth(input.toMonth, session.period.month) : null;
+    const fromDate = from ? monthRange(from, from)[0] : null;
+    const toBound = to ? addMonths(to, 1) : null;
+
+    const owner = typeof input.owner === 'string' ? input.owner.toLowerCase() : null;
+
+    const matched = session.bundle.deals.filter((deal) => {
+      if (division && division !== CONSOLIDATED_CODE && deal.divisionCode !== division) return false;
+      if (input.stage && deal.dealstage !== input.stage) return false;
+      if (input.pipeline && deal.pipeline !== input.pipeline) return false;
+
+      if (status === 'won' && !deal.isClosedWon) return false;
+      if (status === 'lost' && !(deal.isClosed && !deal.isClosedWon)) return false;
+      if (status === 'open' && deal.isClosed) return false;
+      if (status === 'closed' && !deal.isClosed) return false;
+
+      if (owner) {
+        const name = (deal.ownerName ?? 'Unassigned').toLowerCase();
+        if (!name.includes(owner)) return false;
+      }
+
+      if (fromDate || toBound) {
+        if (!deal.closedate) return false;
+        const closed = deal.closedate.toISOString().slice(0, 10);
+        if (fromDate && closed < fromDate) return false;
+        if (toBound && closed >= toBound) return false;
+      }
+
+      return true;
+    });
+
+    const sorted = [...matched].sort((a, b) => {
+      const left = a.closedate?.getTime() ?? a.createdate?.getTime() ?? 0;
+      const right = b.closedate?.getTime() ?? b.createdate?.getTime() ?? 0;
+      return right - left;
+    });
+
+    return {
+      result: {
+        matched: matched.length,
+        returned: Math.min(sorted.length, limit),
+        deals: sorted.slice(0, limit).map((deal) => ({
+          dealId: deal.dealId,
+          name: deal.dealName,
+          amount: deal.amount.toNumber(),
+          owner: deal.ownerName ?? 'Unassigned',
+          stage: deal.dealstage,
+          pipeline: deal.pipeline,
+          division: deal.divisionCode,
+          status: deal.isClosedWon ? 'won' : deal.isClosed ? 'lost' : 'open',
+          created: deal.createdate?.toISOString().slice(0, 10) ?? null,
+          closed: deal.closedate?.toISOString().slice(0, 10) ?? null,
+        })),
+        note:
+          'Individual deals as loaded from HubSpot. Do not add these amounts up and present the ' +
+          'result as a metric — call get_kpi for Dollars Booked or Pipeline Value, which apply ' +
+          "ARG's definitions. Deals outside this user's divisions were never loaded.",
+      },
+      activity: `Found ${matched.length} deal${matched.length === 1 ? '' : 's'} in HubSpot`,
+    };
+  },
+};
+
+const queryGlAccounts: ToolDefinition = {
+  name: 'query_gl_accounts',
+  description:
+    'List the individual QuickBooks GL accounts and their balances for one division and month. Use this to answer "what is actually in OpEx" or "which account is that cost sitting in". For the reporting-line totals use get_pl_statement, and for what moved use get_variance_drivers.',
+  input_schema: {
+    type: 'object',
+    properties: {
+      division: DIVISION_ARG,
+      month: MONTH_ARG,
+      line: {
+        type: 'string',
+        enum: ['revenue', 'cogs', 'payroll_direct', 'opex', 'payroll_expense', 'all'],
+        description: 'Restrict to one reporting line. Defaults to all.',
+      },
+      search: { type: 'string', description: 'Match against the account name or number.' },
+    },
+  },
+  async run(input, context) {
+    const { session } = context;
+    const month = normaliseMonth(input.month, session.period.month);
+    const division = divisionOf(input.division, context);
+    const line = (input.line as string) ?? 'all';
+    const search = typeof input.search === 'string' ? input.search.toLowerCase() : null;
+
+    const divisions = division === CONSOLIDATED_CODE ? session.visibleDivisions : [division];
+    const rows: Array<{
+      accountId: string;
+      accountName: string;
+      reportingLine: string | null;
+      division: string;
+      amount: number;
+    }> = [];
+
+    for (const code of divisions) {
+      for (const detail of session.bundle.gl.get(key(month, code)) ?? []) {
+        if (line !== 'all' && detail.reportingLine !== line) continue;
+        if (
+          search &&
+          !detail.accountName.toLowerCase().includes(search) &&
+          !detail.accountId.toLowerCase().includes(search)
+        ) {
+          continue;
+        }
+        rows.push({
+          accountId: detail.accountId,
+          accountName: detail.accountName,
+          reportingLine: detail.reportingLine,
+          division: code,
+          amount: detail.amount.toNumber(),
+        });
+      }
+    }
+
+    if (rows.length === 0) {
+      return {
+        result: {
+          available: false,
+          explanation:
+            `No account-level detail is loaded for ${division} in ${formatMonth(month)}` +
+            `${line === 'all' ? '' : ` on the ${line} line`}${search ? ` matching "${search}"` : ''}. ` +
+            'Say so rather than reporting zero — an empty result and no data must not read the same.',
+        },
+      };
+    }
+
+    rows.sort((a, b) => Math.abs(b.amount) - Math.abs(a.amount));
+
+    return {
+      result: {
+        division,
+        period: formatMonth(month),
+        line,
+        accounts: rows.slice(0, 50),
+        truncated: rows.length > 50 ? rows.length - 50 : 0,
+        note:
+          'Account balances as loaded from QuickBooks, largest first. payroll_direct accounts are ' +
+          'already inside COGS and payroll_expense inside OpEx — they are memo lines, so do not ' +
+          'add them to their parent or subtract them from it.',
+      },
+      activity: `Listed ${rows.length} GL account${rows.length === 1 ? '' : 's'} · ${division} · ${formatMonth(month)}`,
+    };
+  },
+};
+
+const readSheetRange: ToolDefinition = {
+  name: 'read_sheet_range',
+  description:
+    "Read a range from ARG's connected Google Sheet, live. Use this when the user asks what a sheet says — budget assumptions, headcount, anything hand-maintained. Returns the cells as they are, which is source data and not a system figure.",
+  input_schema: {
+    type: 'object',
+    required: ['range'],
+    properties: {
+      range: {
+        type: 'string',
+        description:
+          "A1 notation including the tab, e.g. 'Monthly Budget!A1:M40'. Ask the user which tab if you do not know; do not guess a tab name.",
+      },
+    },
+  },
+  async run(input, context) {
+    if (!can(context.user, 'RUN_INGESTION')) {
+      return {
+        result: {
+          permitted: false,
+          explanation: 'This user is not permitted to read source systems directly.',
+        },
+      };
+    }
+
+    const { sheetsConnector } = await import('@/lib/connectors');
+    if (!(await sheetsConnector.isConfigured())) {
+      return {
+        result: {
+          available: false,
+          explanation:
+            'Google Sheets is not connected, so there is nothing to read. Say so — do not guess ' +
+            'at what the sheet might contain.',
+        },
+      };
+    }
+
+    const range = String(input.range);
+
+    try {
+      const { readRange } = await import('@/lib/connectors/sheets');
+      const { loadCredential } = await import('@/lib/connectors/credentials');
+      const spreadsheetId = (await loadCredential('SHEETS'))?.data.spreadsheetId;
+      if (!spreadsheetId) {
+        return { result: { available: false, explanation: 'No spreadsheet is configured.' } };
+      }
+
+      const values = await readRange(spreadsheetId, range);
+
+      return {
+        result: {
+          range,
+          rows: values.length,
+          // Bounded because a wide range would otherwise fill the context with
+          // a spreadsheet and leave no room for the answer.
+          values: values.slice(0, 60),
+          truncated: values.length > 60 ? values.length - 60 : 0,
+          note:
+            'These cells are raw source data. They have not been through the conform step or the ' +
+            'reconciliation controls, so quote them as "the sheet says", never as an ARG figure. ' +
+            'Where a metric exists for the same thing, the metric is the system of record.',
+        },
+        activity: `Read ${range} from Google Sheets`,
+      };
+    } catch (error) {
+      return {
+        result: {
+          available: false,
+          explanation: `Google Sheets refused that read: ${error instanceof Error ? error.message : 'unknown error'}. Nothing was changed.`,
+        },
+      };
+    }
+  },
+};
+
+// ---------------------------------------------------------------------------
 // Ingestion tools — plan, preview, confirm
 // ---------------------------------------------------------------------------
 
@@ -672,6 +952,9 @@ export const AGENT_TOOLS: ToolDefinition[] = [
   getPeriodState,
   getReconStatus,
   makeChart,
+  queryDeals,
+  queryGlAccounts,
+  readSheetRange,
   listSources,
   planExtraction,
   getLoadHistory,
@@ -685,8 +968,10 @@ export function toolByName(name: string): ToolDefinition | undefined {
  * Executes a confirmed extraction.
  *
  * This is the only path that writes source data on an agent's behalf, and it
- * runs only after a human clicked confirm. The run is recorded end to end so it
- * can be reversed.
+ * runs only after a human clicked confirm. The work itself is `runSync` — the
+ * same function the Sync button in Admin and the overnight refresh call — so an
+ * agent-initiated pull and an operator-initiated pull cannot diverge in what
+ * they conform, what they skip, or which controls they run afterwards.
  */
 export async function confirmExtraction(
   db: Database,
@@ -707,81 +992,58 @@ export async function confirmExtraction(
     return { ok: false, message: 'That extraction is no longer awaiting confirmation.' };
   }
 
-  const connector = getConnector(run.sourceSystem as SourceSystemCode);
-  if (!(await connector.isConfigured())) {
-    await db
-      .update(t.loadRun)
-      .set({
-        status: 'FAILED',
-        errorMessage: `${connector.label} has no credentials configured.`,
-        finishedAt: new Date(),
-      })
-      .where(eq(t.loadRun.id, loadRunId));
-    return {
-      ok: false,
-      message: `${connector.label} is not connected. Add its credentials in Admin, then run this again — nothing was written.`,
-    };
+  const connector = await resolveConnector(run.sourceSystem as SourceSystemCode);
+
+  const result = await runSync(db, {
+    sourceSystem: run.sourceSystem as SourceSystemCode,
+    entity: run.entity,
+    window: { start: run.windowStart!, end: run.windowEnd! },
+    requestedByUserId: user.id,
+    agentConversationId: run.agentConversationId,
+    existingLoadRunId: loadRunId,
+  });
+
+  await db.insert(t.auditEvent).values({
+    userId: user.id,
+    action: 'AGENT_EXTRACTION_CONFIRMED',
+    entity: 'load_run',
+    entityId: loadRunId,
+    detail: {
+      source: run.sourceSystem,
+      entity: run.entity,
+      ok: result.ok,
+      rowsRead: result.rowsRead,
+      rowsWritten: result.rowsWritten,
+    },
+  });
+
+  if (!result.ok) {
+    return { ok: false, message: result.error ?? 'The pull failed and nothing was written.' };
   }
 
-  await db
-    .update(t.loadRun)
-    .set({ status: 'RUNNING', confirmedAt: new Date() })
-    .where(eq(t.loadRun.id, loadRunId));
-
-  try {
-    const batch = await connector.fetch(run.entity, {
-      start: run.windowStart!,
-      end: run.windowEnd!,
-    });
-
-    // Raw landing first, so conform can be re-run without re-hitting the API.
-    for (let i = 0; i < batch.records.length; i += 200) {
-      await db.insert(t.rawPayload).values(
-        batch.records.slice(i, i + 200).map((record) => ({
-          loadRunId,
-          sourceSystem: batch.sourceSystem,
-          entity: record.entity,
-          payload: record.payload as object,
-        })),
-      );
-    }
-
-    await db
-      .update(t.loadRun)
-      .set({
-        status: 'SUCCEEDED',
-        rowsRead: batch.records.length,
-        finishedAt: new Date(),
-      })
-      .where(eq(t.loadRun.id, loadRunId));
-
-    await db.insert(t.auditEvent).values({
-      userId: user.id,
-      action: 'AGENT_EXTRACTION_CONFIRMED',
-      entity: 'load_run',
-      entityId: loadRunId,
-      detail: { source: run.sourceSystem, entity: run.entity, records: batch.records.length },
-    });
-
-    return {
-      ok: true,
-      message: `Pulled ${batch.records.length} record${batch.records.length === 1 ? '' : 's'} from ${connector.label} and landed them for conforming. Reconciliation runs next.`,
-    };
-  } catch (error) {
-    await db
-      .update(t.loadRun)
-      .set({
-        status: 'FAILED',
-        errorMessage: error instanceof Error ? error.message : String(error),
-        finishedAt: new Date(),
-      })
-      .where(eq(t.loadRun.id, loadRunId));
-
-    return {
-      ok: false,
-      message: `The pull failed and nothing was written: ${error instanceof Error ? error.message : 'unknown error'}`,
-    };
+  // What actually changed, in the order somebody would want to hear it. A bare
+  // "succeeded" invites the reader to assume a dashboard moved, and on a load
+  // that was entirely closed months, none did.
+  const parts = [
+    `Pulled ${result.rowsRead} record${result.rowsRead === 1 ? '' : 's'} from ${connector.label} ` +
+      `and wrote ${result.rowsWritten} row${result.rowsWritten === 1 ? '' : 's'}` +
+      (result.tables.length > 0 ? ` to ${result.tables.join(', ')}` : ''),
+  ];
+  if (result.skippedClosedMonths.length > 0) {
+    parts.push(
+      `${result.skippedClosedMonths.length} closed month${result.skippedClosedMonths.length === 1 ? ' was' : 's were'} left untouched`,
+    );
   }
+  if (result.recon) {
+    parts.push(
+      result.recon.failed === 0
+        ? `all ${result.recon.passed} reconciliation controls passed`
+        : `${result.recon.failed} reconciliation control${result.recon.failed === 1 ? '' : 's'} FAILED — say so and do not present these figures as clean`,
+    );
+  }
+  for (const warning of result.warnings) parts.push(warning);
+
+  return { ok: true, message: `${parts.join('. ')}.` };
 }
 
 export { sumPl };

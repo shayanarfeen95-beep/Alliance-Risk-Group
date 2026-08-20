@@ -65,6 +65,27 @@ export const YTD_MARCH_2026: Record<string, YtdFigures> = {
 };
 
 /**
+ * Read straight off the workbook's KPIs tab, March 2026.
+ *
+ * ARG's spreadsheet calls these "Gross Profit Run Rate %" and "Net Profit Run
+ * Rate %". Neither is a run rate — both are year-to-date margins, which is why
+ * this build publishes them as YTD Gross Margin % and YTD Net Margin % and
+ * carries the workbook's label alongside so the name ARG knows still finds
+ * them. Asserting the workbook's own values here is what proves the rename was
+ * only a rename.
+ *
+ * Tolerance is 1e-6: the workbook computes from unrounded source data and these
+ * constants are its published output.
+ */
+export const WORKBOOK_KPI_MARCH_2026: Record<string, { grossMarginPct: number; netMarginPct: number }> = {
+  SHRC: { grossMarginPct: 0.403191897700118, netMarginPct: 0.13653531296248234 },
+  CLAIMS: { grossMarginPct: 0.33782157223542664, netMarginPct: -0.18527421552835213 },
+  TP: { grossMarginPct: 0.3865043626085156, netMarginPct: 0.00029485847855508255 },
+  LITS: { grossMarginPct: 0.3832757349519847, netMarginPct: 0.1253887710671062 },
+  ARG_TOTAL: { grossMarginPct: 0.381134793338485, netMarginPct: 0.04410404012523446 },
+};
+
+/**
  * The two errors §13 tells us to guard against by name. Both are asserted as
  * NOT equal in the tie-out suite, because a passing total can hide a wrong
  * method.

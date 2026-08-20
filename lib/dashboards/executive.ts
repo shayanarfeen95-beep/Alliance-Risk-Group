@@ -6,6 +6,7 @@ import { resolveKpi, CONSOLIDATED_CODE, type SemanticSession } from '@/lib/seman
 import { formatMonthShort, type MonthKey } from '@/lib/semantic/periods';
 import { safeDiv } from '@/lib/money';
 import type { KpiTileProps } from '@/components/dashboard/kpi-tile';
+import { buildTiles } from './tiles';
 import { openFindings } from '@/lib/ai/goals';
 
 /** §9.1 — the eight headline tiles. */
@@ -71,30 +72,7 @@ export async function loadExecutive(
   const { period } = session;
 
   // --- Tiles -------------------------------------------------------------
-  const tiles: KpiTileProps[] = EXECUTIVE_TILES.map(({ id, hint }) => {
-    const current = resolveKpi(session, id, divisionCode);
-    const priorMonth = resolveKpi(session, id, divisionCode, { month: period.priorMonth });
-    const priorYear = resolveKpi(session, id, divisionCode, { month: period.priorYearMonth });
-
-    const currentValue = numberOrNull(current);
-    const pmValue = numberOrNull(priorMonth);
-    const pyValue = numberOrNull(priorYear);
-
-    return {
-      name: current.name,
-      formatted: current.formatted,
-      unavailable: current.unavailable,
-      higherIsBetter: current.higherIsBetter,
-      format: current.format,
-      deltaPriorMonth: currentValue !== null && pmValue !== null ? currentValue - pmValue : null,
-      deltaPriorYear: currentValue !== null && pyValue !== null ? currentValue - pyValue : null,
-      sparkline: period.trailingTwelveMonths.map((month) =>
-        numberOrNull(resolveKpi(session, id, divisionCode, { month })),
-      ),
-      href: current.verifyHref,
-      hint,
-    };
-  });
+  const tiles: KpiTileProps[] = buildTiles(session, EXECUTIVE_TILES, divisionCode);
 
   // --- Division contribution --------------------------------------------
   // §7: "Division contribution % = division revenue ÷ ARG Total revenue. Net

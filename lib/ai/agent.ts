@@ -1,23 +1,33 @@
 import 'server-only';
-import Anthropic from '@anthropic-ai/sdk';
 import { getDb } from '@/lib/db/client';
 import * as t from '@/lib/db/schema';
 import type { SessionUser } from '@/lib/auth/session';
 import type { SemanticSession } from '@/lib/semantic/resolve';
 import { AGENT_TOOLS, toolByName, type ToolContext } from './tools';
 import { buildSystemPrompt, type PageContext } from './prompt';
+import {
+  AgentNotConfiguredError,
+  isAgentConfigured,
+  selectProvider,
+  type AgentMessage,
+} from './provider';
 import type { ChartCardProps } from '@/components/charts/chart-card';
 
 /**
  * The agent loop.
  *
- * A manual tool-use loop rather than the SDK's tool runner: every tool call is
+ * A manual tool-use loop rather than an SDK's tool runner: every tool call is
  * authorised and logged against the caller's entitlements before it runs, and
  * the loop needs the per-request semantic session in scope. Owning the loop
  * keeps that check in one place.
+ *
+ * Provider-neutral since the assistant stopped requiring an Anthropic key. The
+ * loop does not know or care which model answered — and none of the guarantees
+ * depend on it, because they are all properties of the tool surface. There is
+ * no metric tool that computes its own figure and no connector method that
+ * writes, whatever is on the other end of the socket.
  */
 
-const MODEL = process.env.ANTHROPIC_MODEL_INTERACTIVE ?? 'claude-opus-5';
 const MAX_ITERATIONS = 8;
 
 export interface AgentTurnInput {
@@ -26,6 +36,18 @@ export interface AgentTurnInput {
   pageContext: PageContext;
   messages: Array<{ role: 'user' | 'assistant'; content: string }>;
   conversationId: string | null;
+  /**
+   * Called as each step completes, so the panel can show progress.
+   *
+   * A question needing four figures is four tool calls plus the model's turns
+   * between them, and on a free model that is a long time to show one
+   * unchanging "Working…". The steps are interesting in themselves — "read
+   * Revenue · CLAIMS · March 2026" is the assistant showing its work — so
+   * they are worth surfacing as they happen rather than collected at the end.
+   */
+  onActivity?: (activity: { tool: string; summary: string }) => void;
+  /** Aborts the loop between steps when the caller has gone away. */
+  signal?: AbortSignal;
 }
 
 export interface AgentCitation {
@@ -46,23 +68,18 @@ export interface AgentTurnResult {
   pendingAction?: { id: string; label: string; detail: string };
 }
 
-export class AgentNotConfiguredError extends Error {
-  constructor() {
-    super(
-      'The assistant is not configured: ANTHROPIC_API_KEY is not set. Every dashboard still works — only the conversational layer is unavailable.',
-    );
-    this.name = 'AgentNotConfiguredError';
-  }
-}
-
-export function isAgentConfigured(): boolean {
-  return Boolean(process.env.ANTHROPIC_API_KEY);
-}
+export { AgentNotConfiguredError, isAgentConfigured } from './provider';
 
 export async function runAgentTurn(input: AgentTurnInput): Promise<AgentTurnResult> {
-  if (!isAgentConfigured()) throw new AgentNotConfiguredError();
+  const provider = selectProvider();
+  if (!provider) {
+    throw new AgentNotConfiguredError(
+      'The assistant is not configured. Set OPENROUTER_API_KEY (with OPENROUTER_MODEL) or ' +
+        'ANTHROPIC_API_KEY. Every dashboard, export and control still works — only the ' +
+        'conversational layer is unavailable.',
+    );
+  }
 
-  const client = new Anthropic();
   const db = await getDb();
   const started = Date.now();
 
@@ -76,13 +93,15 @@ export async function runAgentTurn(input: AgentTurnInput): Promise<AgentTurnResu
   const tools = AGENT_TOOLS.map((tool) => ({
     name: tool.name,
     description: tool.description,
-    input_schema: tool.input_schema as Anthropic.Tool.InputSchema,
+    input_schema: tool.input_schema,
   }));
 
-  const messages: Anthropic.MessageParam[] = input.messages.map((message) => ({
+  const messages: AgentMessage[] = input.messages.map((message) => ({
     role: message.role,
     content: message.content,
   }));
+
+  const system = buildSystemPrompt(input.user, input.session, input.pageContext);
 
   const activity: AgentTurnResult['activity'] = [];
   const citations: AgentCitation[] = [];
@@ -90,42 +109,35 @@ export async function runAgentTurn(input: AgentTurnInput): Promise<AgentTurnResu
   let pendingAction: AgentTurnResult['pendingAction'];
 
   for (let iteration = 0; iteration < MAX_ITERATIONS; iteration++) {
-    const response = await client.messages.create({
-      model: MODEL,
-      max_tokens: 8000,
-      system: buildSystemPrompt(input.user, input.session, input.pageContext),
-      tools,
-      messages,
-    });
+    // Checked between steps rather than mid-request: a tool that has started
+    // should finish and be logged, because a half-recorded load run is worse
+    // than a wasted one.
+    if (input.signal?.aborted) {
+      return {
+        content: 'Stopped.',
+        citations,
+        activity,
+        view,
+        pendingAction,
+      };
+    }
 
-    // Safety classifiers can decline a request outright. That arrives as a
-    // successful response with an empty or partial body, so check the stop
-    // reason before reading content.
-    if (response.stop_reason === 'refusal') {
-      const detail = response.stop_details;
-      await logTurn(db, input, 'assistant', 'Declined by safety classifier', true, Date.now() - started);
+    const response = await provider.complete({ system, messages, tools });
+
+    if (response.refused) {
+      await logTurn(db, input, 'assistant', 'Declined by the provider', true, Date.now() - started, [], provider.model);
       return {
         content:
           'I was unable to answer that. If it was a routine question about ARG’s figures, rephrasing it usually helps; otherwise the dashboards have the same numbers.',
         citations: [],
         activity,
         isRefusal: true,
-        ...(detail ? {} : {}),
       };
     }
 
-    const toolUses = response.content.filter(
-      (block): block is Anthropic.ToolUseBlock => block.type === 'tool_use',
-    );
-
-    if (toolUses.length === 0) {
-      const text = response.content
-        .filter((block): block is Anthropic.TextBlock => block.type === 'text')
-        .map((block) => block.text)
-        .join('\n')
-        .trim();
-
-      await logTurn(db, input, 'assistant', text, false, Date.now() - started, citations);
+    if (response.toolCalls.length === 0) {
+      const text = response.text;
+      await logTurn(db, input, 'assistant', text, false, Date.now() - started, citations, provider.model);
 
       return {
         content: text || 'I could not produce an answer for that.',
@@ -136,31 +148,33 @@ export async function runAgentTurn(input: AgentTurnInput): Promise<AgentTurnResu
       };
     }
 
-    messages.push({ role: 'assistant', content: response.content });
+    messages.push({
+      role: 'assistant',
+      content: response.text,
+      toolCalls: response.toolCalls,
+    });
 
-    // All tool results go back in a single user message — splitting them
-    // trains the model out of parallel calls.
-    const toolResults: Anthropic.ToolResultBlockParam[] = [];
-
-    for (const toolUse of toolUses) {
-      const tool = toolByName(toolUse.name);
+    for (const call of response.toolCalls) {
+      const tool = toolByName(call.name);
       if (!tool) {
-        toolResults.push({
-          type: 'tool_result',
-          tool_use_id: toolUse.id,
-          content: `No such tool: ${toolUse.name}`,
-          is_error: true,
+        messages.push({
+          role: 'tool',
+          toolCallId: call.id,
+          name: call.name,
+          content: `No such tool: ${call.name}`,
+          isError: true,
         });
         continue;
       }
 
       try {
-        const outcome = await tool.run(
-          (toolUse.input ?? {}) as Record<string, unknown>,
-          context,
-        );
+        const outcome = await tool.run(call.input, context);
 
-        if (outcome.activity) activity.push({ tool: tool.name, summary: outcome.activity });
+        if (outcome.activity) {
+          const step = { tool: tool.name, summary: outcome.activity };
+          activity.push(step);
+          input.onActivity?.(step);
+        }
         if (outcome.view) view = outcome.view;
         if (outcome.pendingAction) pendingAction = outcome.pendingAction;
         if (outcome.citations) citations.push(...outcome.citations);
@@ -170,27 +184,27 @@ export async function runAgentTurn(input: AgentTurnInput): Promise<AgentTurnResu
           userId: input.user.id,
           role: 'tool',
           toolName: tool.name,
-          toolInput: (toolUse.input ?? {}) as object,
+          toolInput: call.input as object,
           toolOutput: outcome.result as object,
-          model: MODEL,
+          model: provider.model,
         });
 
-        toolResults.push({
-          type: 'tool_result',
-          tool_use_id: toolUse.id,
+        messages.push({
+          role: 'tool',
+          toolCallId: call.id,
+          name: call.name,
           content: JSON.stringify(outcome.result),
         });
       } catch (error) {
-        toolResults.push({
-          type: 'tool_result',
-          tool_use_id: toolUse.id,
+        messages.push({
+          role: 'tool',
+          toolCallId: call.id,
+          name: call.name,
           content: `The tool failed: ${error instanceof Error ? error.message : 'unknown error'}. Do not guess the figure — tell the user it could not be retrieved.`,
-          is_error: true,
+          isError: true,
         });
       }
     }
-
-    messages.push({ role: 'user', content: toolResults });
   }
 
   return {
@@ -211,6 +225,7 @@ async function logTurn(
   wasRefusal: boolean,
   latencyMs: number,
   citations: AgentCitation[] = [],
+  model = 'unknown',
 ): Promise<void> {
   // §11 Requirement 6: every question and answer is logged. Westport reviews
   // this during the audit pass, and the refusals are the most useful rows.
@@ -221,7 +236,7 @@ async function logTurn(
     content,
     wasRefusal,
     citations: citations.length ? (citations as unknown as object) : null,
-    model: MODEL,
+    model,
     latencyMs,
   });
 }

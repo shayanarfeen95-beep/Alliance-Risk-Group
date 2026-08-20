@@ -28,6 +28,45 @@ It is never "the dashboard and the assistant disagree." They cannot.
 
 ---
 
+## Connecting a source, and what "connected" means
+
+Connected means a credential is stored and verified. It does not mean data has
+arrived. Those are two steps and they fail for different reasons:
+
+1. **Connect** — Admin → Source connections. The credential is verified against
+   the provider before it is stored, so a bad one fails here rather than at 3am.
+2. **Sync** — *Sync now* (three months) or *Backfill 13 months*. This fetches,
+   lands the payload verbatim, conforms it to facts, and runs the controls.
+
+If a dashboard still shows nothing after connecting, the sync has not run or it
+stopped. The card reports which.
+
+### When a load stops
+
+It has found something nobody has decided yet. Nothing partial is written, and
+the raw payloads stay under the load run — fix the mapping and replay, with no
+further calls to the provider.
+
+| Message | Fix |
+|---|---|
+| QuickBooks class "X" is not mapped to a division | Add the class id to that division's `qbo_class_ids` |
+| Account "X" is not in the chart of accounts | Pull Chart of Accounts, then give it a reporting line |
+| $N on transactions with no class | Class them in QuickBooks. Not dropped, not assigned |
+| HubSpot property = "X" matches no division | Fix it in HubSpot, or add it as a legacy code |
+| The report came back with no class columns | ARG does not class that report — open item 1 |
+
+### HubSpot said the token was rejected
+
+Read which of the two it said. *"HubSpot says this token is not valid (401)"* is
+the token itself — rotated, mistyped, or from another account. *"The private app
+is missing scopes"* names the scope, and the fix is a checkbox in HubSpot, not a
+new token.
+
+A token missing only an optional scope connects, and the card says what will
+read as unavailable.
+
+---
+
 ## Refresh schedule
 
 | What | When | Source | Owner |
@@ -38,6 +77,7 @@ It is never "the dashboard and the assistant disagree." They cannot.
 | Marketing spend | Monthly | QBO accounts, per the tagged account set | Westport |
 | Headcount | Monthly | Google Sheets import, or a file handed to the assistant | ARG ops |
 | Chart of accounts + Class list | Weekly | QBO Accounting API | Automated, alerts on new codes |
+| Everything connected, open months | Nightly 06:00 UTC via `/api/cron/refresh` | All three | Automated — needs `CRON_SECRET`, and is disabled without it rather than left open |
 | Reconciliation controls | Every refresh | — | Automated |
 | Standing goals | Every refresh | — | Automated |
 

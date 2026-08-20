@@ -24,8 +24,9 @@ import {
   sumSpend,
   key,
   type FactBundle,
+  type PlMeasures,
 } from './facts';
-import { annualise, monthBounds, type MonthKey } from './periods';
+import { annualise, monthBounds, type MonthKey, type PeriodContext } from './periods';
 import type { Citation, KpiComputation, KpiDefinition, KpiInput, Unavailable } from './types';
 
 // ---------------------------------------------------------------------------
@@ -126,6 +127,8 @@ function dealsClosedIn(bundle: FactBundle, month: MonthKey, divisions: string[],
 interface BaseSpec {
   id: string;
   name: string;
+  /** What ARG's workbook calls this, when the two differ. */
+  workbookLabel?: string;
   definition: string;
   formula: string;
   higherIsBetter: boolean;
@@ -136,6 +139,7 @@ interface BaseSpec {
 const BASE_MEASURES: BaseSpec[] = [
   {
     id: 'revenue',
+    workbookLabel: 'Total Revenue / Total Income',
     name: 'Revenue',
     definition: 'Total income for the month, from QuickBooks.',
     formula: 'QBO total income',
@@ -144,6 +148,7 @@ const BASE_MEASURES: BaseSpec[] = [
   },
   {
     id: 'payroll_direct',
+    workbookLabel: 'Total Payroll - Direct',
     name: 'Payroll — Direct (memo)',
     definition:
       'Direct labour payroll. A MEMO line: it is already a component of COGS and must never be subtracted separately.',
@@ -155,6 +160,7 @@ const BASE_MEASURES: BaseSpec[] = [
   },
   {
     id: 'cogs',
+    workbookLabel: 'Total COGS',
     name: 'COGS',
     definition: 'Total cost of goods sold, inclusive of direct payroll.',
     formula: 'QBO total cost of goods sold (inclusive of payroll_direct)',
@@ -163,6 +169,7 @@ const BASE_MEASURES: BaseSpec[] = [
   },
   {
     id: 'gross_profit',
+    workbookLabel: 'Gross Profit',
     name: 'Gross Profit',
     definition: 'Revenue less COGS. Direct payroll is not subtracted — it is already inside COGS.',
     formula: 'revenue − cogs',
@@ -173,6 +180,7 @@ const BASE_MEASURES: BaseSpec[] = [
   },
   {
     id: 'payroll_expense',
+    workbookLabel: 'Total Payroll Expense',
     name: 'Payroll Expense (memo)',
     definition:
       'Administrative payroll. A MEMO line: already a component of operating expense and never subtracted separately.',
@@ -183,6 +191,7 @@ const BASE_MEASURES: BaseSpec[] = [
   },
   {
     id: 'opex',
+    workbookLabel: 'Total OpEx',
     name: 'Operating Expense',
     definition: 'Total operating expense, inclusive of administrative payroll.',
     formula: 'QBO total operating expense (inclusive of payroll_expense)',
@@ -191,6 +200,7 @@ const BASE_MEASURES: BaseSpec[] = [
   },
   {
     id: 'net_profit',
+    workbookLabel: 'Net Ordinary Income (NOI)',
     name: 'Net Profit',
     definition: 'Gross profit less operating expense.',
     formula: 'gross_profit − opex',
@@ -202,6 +212,7 @@ const BASE_MEASURES: BaseSpec[] = [
 const baseDefinitions: KpiDefinition[] = BASE_MEASURES.map((spec) => ({
   id: spec.id,
   name: spec.name,
+  workbookLabel: spec.workbookLabel,
   category: 'base',
   definition: spec.definition,
   formula: spec.formula,
@@ -231,18 +242,22 @@ const baseDefinitions: KpiDefinition[] = BASE_MEASURES.map((spec) => ({
 const RATIOS: Array<{
   id: string;
   name: string;
+  workbookLabel?: string;
   higherIsBetter: boolean;
   numerator: (pl: ReturnType<typeof sumPl>) => Decimal;
 }> = [
   { id: 'cogs_pct', name: 'COGS %', higherIsBetter: false, numerator: (pl) => pl.cogs },
-  { id: 'gross_profit_pct', name: 'Gross Profit %', higherIsBetter: true, numerator: grossProfitOf },
+  { id: 'gross_profit_pct',
+    workbookLabel: 'GP %', name: 'Gross Profit %', higherIsBetter: true, numerator: grossProfitOf },
   { id: 'opex_pct', name: 'OpEx %', higherIsBetter: false, numerator: (pl) => pl.opex },
-  { id: 'net_profit_pct', name: 'Net Profit %', higherIsBetter: true, numerator: netProfitOf },
+  { id: 'net_profit_pct',
+    workbookLabel: 'NOI %', name: 'Net Profit %', higherIsBetter: true, numerator: netProfitOf },
 ];
 
 const ratioDefinitions: KpiDefinition[] = RATIOS.map((spec) => ({
   id: spec.id,
   name: spec.name,
+  workbookLabel: spec.workbookLabel,
   category: 'base',
   definition: `${spec.name} of revenue for the month.`,
   formula: `${spec.id.replace('_pct', '')} ÷ revenue`,
@@ -268,6 +283,7 @@ const ratioDefinitions: KpiDefinition[] = RATIOS.map((spec) => ({
 const financeDefinitions: KpiDefinition[] = [
   {
     id: 'dso',
+    workbookLabel: 'Daily Sales Outstanding',
     name: 'Days Sales Outstanding',
     category: 'finance',
     definition: 'How long it takes ARG to collect what it has billed.',
@@ -300,6 +316,7 @@ const financeDefinitions: KpiDefinition[] = [
   },
   {
     id: 'dpo',
+    workbookLabel: 'Daily Payables Outstanding',
     name: 'Days Payable Outstanding',
     category: 'finance',
     definition: 'How long ARG takes to pay what it owes.',
@@ -332,6 +349,7 @@ const financeDefinitions: KpiDefinition[] = [
   },
   {
     id: 'ccc',
+    workbookLabel: 'Cash Conversion Cycle',
     name: 'Cash Conversion Cycle',
     category: 'finance',
     definition: 'Days between paying suppliers and collecting from customers.',
@@ -367,6 +385,7 @@ const financeDefinitions: KpiDefinition[] = [
   },
   {
     id: 'cash_runway',
+    workbookLabel: 'Cash Runway (Months)',
     name: 'Cash Runway',
     category: 'finance',
     definition: 'Months of operating expense the current cash balance covers.',
@@ -410,6 +429,7 @@ const financeDefinitions: KpiDefinition[] = [
   },
   {
     id: 'revenue_run_rate',
+    workbookLabel: 'Revenue Run Rate $',
     name: 'Revenue Run Rate',
     category: 'finance',
     definition: 'Annualised revenue, projected from year-to-date performance.',
@@ -436,6 +456,7 @@ const financeDefinitions: KpiDefinition[] = [
   },
   {
     id: 'ytd_gross_margin_pct',
+    workbookLabel: 'Gross Profit Run Rate %',
     name: 'YTD Gross Margin %',
     category: 'finance',
     definition: 'Year-to-date gross profit as a share of year-to-date revenue.',
@@ -461,6 +482,7 @@ const financeDefinitions: KpiDefinition[] = [
   },
   {
     id: 'ytd_net_margin_pct',
+    workbookLabel: 'Net Profit Run Rate %',
     name: 'YTD Net Margin %',
     category: 'finance',
     definition: 'Year-to-date net profit as a share of year-to-date revenue.',
@@ -564,8 +586,164 @@ const additionalRunRates: KpiDefinition[] = (
   },
 }));
 
+/**
+ * The change metrics ARG's workbook carries and this build did not.
+ *
+ * The rollup tabs publish nine of these — MoM and YoY percentage change on
+ * revenue, gross profit and net profit, and each division's share of the
+ * consolidated total. They existed only as a delta printed under a tile, which
+ * is not the same thing: a figure that is not a metric cannot be asked for by
+ * the assistant, cannot be charted, cannot carry a standing goal, and cannot
+ * appear in the audit pack. ARG reads these every month, so they are metrics.
+ *
+ * Percentage change against a zero or negative base is left unavailable rather
+ * than computed. Claims ran a negative net profit in every month of Q1; "net
+ * profit improved by −140%" is a sentence with no meaning, and a dashboard that
+ * prints one has quietly stopped being trustworthy. The dollar movement is
+ * always available and always means something, so the refusal costs nothing.
+ */
+const CHANGE_BASES = [
+  { key: 'revenue', label: 'Revenue', pick: (pl: PlMeasures) => pl.revenue, higherIsBetter: true },
+  { key: 'gross_profit', label: 'Gross Profit', pick: grossProfitOf, higherIsBetter: true },
+  { key: 'net_profit', label: 'Net Profit', pick: netProfitOf, higherIsBetter: true },
+] as const;
+
+const changeDefinitions: KpiDefinition[] = CHANGE_BASES.flatMap((base) =>
+  (
+    [
+      {
+        suffix: 'mom_pct',
+        name: `${base.label} MoM %`,
+        workbookLabel: `MoM ${base.label === 'Net Profit' ? 'Net Profit' : base.label === 'Gross Profit' ? 'GP' : 'Rev'} % Change`,
+        against: (period: PeriodContext) => period.priorMonth,
+        againstLabel: 'prior month',
+      },
+      {
+        suffix: 'yoy_pct',
+        name: `${base.label} YoY %`,
+        workbookLabel: `YoY for Month ${base.label === 'Net Profit' ? 'NOI' : base.label === 'Gross Profit' ? 'GP' : 'Revenue'} % Change`,
+        against: (period: PeriodContext) => period.priorYearMonth,
+        againstLabel: 'the same month last year',
+      },
+    ] as const
+  ).map((variant) => ({
+    id: `${base.key}_${variant.suffix}`,
+    name: variant.name,
+    workbookLabel: variant.workbookLabel,
+    category: 'finance' as const,
+    definition: `${base.label} change against ${variant.againstLabel}, as a percentage.`,
+    formula: `(${base.label.toLowerCase()} − ${variant.againstLabel} ${base.label.toLowerCase()}) ÷ |${variant.againstLabel} ${base.label.toLowerCase()}|`,
+    sourceSystem: 'QuickBooks Online',
+    format: 'percent' as const,
+    higherIsBetter: base.higherIsBetter,
+    refreshCadence: 'Daily while the month is open',
+    specReference: "§7 — from ARG's rollup tabs",
+    notes:
+      'Undefined against a zero or negative base, and reported as unavailable rather than as a percentage that would read backwards.',
+    compute: ({ period, bundle, divisions }: KpiInput) => {
+      if (!hasPl(bundle, period.month, divisions)) return unavailable('NO_DATA', NO_PL_FOR_PERIOD);
+
+      const comparisonMonth = variant.against(period);
+      if (!hasPl(bundle, comparisonMonth, divisions)) {
+        return unavailable(
+          'NO_DATA',
+          `No profit-and-loss data is loaded for ${comparisonMonth.slice(0, 7)}, so there is nothing to compare against.`,
+        );
+      }
+
+      const current = base.pick(sumPl(bundle, period.month, divisions));
+      const prior = base.pick(sumPl(bundle, comparisonMonth, divisions));
+
+      if (prior.isZero() || prior.isNegative()) {
+        return unavailable(
+          'NO_DATA',
+          `${base.label} for ${comparisonMonth.slice(0, 7)} was ${prior.isZero() ? 'zero' : 'negative'}, so a percentage change is not meaningful. ` +
+            `The movement is ${current.minus(prior).toDecimalPlaces(0).toString()} in dollars.`,
+        );
+      }
+
+      return {
+        value: current.minus(prior).dividedBy(prior),
+        citations: [
+          money(base.label, current, 'Derived', period.month),
+          money(`${base.label}, ${variant.againstLabel}`, prior, 'Derived', comparisonMonth),
+        ],
+        components: { current, prior, movement: current.minus(prior) },
+      };
+    },
+  })),
+);
+
+/**
+ * A division's share of the consolidated total — the workbook's "% of Revenue
+ * Contribution" and "% of NOI Contribution".
+ *
+ * Only meaningful for one division against ARG Total, so asking for it at ARG
+ * Total returns an explicit unavailable rather than 100%, which would be true
+ * and useless. Net profit contribution is refused when the consolidated figure
+ * is zero or negative: a division that lost less than the group is not
+ * "contributing 340% of net profit", and that is what the arithmetic would say.
+ */
+const contributionDefinitions: KpiDefinition[] = (
+  [
+    ['revenue_contribution_pct', 'Revenue Contribution %', '% of Revenue Contribution', (pl: PlMeasures) => pl.revenue],
+    ['net_profit_contribution_pct', 'Net Profit Contribution %', '% of NOI Contribution', netProfitOf],
+  ] as const
+).map(([id, name, workbookLabel, pick]) => ({
+  id,
+  name,
+  workbookLabel,
+  category: 'finance' as const,
+  definition: `This division's ${name.replace(' Contribution %', '').toLowerCase()} as a share of ARG Total.`,
+  formula: `division ${name.replace(' Contribution %', '').toLowerCase()} ÷ ARG Total ${name.replace(' Contribution %', '').toLowerCase()}`,
+  sourceSystem: 'QuickBooks Online',
+  format: 'percent' as const,
+  higherIsBetter: true,
+  refreshCadence: 'Daily while the month is open',
+  specReference: "§7 — from ARG's rollup tabs",
+  compute: ({ period, bundle, divisions, isConsolidated }: KpiInput) => {
+    if (isConsolidated) {
+      return unavailable(
+        'NOT_AVAILABLE_BY_DIVISION',
+        'Contribution is a division’s share of ARG Total. At ARG Total it would always be 100%. Select a division.',
+      );
+    }
+    if (!hasPl(bundle, period.month, divisions)) return unavailable('NO_DATA', NO_PL_FOR_PERIOD);
+
+    const part = pick(sumPl(bundle, period.month, divisions));
+    // The denominator is every division the caller is entitled to see. A
+    // division manager who cannot see the consolidated total cannot be shown a
+    // share of it, and gets an unavailable rather than a share of their own
+    // division, which would read as 100%.
+    const whole = pick(sumPl(bundle, period.month, bundle.allowedDivisions));
+
+    if (bundle.allowedDivisions.length < bundle.divisions.length) {
+      return unavailable(
+        'NOT_AVAILABLE_BY_DIVISION',
+        'Contribution needs the consolidated total as its denominator, and this user is not entitled to every division.',
+      );
+    }
+
+    if (whole.isZero() || whole.isNegative()) {
+      return unavailable(
+        'NO_DATA',
+        `ARG Total ${name.replace(' Contribution %', '').toLowerCase()} for this month is ${whole.isZero() ? 'zero' : 'negative'}, so a share of it is not meaningful.`,
+      );
+    }
+
+    return {
+      value: part.dividedBy(whole),
+      citations: [
+        money(`Division ${name.replace(' Contribution %', '')}`, part, 'Derived', period.month),
+        money(`ARG Total ${name.replace(' Contribution %', '')}`, whole, 'Derived', period.month),
+      ],
+    };
+  },
+}));
+
 const cashPosition: KpiDefinition = {
   id: 'cash_position',
+    workbookLabel: 'Cash and Equivalents',
   name: 'Cash Position',
   category: 'finance',
   definition: 'Cash and equivalents at month end.',
@@ -1106,6 +1284,8 @@ export const KPI_REGISTRY: KpiDefinition[] = [
   ...ratioDefinitions,
   ...financeDefinitions,
   ...additionalRunRates,
+  ...changeDefinitions,
+  ...contributionDefinitions,
   cashPosition,
   ...salesDefinitions,
   ...marketingDefinitions,

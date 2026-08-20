@@ -22,6 +22,10 @@ export interface ManagedUser {
   divisions: string[];
   isActive: boolean;
   lastLoginAt: string | null;
+  /** What this person's role grants, in words. */
+  capabilities: string[];
+  /** Live sessions, so an administrator can end them without deactivating. */
+  activeSessions: number;
 }
 
 const ROLES = [
@@ -76,6 +80,29 @@ export function UserManager({
     }
   }
 
+  async function endSessions(userId: string) {
+    setBusy(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const response = await fetch('/api/users/sessions', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ userId }),
+      });
+      const payload = await response.json();
+      if (!payload.ok) setError(payload.error ?? 'Those sessions could not be ended.');
+      else {
+        setNotice(payload.message);
+        router.refresh();
+      }
+    } catch {
+      setError('The request did not complete.');
+    } finally {
+      setBusy(false);
+    }
+  }
+
   return (
     <div>
       {error && (
@@ -95,7 +122,7 @@ export function UserManager({
         <table className="w-full min-w-max border-collapse text-[12px]">
           <thead>
             <tr>
-              {['Person', 'Role', 'Sees', 'Status', 'Last signed in', ''].map((h) => (
+              {['Person', 'Role', 'Sees', 'Can', 'Status', 'Last signed in', ''].map((h) => (
                 <th key={h}
                     className="whitespace-nowrap border-b px-3 py-2 text-left text-[10.5px] font-semibold uppercase tracking-[0.06em]"
                     style={{ borderColor: 'var(--border)', color: 'var(--text-muted)' }}>
@@ -113,6 +140,18 @@ export function UserManager({
                 </td>
                 <td className="border-b px-3 py-2" style={{ borderColor: 'var(--border)' }}>
                   {ROLES.find((r) => r.id === user.role)?.label ?? user.role}
+                </td>
+                {/* What the role actually grants, in the same words as the
+                    matrix below. A role name is a label; this is the grant. */}
+                <td
+                  className="border-b px-3 py-2 text-[11px] text-[var(--text-secondary)]"
+                  style={{ borderColor: 'var(--border)', maxWidth: 260 }}
+                >
+                  {user.capabilities.length === 0 ? (
+                    <span className="text-[var(--text-muted)]">Read only</span>
+                  ) : (
+                    user.capabilities.join(' · ')
+                  )}
                 </td>
                 {/* Scope in words. "DIVISION_MANAGER" does not tell an
                     administrator what this person can actually open. */}
@@ -132,10 +171,23 @@ export function UserManager({
                   {user.lastLoginAt ? new Date(user.lastLoginAt).toLocaleDateString() : 'Never'}
                 </td>
                 <td className="border-b px-3 py-2 text-right" style={{ borderColor: 'var(--border)' }}>
-                  <button type="button" onClick={() => setEditing(editing === user.id ? null : user.id)}
-                          className="text-[11px] text-[var(--text-muted)] underline-offset-2 hover:underline">
-                    {editing === user.id ? 'Close' : 'Manage'}
-                  </button>
+                  <div className="flex justify-end gap-3">
+                    {user.id !== currentUserId && user.activeSessions > 0 && (
+                      <button
+                        type="button"
+                        disabled={busy}
+                        onClick={() => endSessions(user.id)}
+                        title={`${user.activeSessions} active session${user.activeSessions === 1 ? '' : 's'}`}
+                        className="text-[11px] text-[var(--text-muted)] underline-offset-2 hover:underline disabled:opacity-40"
+                      >
+                        End {user.activeSessions} session{user.activeSessions === 1 ? '' : 's'}
+                      </button>
+                    )}
+                    <button type="button" onClick={() => setEditing(editing === user.id ? null : user.id)}
+                            className="text-[11px] text-[var(--text-muted)] underline-offset-2 hover:underline">
+                      {editing === user.id ? 'Close' : 'Manage'}
+                    </button>
+                  </div>
                 </td>
               </tr>
             ))}

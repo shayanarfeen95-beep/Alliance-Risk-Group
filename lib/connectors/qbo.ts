@@ -176,7 +176,6 @@ async function fetchMonthlyReport(
       end_date: lastDayOfMonth(month),
       // Rule 3: ARG reports on the accrual basis. Never mix silently.
       accounting_method: 'Accrual',
-      summarize_column_by: 'Classes',
       ...extraParams,
     });
     records.push({ entity: reportName, key: month, payload });
@@ -184,6 +183,15 @@ async function fetchMonthlyReport(
 
   return records;
 }
+
+/**
+ * The reports that accept `summarize_column_by=Classes`.
+ *
+ * Sending it to a report that does not support it is not a no-op: QBO answers
+ * with the unsummarised report, which parses cleanly and has no division
+ * dimension at all. The load would then look successful and produce nothing.
+ */
+const CLASSED = { summarize_column_by: 'Classes' } as const;
 
 export const qboConnector: SourceConnector = {
   sourceSystem: 'QBO',
@@ -200,14 +208,17 @@ export const qboConnector: SourceConnector = {
 
     switch (entity) {
       case 'profit_and_loss':
-        records = await fetchMonthlyReport('ProfitAndLoss', window);
+        records = await fetchMonthlyReport('ProfitAndLoss', window, { ...CLASSED });
         break;
       case 'balance_sheet':
-        records = await fetchMonthlyReport('BalanceSheet', window);
+        records = await fetchMonthlyReport('BalanceSheet', window, { ...CLASSED });
         break;
       case 'trial_balance':
-        records = await fetchMonthlyReport('TrialBalance', window);
+        records = await fetchMonthlyReport('TrialBalance', window, { ...CLASSED });
         break;
+      // The aging reports summarise by aging bucket, so the class summary is
+      // not available on them. They are fetched at portal level and their use
+      // is the DSO and DPO reconciliation, which is an ARG-Total check.
       case 'ar_aging':
         records = await fetchMonthlyReport('AgedReceivables', window);
         break;

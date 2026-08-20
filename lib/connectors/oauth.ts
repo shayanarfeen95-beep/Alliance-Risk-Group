@@ -53,7 +53,17 @@ export const OAUTH_PROVIDERS: Record<string, OAuthProvider> = {
     label: 'HubSpot',
     authorizeUrl: 'https://app.hubspot.com/oauth/authorize',
     tokenUrl: 'https://api.hubapi.com/oauth/v1/token',
-    scopes: ['crm.objects.deals.read', 'crm.objects.contacts.read', 'crm.objects.companies.read'],
+    // Exactly what the connector reads, and nothing more. Owners is needed for
+    // the salesperson filter; meetings for Meetings Completed. Asking for a
+    // scope the code never uses is a request ARG's admin has to evaluate on
+    // trust rather than on evidence.
+    scopes: [
+      'crm.objects.deals.read',
+      'crm.objects.contacts.read',
+      'crm.objects.companies.read',
+      'crm.objects.owners.read',
+      'crm.objects.meetings.read',
+    ],
     clientIdEnv: 'HUBSPOT_CLIENT_ID',
     clientSecretEnv: 'HUBSPOT_CLIENT_SECRET',
   },
@@ -183,22 +193,13 @@ export async function fetchQboCompanyName(
   }
 }
 
-/** The HubSpot portal a token belongs to, and a check that it is live. */
-export async function fetchHubspotAccount(
-  accessToken: string,
-): Promise<{ portalId: string; label: string } | null> {
-  try {
-    const response = await fetch('https://api.hubapi.com/account-info/v3/details', {
-      headers: { authorization: `Bearer ${accessToken}`, accept: 'application/json' },
-    });
-    if (!response.ok) return null;
-    const body = (await response.json()) as { portalId?: number; uiDomain?: string };
-    if (!body.portalId) return null;
-    return {
-      portalId: String(body.portalId),
-      label: body.uiDomain ? `Portal ${body.portalId} · ${body.uiDomain}` : `Portal ${body.portalId}`,
-    };
-  } catch {
-    return null;
-  }
-}
+/**
+ * The HubSpot portal a token belongs to.
+ *
+ * Lives in `hubspot-verify.ts` with the scope probes, because asking "which
+ * portal is this?" and asking "does this token work?" turned out to be
+ * different questions: the portal name needs the `oauth` scope, and a private
+ * app scoped for deals and contacts does not have it. Conflating them rejected
+ * working tokens.
+ */
+export { fetchPortalDetails, verifyHubspotToken } from './hubspot-verify';

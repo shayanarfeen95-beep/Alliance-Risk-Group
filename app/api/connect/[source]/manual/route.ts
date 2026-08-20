@@ -4,7 +4,7 @@ import { can } from '@/lib/auth/scope';
 import { getDb } from '@/lib/db/client';
 import * as t from '@/lib/db/schema';
 import { saveCredential } from '@/lib/connectors/credentials';
-import { fetchHubspotAccount } from '@/lib/connectors/oauth';
+import { verifyHubspotToken } from '@/lib/connectors/hubspot-verify';
 import { hasCredentialKey } from '@/lib/crypto/secrets';
 import type { SourceSystemCode } from '@/lib/connectors/types';
 
@@ -60,14 +60,13 @@ export async function POST(request: Request, context: { params: Promise<{ source
     const token = (body.accessToken ?? '').trim();
     if (!token) return NextResponse.json({ ok: false, error: 'A private-app token is required.' });
 
-    const account = await fetchHubspotAccount(token);
-    if (!account) {
-      return NextResponse.json({
-        ok: false,
-        error:
-          'HubSpot rejected that token, or it lacks the account-info scope. Nothing was saved. ' +
-          'The private app needs the deals, contacts and companies read scopes.',
-      });
+    // Probes the endpoints the connector will actually read, scope by scope.
+    // The earlier version asked /account-info/v3/details, which needs the
+    // `oauth` scope a private app built for deals and contacts does not have —
+    // so it answered 403 and reported a working token as rejected.
+    const check = await verifyHubspotToken(token);
+    if (!check.ok) {
+      return NextResponse.json({ ok: false, error: `${check.error} Nothing was saved.` });
     }
 
     await saveCredential(
@@ -75,13 +74,33 @@ export async function POST(request: Request, context: { params: Promise<{ source
         sourceSystem,
         authMethod: 'TOKEN',
         data: { accessToken: token },
-        accountLabel: account.label,
-        accountId: account.portalId,
-        scopes: 'private app',
+        accountLabel: check.label,
+        accountId: check.portalId,
+        // The scopes actually proven, not the ones we hoped for. The admin
+        // screen reads this, and it is the first thing to look at when a KPI
+        // reports unavailable.
+        scopes: check.scopes
+          .filter((scope) => scope.granted)
+          .map((scope) => scope.scope)
+          .join(' '),
         connectedByUserId: user.id,
       },
       db,
     );
+
+    if (check.warnings.length > 0) {
+      // Connected, but not completely. Saying so here is the difference between
+      // a metric that reads "unavailable" for a knowable reason and one that
+      // reads "unavailable" and sends somebody through the whole stack.
+      await db.insert(t.auditEvent).values({
+        userId: user.id,
+        action: 'SOURCE_CONNECTED',
+        entity: 'connector_credential',
+        entityId: sourceSystem,
+        detail: { authMethod: 'TOKEN', warnings: check.warnings },
+      });
+      return NextResponse.json({ ok: true, warnings: check.warnings });
+    }
   } else if (sourceSystem === 'SHEETS') {
     const spreadsheetId = (body.spreadsheetId ?? '').trim();
     const raw = (body.serviceAccountJson ?? '').trim();

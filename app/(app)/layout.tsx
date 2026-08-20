@@ -55,9 +55,11 @@ export default async function AppLayout({ children }: { children: React.ReactNod
             <span>
               <strong className="font-semibold">Demonstration instance.</strong> The warehouse is
               seeded in memory from the build spec&rsquo;s published figures and resets when the
-              instance recycles. QuickBooks, HubSpot and Sheets are not connected. Set{' '}
-              <code className="font-[var(--font-mono)]">DATABASE_URL</code> to point this at a real
-              Postgres.
+              instance recycles. QuickBooks, HubSpot and Sheets are not connected, and sessions end
+              on every deploy because there is no shared database to hold them. Set{' '}
+              <code className="font-[var(--font-mono)]">DATABASE_URL</code> and{' '}
+              <code className="font-[var(--font-mono)]">AUTH_SECRET</code> to make this a real
+              deployment.
             </span>
           </div>
         )}

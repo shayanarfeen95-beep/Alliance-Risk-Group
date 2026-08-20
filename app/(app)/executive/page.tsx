@@ -45,7 +45,7 @@ export default async function ExecutivePage({
 
       {/* §9.1 — eight tiles, each with PM/PY change and a 12-month sparkline. */}
       <section>
-        <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+        <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
           {model.tiles.map((tile) => (
             <KpiTile key={tile.name} {...tile} />
           ))}

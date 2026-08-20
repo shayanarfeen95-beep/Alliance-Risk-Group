@@ -5,7 +5,7 @@ import { getDb } from '@/lib/db/client';
 import * as t from '@/lib/db/schema';
 import {
   exchangeCode,
-  fetchHubspotAccount,
+  fetchPortalDetails,
   fetchQboCompanyName,
   getProvider,
 } from '@/lib/connectors/oauth';
@@ -125,7 +125,7 @@ export async function GET(request: Request, context: { params: Promise<{ source:
       db,
     );
   } else {
-    const account = await fetchHubspotAccount(tokens.access_token);
+    const account = await fetchPortalDetails(tokens.access_token);
 
     await saveCredential(
       {

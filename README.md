@@ -44,8 +44,22 @@ private-app token for HubSpot if you prefer, a service account for Sheets.
 Credentials are AES-256-GCM encrypted before they reach the database, verified
 against the provider before they are stored, and QuickBooks' rotating refresh
 token is written back on every refresh — the omission that kills a QBO
-integration months after anyone last looked at it. See
-[`docs/RUNBOOK.md`](docs/RUNBOOK.md).
+integration months after anyone last looked at it.
+
+A HubSpot token is checked **scope by scope**, against the endpoints the
+connector will actually read. The obvious check — asking `/account-info` — needs
+the `oauth` scope that a private app built for deals and contacts does not have,
+so it answers 403 and reports a working token as rejected. A missing optional
+scope is named and the connection is still made; a missing required one refuses
+rather than saving a connection that half works.
+
+Connecting is not the whole job, and **Sync now** is the other half: fetch,
+land the payload verbatim, conform it to facts, run the reconciliation controls.
+The Admin card reports what each entity did — rows read, rows written, closed
+months left alone, controls failing. See
+[`docs/DATA_INFRASTRUCTURE.md`](docs/DATA_INFRASTRUCTURE.md) for exactly which
+credentials to ask ARG for, and [`docs/RUNBOOK.md`](docs/RUNBOOK.md) for what to
+do when a load stops.
 
 ---
 
@@ -67,12 +81,14 @@ not to — because there is no mechanism by which it could.
 
 | Guarantee | How it holds |
 |---|---|
-| The assistant answers only from the semantic layer | It has no other tool. There is no SQL surface and no free-text number path. |
+| Every *metric* the assistant states comes from the semantic layer | No tool computes an aggregate that a KPI defines. It can list deals, GL accounts and sheet cells — records, to show its working — but there is nothing that sums a column, so a total can only come from `resolveKpi`. There is no SQL surface. |
 | Sources are never written to | No connector exposes a write operation. Read-only by absence, not by a flag someone could flip. |
 | It refuses rather than estimates | Metrics return a typed `Unavailable` with a reason, never null and never zero. There is nothing to guess from. |
 | Generated charts equal built charts | The model emits a view spec, validated against the registry and rendered by the same component the dashboards use. It never emits numbers or markup. |
 | Nothing is written without a human | Ingestion plans and previews; a click confirms; one reversible `load_run` results. |
 | A user never sees another division | Entitlements are applied when facts are loaded. The rows were never fetched. |
+| A load never guesses | An unmapped class, an unmapped account or unclassed dollars stop the load and are named. Nothing partial is written, and the raw payload is kept so a replay costs no API calls. |
+| A closed month is never restated by a refresh | Conform skips it and says it did. Reopening is a deliberate act. |
 | Close commentary cannot contain a wrong figure | Every figure is resolved before the model is called, and the draft is verified against that list. A draft with an unsourced number is discarded for a deterministic one. |
 | ARG Total cannot drift | It is computed as the sum of four divisions. A database constraint prevents an `ARG_TOTAL` row from ever being stored. |
 | A locked forecast cannot be edited | A Postgres trigger raises on UPDATE and DELETE. Not a UI check. |
@@ -98,7 +114,7 @@ TypeScript, against `resolveKpi`, not by re-reading an instruction string each
 night. An exception that lands on the CEO's dashboard has to fire for the same
 reason every time.
 
-Without `ANTHROPIC_API_KEY`, every dashboard, export and control still works.
+Without `OPENROUTER_API_KEY`, every dashboard, export and control still works.
 Only the conversational layer is unavailable, and it says so.
 
 ## Layout
@@ -107,21 +123,21 @@ Only the conversational layer is unavailable, and it says so.
 lib/semantic/     the KPI registry, period conventions, resolver — the heart
 lib/db/           schema, migrations, the three DB-level guards
 lib/connectors/   QBO, HubSpot, Sheets. Read-only adapters
-lib/etl/          conform, rollup, load provenance
+lib/etl/          conform (raw → facts), sync (fetch → land → conform → reconcile), rollup
 lib/recon/        the five standing controls
 lib/forecast/     projection, scenarios, locking, accuracy scoring
 lib/ai/           tools, view-spec compiler, goals, commentary
 lib/export/       the audit pack
 lib/seed/         deterministic dataset reproducing the spec's tie-out figures
-app/(app)/        Executive, Finance, Sales, Marketing, Forecast, Admin
+app/(app)/        Executive, Finance, Sales, HubSpot Leadership, Marketing, Forecast, Admin
 components/       one chart component, one tile component, the shell
-docs/             RUNBOOK, OPEN_ITEMS, PHASE2_ASSESSMENT
+docs/             DATA_INFRASTRUCTURE, RUNBOOK, OPEN_ITEMS, PHASE2_ASSESSMENT
 ```
 
 ## Verification
 
 ```bash
-pnpm test           # tie-out, agent, goals, export — 109 tests
+pnpm test           # tie-out, conform, agent, goals, export — 142 tests
 pnpm verify:visual  # every page, both themes, checks overflow and console errors
 ```
 

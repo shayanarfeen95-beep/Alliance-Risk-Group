@@ -42,7 +42,7 @@ export default async function MarketingPage({
         <Unavailable reason="PENDING_DEFINITION" detail={model.spendPending} />
       ) : null}
 
-      <div className="grid grid-cols-2 gap-3 lg:grid-cols-5">
+      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
         {model.tiles.map((tile) => (
           <KpiTile key={tile.name} {...tile} />
         ))}
