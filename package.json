@@ -19,7 +19,8 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "verify:visual": "tsx scripts/visual-check.ts",
-    "verify:tieout": "tsx scripts/verify/tieout.mts"
+    "verify:tieout": "tsx scripts/verify/tieout.mts",
+    "verify:interaction": "tsx scripts/expand-check.mts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.116.0",

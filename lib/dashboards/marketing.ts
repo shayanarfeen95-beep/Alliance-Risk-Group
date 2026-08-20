@@ -5,6 +5,7 @@ import { resolveKpi, CONSOLIDATED_CODE, type SemanticSession } from '@/lib/seman
 import { monthBounds, formatMonthShort } from '@/lib/semantic/periods';
 import { sumSpend } from '@/lib/semantic/facts';
 import type { KpiTileProps } from '@/components/dashboard/kpi-tile';
+import { buildTiles } from './tiles';
 
 /**
  * §9.4 — Marketing dashboard, HubSpot + QuickBooks.
@@ -67,26 +68,7 @@ export function loadMarketing(
   const isConsolidated = divisionCode === CONSOLIDATED_CODE;
   const divisions = isConsolidated ? session.visibleDivisions : [divisionCode];
 
-  const tiles: KpiTileProps[] = MARKETING_TILES.map(({ id, hint }) => {
-    const current = resolveKpi(session, id, divisionCode);
-    const pm = num(resolveKpi(session, id, divisionCode, { month: period.priorMonth }));
-    const py = num(resolveKpi(session, id, divisionCode, { month: period.priorYearMonth }));
-    const value = num(current);
-
-    return {
-      name: current.name,
-      formatted: current.formatted,
-      unavailable: current.unavailable,
-      higherIsBetter: current.higherIsBetter,
-      format: current.format,
-      deltaPriorMonth: value !== null && pm !== null ? value - pm : null,
-      deltaPriorYear: value !== null && py !== null ? value - py : null,
-      sparkline: period.trailingTwelveMonths.map((month) =>
-        num(resolveKpi(session, id, divisionCode, { month })),
-      ),
-      hint,
-    };
-  });
+  const tiles: KpiTileProps[] = buildTiles(session, MARKETING_TILES, divisionCode);
 
   const spendPending = resolveKpi(session, 'cost_per_lead', divisionCode).unavailable;
 
