@@ -27,6 +27,7 @@ import { openSemanticSession, resolveKpi, type SemanticSession } from '@/lib/sem
 import {
   MARCH_2026,
   YTD_MARCH_2026,
+  WORKBOOK_KPI_MARCH_2026,
   KNOWN_WRONG_ANSWERS,
   DIVISION_CODES,
   TIE_OUT_MONTH,
@@ -34,7 +35,7 @@ import {
 import { runAllChecks, persistFindings } from '@/lib/recon/checks';
 import { sql } from 'drizzle-orm';
 import * as t from '@/lib/db/schema';
-import { KPI_REGISTRY } from '@/lib/semantic/registry';
+import { KPI_REGISTRY, getKpiDefinition } from '@/lib/semantic/registry';
 import { ScopeError } from '@/lib/auth/scope';
 
 /**
@@ -406,5 +407,84 @@ describe('every KPI resolves without throwing', () => {
           .toBeGreaterThan(20);
       }
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The workbook's own KPI tab
+// ---------------------------------------------------------------------------
+
+describe("ARG's workbook KPI tab reproduces exactly", () => {
+  const DIVISIONS = ['SHRC', 'CLAIMS', 'TP', 'LITS', 'ARG_TOTAL'];
+
+  it.each(DIVISIONS)('%s gross and net margin match the spreadsheet', (division) => {
+    const expected = WORKBOOK_KPI_MARCH_2026[division]!;
+
+    // Tolerance is the spec's own $1 rounding, expressed as a margin: these
+    // figures are computed from YTD dollars that §13.1 publishes rounded, so a
+    // margin can differ by at most one dollar over the YTD revenue.
+    //
+    // A fixed epsilon would be wrong in both directions. TP's YTD net profit is
+    // $40, where a dollar of rounding is 2.5% of the numerator and 7e-6 of the
+    // margin; ARG Total's is $62,197, where the same dollar is 7e-7. One
+    // constant either fails on TP or stops asserting anything at ARG Total.
+    const dollar = 1 / YTD_MARCH_2026[division]!.revenue;
+
+    // The workbook labels these "Gross Profit Run Rate %" and "Net Profit Run
+    // Rate %". They are year-to-date margins, and this build renamed them —
+    // these assertions are what make that a rename rather than a change.
+    const grossMargin = valueOf('ytd_gross_margin_pct', division);
+    expect(Math.abs(grossMargin - expected.grossMarginPct)).toBeLessThanOrEqual(dollar);
+
+    const netMargin = valueOf('ytd_net_margin_pct', division);
+    expect(Math.abs(netMargin - expected.netMarginPct)).toBeLessThanOrEqual(dollar);
+  });
+
+  it('the workbook label is carried, so the old name still finds the metric', () => {
+    const gross = getKpiDefinition('ytd_gross_margin_pct')!;
+    expect(gross.workbookLabel).toBe('Gross Profit Run Rate %');
+
+    const net = getKpiDefinition('ytd_net_margin_pct')!;
+    expect(net.workbookLabel).toBe('Net Profit Run Rate %');
+  });
+});
+
+describe('the change and contribution metrics', () => {
+  it('revenue MoM matches the movement between the two months', async () => {
+    const current = valueOf('revenue', 'ARG_TOTAL');
+    const mom = valueOf('revenue_mom_pct', 'ARG_TOTAL');
+
+    // Recomputed from the two figures the system itself publishes, so this
+    // asserts the metric agrees with its own components rather than restating
+    // the implementation.
+    const priorSession = await openSemanticSession(harness.db, CFO_USER, '2026-02-01');
+    const prior = resolveKpi(priorSession, 'revenue', 'ARG_TOTAL').value!.toNumber();
+
+    expect(Math.abs(mom - (current - prior) / prior)).toBeLessThanOrEqual(1e-9);
+  });
+
+  it('refuses a percentage change against a negative base', () => {
+    // Claims ran a negative net profit through Q1. "Improved by −140%" is a
+    // sentence with no meaning, so the metric declines to produce one.
+    const result = resolveKpi(session, 'net_profit_mom_pct', 'CLAIMS');
+    expect(result.value).toBeNull();
+    expect(result.unavailable!.detail).toMatch(/negative/i);
+    // And it still says what the movement was, in dollars, which does mean
+    // something.
+    expect(result.unavailable!.detail).toMatch(/dollars/i);
+  });
+
+  it('division revenue contributions sum to 100%', () => {
+    const shares = ['SHRC', 'CLAIMS', 'TP', 'LITS'].map((division) =>
+      resolveKpi(session, 'revenue_contribution_pct', division).value!.toNumber(),
+    );
+    const total = shares.reduce((sum, share) => sum + share, 0);
+    expect(Math.abs(total - 1)).toBeLessThanOrEqual(1e-9);
+  });
+
+  it('contribution is unavailable at ARG Total rather than reading 100%', () => {
+    const result = resolveKpi(session, 'revenue_contribution_pct', 'ARG_TOTAL');
+    expect(result.value).toBeNull();
+    expect(result.unavailable!.reason).toBe('NOT_AVAILABLE_BY_DIVISION');
   });
 });

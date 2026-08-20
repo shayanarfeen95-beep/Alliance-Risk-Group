@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
-import { and, eq, ne, sql } from 'drizzle-orm';
+import { and, eq, inArray, ne, sql } from 'drizzle-orm';
 import { getSessionUser } from '@/lib/auth/session';
-import { can } from '@/lib/auth/scope';
+import { can, capabilitiesOf } from '@/lib/auth/scope';
 import { getDb } from '@/lib/db/client';
 import * as t from '@/lib/db/schema';
 import { hashPassword } from '@/lib/auth/password';
@@ -17,11 +17,16 @@ const ROLES: Role[] = ['ADMIN', 'CFO', 'EXECUTIVE', 'DIVISION_MANAGER', 'VIEWER'
  * Two guards here are worth more than the rest of the file, because both
  * failures are unrecoverable from inside the app:
  *
- *   1. **You cannot remove your own administrator access.** An administrator
- *      who deactivates or demotes themselves has no way back in.
- *   2. **You cannot remove the last administrator.** Demoting or deactivating
- *      the only admin leaves a system nobody can administer, and the only fix
- *      is a database console.
+ *   1. **You cannot remove your own ability to manage people.** Somebody who
+ *      deactivates or demotes themselves has no way back in.
+ *   2. **You cannot remove the last person who can.** Demoting or deactivating
+ *      the only one leaves a system nobody can administer, and the only fix is
+ *      a database console.
+ *
+ * Both are phrased as the MANAGE_USERS capability rather than as the ADMIN
+ * role, because two roles hold it. A role-name check would refuse a CFO every
+ * edit to their own record, and would refuse to demote the last ADMIN even
+ * with three CFOs able to take over.
  *
  * Both are checked against the database inside the same request that writes,
  * never against what the client sent.
@@ -138,10 +143,20 @@ export async function PATCH(request: Request) {
   const nextRole = (ROLES.includes(body.role as Role) ? body.role : target.role) as Role;
   const nextActive = body.isActive ?? target.isActive;
 
-  if (target.id === user!.id && (nextActive === false || nextRole !== 'ADMIN')) {
+  // You cannot lock yourself out.
+  //
+  // Expressed as a capability rather than as the literal ADMIN role, because
+  // the CFO role now holds MANAGE_USERS too. Comparing against 'ADMIN' would
+  // have refused a CFO every edit to their own record — including changing
+  // their own division scope — with an error about administrator access they
+  // never had.
+  const keepsSelfManagement = capabilitiesOf(nextRole).includes('MANAGE_USERS');
+  if (target.id === user!.id && (nextActive === false || !keepsSelfManagement)) {
     return NextResponse.json({
       ok: false,
-      error: 'You cannot remove your own administrator access — there would be no way back in. Ask another administrator.',
+      error:
+        'That would remove your own ability to manage people, and there would be no way back in. ' +
+        'Ask someone else with that access to make the change.',
     });
   }
 
@@ -153,16 +168,34 @@ export async function PATCH(request: Request) {
   // the day MANAGE_USERS is granted to the CFO role, this becomes the only
   // thing standing between a routine demotion and a system nobody can
   // administer.
-  if (target.role === 'ADMIN' && (nextRole !== 'ADMIN' || nextActive === false)) {
+  // Never leave the system with nobody who can administer it.
+  //
+  // Also a capability check, and for a second reason beyond the one above: the
+  // set of roles holding MANAGE_USERS is now two, and counting only remaining
+  // ADMINs would refuse to demote the last admin even when three CFOs could
+  // still administer the system perfectly well.
+  const managingRoles = ROLES.filter((role) => capabilitiesOf(role).includes('MANAGE_USERS'));
+  const targetManages = managingRoles.includes(target.role as Role);
+  const stillManages = managingRoles.includes(nextRole) && nextActive !== false;
+
+  if (targetManages && !stillManages) {
     const [row] = await db
       .select({ remaining: sql<number>`count(*)::int` })
       .from(t.users)
-      .where(and(eq(t.users.role, 'ADMIN'), eq(t.users.isActive, true), ne(t.users.id, target.id)));
+      .where(
+        and(
+          inArray(t.users.role, managingRoles),
+          eq(t.users.isActive, true),
+          ne(t.users.id, target.id),
+        ),
+      );
 
     if ((row?.remaining ?? 0) === 0) {
       return NextResponse.json({
         ok: false,
-        error: 'This is the only active administrator. Promote someone else first, or nobody could administer the system.',
+        error:
+          'This is the last person who can manage people. Give someone else that access first, ' +
+          'or nobody could administer the system.',
       });
     }
   }

@@ -3,7 +3,13 @@ import { desc, eq, sql } from 'drizzle-orm';
 import { CircleAlert, CircleCheck, CircleHelp, Download } from 'lucide-react';
 import { ConnectorCard } from '@/components/admin/connector-card';
 import { UserManager } from '@/components/admin/user-manager';
-import { can } from '@/lib/auth/scope';
+import {
+  can,
+  capabilitiesOf,
+  capabilityMatrix,
+  CAPABILITY_LABELS,
+  ROLE_ORDER,
+} from '@/lib/auth/scope';
 import { getDb } from '@/lib/db/client';
 import * as t from '@/lib/db/schema';
 import { getSessionUser } from '@/lib/auth/session';
@@ -13,6 +19,15 @@ import { Card, CardHeader, Chip, DataTable, SectionTitle, Td, Th } from '@/compo
 
 export const metadata: Metadata = { title: 'Admin' };
 export const dynamic = 'force-dynamic';
+
+/** Role names as an administrator should read them, not as the enum spells them. */
+const ROLE_LABELS: Record<string, string> = {
+  ADMIN: 'Admin',
+  CFO: 'CFO',
+  EXECUTIVE: 'Executive',
+  DIVISION_MANAGER: 'Division mgr',
+  VIEWER: 'Viewer',
+};
 
 /**
  * The open items and controls that would otherwise live in someone's head.
@@ -58,6 +73,16 @@ export default async function AdminPage({
     db.select().from(t.dimDivision).where(eq(t.dimDivision.isActive, true)).orderBy(t.dimDivision.sortOrder),
   ]);
 
+  // Live sessions per person, so an administrator can end them without having
+  // to deactivate the account — the two are different decisions.
+  const sessionCounts = await db
+    .select({
+      userId: t.sessions.userId,
+      count: sql<number>`count(*) filter (where expires_at > now())::int`,
+    })
+    .from(t.sessions)
+    .groupBy(t.sessions.userId);
+
   const managedUsers = userRows.map((row) => ({
     id: row.id,
     name: row.name,
@@ -67,6 +92,12 @@ export default async function AdminPage({
     divisions: accessRows.filter((a) => a.userId === row.id).map((a) => a.divisionCode),
     isActive: row.isActive,
     lastLoginAt: row.lastLoginAt?.toISOString() ?? null,
+    // Generated from the same table the enforcement reads, so this cannot
+    // describe a permission the system does not apply.
+    capabilities: capabilitiesOf(row.role as Parameters<typeof capabilitiesOf>[0]).map(
+      (capability) => CAPABILITY_LABELS[capability].label,
+    ),
+    activeSessions: sessionCounts.find((entry) => entry.userId === row.id)?.count ?? 0,
   }));
 
   const connectors = await connectorStatuses();
@@ -336,6 +367,65 @@ export default async function AdminPage({
               }))}
               currentUserId={user.id}
             />
+          </Card>
+
+          {/*
+            What each role grants, generated from the capability table the
+            enforcement itself reads.
+
+            An administrator choosing between "CFO" and "Executive" is making a
+            security decision, and the role name is not a description of it.
+            Every hand-written permissions page eventually describes permissions
+            the system stopped applying; this one cannot, because there is no
+            second list to keep in step.
+          */}
+          <Card className="mt-4">
+            <CardHeader
+              title="What each role can do"
+              subtitle="Generated from the permission table the system enforces — not a description of it"
+            />
+            <DataTable>
+              <thead>
+                <tr>
+                  <Th align="left">Capability</Th>
+                  {ROLE_ORDER.map((role) => (
+                    <Th key={role} align="center">
+                      {ROLE_LABELS[role]}
+                    </Th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {capabilityMatrix().map((row) => (
+                  <tr key={row.capability}>
+                    <Td align="left" numeric={false}>
+                      <div className="font-medium">{row.label}</div>
+                      <div className="text-[11px] text-[var(--text-muted)]">{row.detail}</div>
+                    </Td>
+                    {ROLE_ORDER.map((role) => (
+                      <Td key={role} align="center" numeric={false}>
+                        {row.roles[role] ? (
+                          <CircleCheck
+                            size={13}
+                            aria-label="granted"
+                            style={{ color: 'var(--status-good)' }}
+                          />
+                        ) : (
+                          <span aria-label="not granted" className="text-[var(--text-muted)]">
+                            —
+                          </span>
+                        )}
+                      </Td>
+                    ))}
+                  </tr>
+                ))}
+              </tbody>
+            </DataTable>
+            <p className="mt-3 text-[10.5px] leading-relaxed text-[var(--text-muted)]">
+              Roles decide what someone can <em>do</em>. Divisions decide what they can{' '}
+              <em>see</em>, and that is applied when facts are loaded — a person outside a division
+              never has its rows fetched, so no view, export or assistant answer can disclose one.
+            </p>
           </Card>
         </section>
       )}

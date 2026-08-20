@@ -76,6 +76,17 @@ export interface KpiDefinition {
   /** Notes worth carrying into the dictionary — usually a defect fix. */
   notes?: string;
   /**
+   * What this metric is called in ARG's FP&A workbook, when the two differ.
+   *
+   * Three of the workbook's labels are wrong about what the number is — "Gross
+   * Profit Run Rate %" is a year-to-date margin, not an annualised rate — and
+   * this build renamed them. Renaming without recording the old name makes the
+   * metric un-findable for the person who has used the spreadsheet for two
+   * years and reasonably searches for the name they know. The dictionary
+   * publishes both, and the search matches both.
+   */
+  workbookLabel?: string;
+  /**
    * Computes the KPI for a set of divisions. ARG Total passes all four, so
    * ratios are computed from summed components rather than averaged — which is
    * the only correct way to consolidate a margin or a DSO.

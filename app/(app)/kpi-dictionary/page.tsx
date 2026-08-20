@@ -104,6 +104,13 @@ export default function KpiDictionaryPage() {
                       <DefinitionRow label="Refresh">{kpi.refreshCadence}</DefinitionRow>
                       <DefinitionRow label="Owner">Westport Financial</DefinitionRow>
                       <DefinitionRow label="Specification">{kpi.specReference}</DefinitionRow>
+                      {/* The name ARG has used for two years. Where this build
+                          renamed a metric — three of the workbook's labels
+                          describe the wrong thing — the old name is published
+                          alongside so it stays findable. */}
+                      {kpi.workbookLabel ? (
+                        <DefinitionRow label="In the workbook">{kpi.workbookLabel}</DefinitionRow>
+                      ) : null}
                       {kpi.notes ? <DefinitionRow label="Notes">{kpi.notes}</DefinitionRow> : null}
                     </tbody>
                   </DataTable>
