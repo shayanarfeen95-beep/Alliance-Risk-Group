@@ -9,7 +9,12 @@ import { formatMonth, monthRange, addMonths, type MonthKey } from '@/lib/semanti
 import { KPI_REGISTRY, getKpiDefinition, isSpecKpi } from '@/lib/semantic/registry';
 import { resolveKpi, CONSOLIDATED_CODE, type SemanticSession } from '@/lib/semantic/resolve';
 import { sumPl, key } from '@/lib/semantic/facts';
-import { connectorStatuses, getConnector, type SourceSystemCode } from '@/lib/connectors';
+import {
+  connectorStatuses,
+  getConnector,
+  resolveConnector,
+  type SourceSystemCode,
+} from '@/lib/connectors';
 import { runSync } from '@/lib/etl/sync';
 import { executeViewSpec, viewSpecJsonSchema, ViewSpecError } from './viewspec';
 import type { ChartCardProps } from '@/components/charts/chart-card';
@@ -987,7 +992,7 @@ export async function confirmExtraction(
     return { ok: false, message: 'That extraction is no longer awaiting confirmation.' };
   }
 
-  const connector = getConnector(run.sourceSystem as SourceSystemCode);
+  const connector = await resolveConnector(run.sourceSystem as SourceSystemCode);
 
   const result = await runSync(db, {
     sourceSystem: run.sourceSystem as SourceSystemCode,

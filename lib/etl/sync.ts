@@ -2,7 +2,7 @@ import 'server-only';
 import { eq } from 'drizzle-orm';
 import * as t from '@/lib/db/schema';
 import { withDatabase, type Database } from '@/lib/db/client';
-import { getConnector } from '@/lib/connectors';
+import { resolveConnector } from '@/lib/connectors';
 import { markCredentialError } from '@/lib/connectors/credentials';
 import {
   ConnectorNotConfiguredError,
@@ -62,7 +62,10 @@ export async function runSync(db: Database, request: SyncRequest): Promise<SyncR
 }
 
 async function runSyncInner(db: Database, request: SyncRequest): Promise<SyncResult> {
-  const connector = getConnector(request.sourceSystem);
+  // Resolved rather than looked up: a source connected through Composio is
+  // fetched through Composio. Both produce the same RawBatch, so everything
+  // after this line is identical either way.
+  const connector = await resolveConnector(request.sourceSystem);
 
   const loadRunId = request.existingLoadRunId ?? (await openRun(db, request));
 
@@ -282,7 +285,7 @@ export async function syncSource(
   window: FetchWindow,
   options: { requestedByUserId?: string | null; entities?: string[] } = {},
 ): Promise<SourceSyncResult> {
-  const connector = getConnector(sourceSystem);
+  const connector = await resolveConnector(sourceSystem);
   const available = connector.entities().map((entity) => entity.entity);
 
   const requested = options.entities?.filter((entity) => available.includes(entity));

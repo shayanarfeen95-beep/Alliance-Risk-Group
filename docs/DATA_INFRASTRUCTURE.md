@@ -160,6 +160,39 @@ settings change, not a deploy.
 
 ---
 
+### 4. Composio — an alternative to 1 and 2
+
+Composio hosts the OAuth dance for QuickBooks and HubSpot. Set
+`COMPOSIO_API_KEY` plus an auth-config id per toolkit, and a **Connect with
+Composio** button appears on those two cards. Connecting QuickBooks then costs
+one click instead of registering an app at developer.intuit.com — which is the
+only real friction in the direct path.
+
+Its toolkits cover every entity this system reads, verified rather than assumed:
+`QUICKBOOKS_GET_PROFIT_AND_LOSS_REPORT` takes `summarize_column_by: "Classes"`
+and `accounting_method: "Accrual"`, which is exactly the call the direct
+connector makes, and `HUBSPOT_LIST_DEALS` takes `propertiesWithHistory`, which
+is what the deal funnel needs.
+
+**Two costs, both ARG's to weigh rather than ours:**
+
+1. **The connection is write-capable.** `HUBSPOT_UPDATE_DEALS` sits in the same
+   toolkit. This codebase never names a write slug — Rule 7 holds the way it
+   holds everywhere else, by there being no code that could call one, and a
+   test asserts it — but the credential at Composio's end could. A direct
+   HubSpot private-app token ticked for four read scopes *cannot*, and that is
+   a stronger promise.
+2. **ARG's financial data passes through a third party.** A decision for ARG
+   and Westport, not a default.
+
+**The recommendation:** connect HubSpot directly — a private-app token is
+already a paste, so Composio saves nothing there and costs the read-only
+guarantee. Use Composio for QuickBooks if nobody wants to register an Intuit
+app. Both can be true at once; the choice is stored per source, and the conform
+layer, the reconciliation controls and every KPI are identical either way.
+
+---
+
 ## Environment variables
 
 Grouped by what stops working without each.

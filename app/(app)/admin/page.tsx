@@ -199,6 +199,8 @@ export default async function AdminPage({
               entities={connector.entities}
               credential={connector.credential}
               oauthAvailable={connector.oauthAvailable}
+              composioAvailable={connector.composioAvailable}
+              viaComposio={connector.viaComposio}
               oauthBlockedReason={connector.oauthBlockedReason}
               canManage={can(user, 'EDIT_MAPPINGS')}
             />

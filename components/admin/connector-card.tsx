@@ -42,6 +42,8 @@ export interface ConnectorCardProps {
   oauthAvailable: boolean;
   oauthBlockedReason: string | null;
   canManage: boolean;
+  composioAvailable: boolean;
+  viaComposio: boolean;
 }
 
 export function ConnectorCard(props: ConnectorCardProps) {
@@ -51,6 +53,7 @@ export function ConnectorCard(props: ConnectorCardProps) {
   const [notice, setNotice] = useState<string[] | null>(null);
   const [sync, setSync] = useState<SyncReport | null>(null);
   const [progress, setProgress] = useState<string | null>(null);
+  const [composioPending, setComposioPending] = useState<string | null>(null);
   const [showManual, setShowManual] = useState(false);
   const [fields, setFields] = useState<Record<string, string>>({});
 
@@ -150,6 +153,61 @@ export function ConnectorCard(props: ConnectorCardProps) {
       setError('The sync request did not complete.');
     } finally {
       setProgress(null);
+      setBusy(false);
+    }
+  }
+
+  /**
+   * Composio hosts the authorisation, so this opens their window and then waits
+   * to be told it finished.
+   *
+   * The connection is stored only once Composio reports it ACTIVE. Composio
+   * hands back an id the moment the flow starts, and saving that would mark the
+   * source connected while the user was still on Intuit's consent screen — or
+   * after they closed it without approving.
+   */
+  async function connectViaComposio() {
+    setBusy(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const response = await fetch(`/api/connect/${sourceSystem.toLowerCase()}/composio`, {
+        method: 'POST',
+      });
+      const payload = await response.json();
+      if (!payload.ok) {
+        setError(payload.error ?? 'Composio could not start a connection.');
+        return;
+      }
+      setComposioPending(payload.connectionId);
+      window.open(payload.redirectUrl, '_blank', 'noopener,noreferrer');
+    } catch {
+      setError('The request did not complete.');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function finishComposio() {
+    if (!composioPending) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const response = await fetch(`/api/connect/${sourceSystem.toLowerCase()}/composio`, {
+        method: 'PUT',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ connectionId: composioPending }),
+      });
+      const payload = await response.json();
+      if (!payload.ok) {
+        setError(payload.error ?? 'Composio could not confirm the connection.');
+        return;
+      }
+      setComposioPending(null);
+      router.refresh();
+    } catch {
+      setError('The request did not complete.');
+    } finally {
       setBusy(false);
     }
   }
@@ -300,6 +358,36 @@ export function ConnectorCard(props: ConnectorCardProps) {
         </div>
       )}
 
+      {composioPending && (
+        <div
+          className="mt-3 rounded-[var(--radius)] border p-2.5"
+          style={{ borderColor: 'var(--border)', background: 'var(--status-warning-wash)' }}
+        >
+          <p className="text-[11px] leading-relaxed" style={{ color: 'var(--text-secondary)' }}>
+            Composio opened an authorisation window. Approve access there, then confirm here —
+            nothing is stored until Composio reports the connection active.
+          </p>
+          <button
+            type="button"
+            onClick={finishComposio}
+            disabled={busy}
+            className="mt-2 flex items-center gap-1.5 rounded-[5px] border px-2.5 py-1 text-[11px] font-medium disabled:opacity-50"
+            style={{ borderColor: 'var(--border)', background: 'var(--surface-1)' }}
+          >
+            {busy && <Loader2 size={12} className="animate-spin" aria-hidden />}
+            I have finished authorising
+          </button>
+        </div>
+      )}
+
+      {props.viaComposio && c.connected && (
+        <p className="mt-3 text-[10.5px] leading-relaxed text-[var(--text-muted)]">
+          Connected through Composio. This code only ever calls read operations, but the
+          connection Composio holds is write-capable — a direct connection scoped to read-only
+          is the stronger guarantee where you have the choice.
+        </p>
+      )}
+
       {sync && <SyncSummary report={sync} />}
 
       {props.canManage && !showManual && (
@@ -357,6 +445,18 @@ export function ConnectorCard(props: ConnectorCardProps) {
                   <Link2 size={12} aria-hidden />
                   Connect {props.label}
                 </a>
+              )}
+              {props.composioAvailable && (
+                <button
+                  type="button"
+                  onClick={connectViaComposio}
+                  disabled={busy}
+                  className="flex items-center gap-1.5 rounded-[5px] border px-2.5 py-1 text-[11px] font-medium transition-colors hover:bg-[var(--surface-2)] disabled:opacity-50"
+                  style={{ borderColor: 'var(--border)' }}
+                >
+                  <Plug size={12} aria-hidden />
+                  Connect with Composio
+                </button>
               )}
               {supportsManual && (
                 <button
