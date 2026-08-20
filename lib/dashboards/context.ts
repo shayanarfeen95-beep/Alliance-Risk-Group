@@ -40,6 +40,10 @@ export interface DashboardContext {
   owners: string[];
   /** The selected salesperson, or null for everyone. */
   ownerName: string | null;
+  /** HubSpot pipelines present in the visible deals. */
+  pipelines: string[];
+  /** The selected pipeline, or null for all of them. */
+  pipeline: string | null;
 }
 
 function first(value: string | string[] | undefined): string | undefined {
@@ -119,7 +123,7 @@ export async function loadDashboardContext(
 
   // The owner list comes from the deals this user can actually see, so a
   // division manager's filter does not name reps working other divisions.
-  const owners = [
+  const named = [
     ...new Set(
       session.bundle.deals
         .map((deal) => deal.ownerName)
@@ -127,8 +131,26 @@ export async function loadDashboardContext(
     ),
   ].sort();
 
+  // An unowned deal is a real state, and one worth being able to filter *to*:
+  // "who is sitting on the unassigned pipeline" is a question leadership asks.
+  // Offering the option only when such a deal exists keeps the list honest.
+  const hasUnassigned = session.bundle.deals.some((deal) => !deal.ownerName);
+  const owners = hasUnassigned ? [...named, 'Unassigned'] : named;
+
   const requestedOwner = first(searchParams.owner);
   const ownerName = requestedOwner && owners.includes(requestedOwner) ? requestedOwner : null;
+
+  const pipelines = [
+    ...new Set(
+      session.bundle.deals
+        .map((deal) => deal.pipeline)
+        .filter((value): value is string => Boolean(value)),
+    ),
+  ].sort();
+
+  const requestedPipeline = first(searchParams.pipeline);
+  const pipeline =
+    requestedPipeline && pipelines.includes(requestedPipeline) ? requestedPipeline : null;
 
   return {
     user,
@@ -140,6 +162,8 @@ export async function loadDashboardContext(
     range,
     owners,
     ownerName,
+    pipelines,
+    pipeline,
   };
 }
 

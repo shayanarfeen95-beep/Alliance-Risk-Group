@@ -238,6 +238,96 @@ describe('entitlements are inherited by the agent', () => {
   });
 });
 
+describe('the source-detail tools return records, never metrics', () => {
+  it('lists individual deals and refuses to be the source of a total', async () => {
+    const outcome = await toolByName('query_deals')!.run({ status: 'won', limit: 5 }, context);
+    const payload = outcome.result as Record<string, unknown>;
+
+    const deals = payload.deals as Array<Record<string, unknown>>;
+    expect(deals.length).toBeGreaterThan(0);
+    expect(deals.length).toBeLessThanOrEqual(5);
+    expect(deals.every((deal) => deal.status === 'won')).toBe(true);
+
+    // The tool must not carry a total of its own. A summed field here would be
+    // a second definition of Dollars Booked sitting one JSON key away from the
+    // real one, and the model would have no way to know which to quote.
+    expect(payload).not.toHaveProperty('total');
+    expect(payload).not.toHaveProperty('totalAmount');
+    expect(payload).not.toHaveProperty('sum');
+    expect(String(payload.note)).toMatch(/get_kpi/);
+  });
+
+  it('filters deals by owner', async () => {
+    const all = (await toolByName('query_deals')!.run({ limit: 100 }, context)).result as Record<
+      string,
+      unknown
+    >;
+    const owners = new Set(
+      (all.deals as Array<Record<string, unknown>>).map((deal) => String(deal.owner)),
+    );
+    const target = [...owners].find((owner) => owner !== 'Unassigned');
+    expect(target).toBeDefined();
+
+    const filtered = (
+      await toolByName('query_deals')!.run({ owner: target, limit: 100 }, context)
+    ).result as Record<string, unknown>;
+
+    const returned = filtered.deals as Array<Record<string, unknown>>;
+    expect(returned.length).toBeGreaterThan(0);
+    expect(returned.every((deal) => deal.owner === target)).toBe(true);
+  });
+
+  it('never returns a deal outside the caller’s divisions', async () => {
+    const scoped = await openSemanticSession(harness.db, CLAIMS_MANAGER_USER, TIE_OUT_MONTH);
+    const outcome = await toolByName('query_deals')!.run(
+      // Asking explicitly for a division they cannot see.
+      { division: 'SHRC', limit: 100 },
+      { db: harness.db, user: CLAIMS_MANAGER_USER, session: scoped, conversationId: null },
+    );
+
+    const deals = (outcome.result as Record<string, unknown>).deals as Array<
+      Record<string, unknown>
+    >;
+    // Entitlements are applied when facts are loaded, so there is nothing to
+    // filter out here — those rows were never fetched.
+    expect(deals.every((deal) => deal.division !== 'SHRC')).toBe(true);
+  });
+
+  it('breaks a reporting line down to accounts, memo lines marked as memo', async () => {
+    const outcome = await toolByName('query_gl_accounts')!.run(
+      { division: 'SHRC', line: 'cogs' },
+      context,
+    );
+    const payload = outcome.result as Record<string, unknown>;
+    const accounts = payload.accounts as Array<Record<string, unknown>>;
+
+    expect(accounts.length).toBeGreaterThan(0);
+    expect(accounts.every((account) => account.reportingLine === 'cogs')).toBe(true);
+    // The memo warning has to travel with the data, not live in a doc.
+    expect(String(payload.note)).toMatch(/memo/i);
+  });
+
+  it('says so rather than reporting zero when no detail is loaded', async () => {
+    const outcome = await toolByName('query_gl_accounts')!.run(
+      { division: 'SHRC', line: 'revenue', search: 'no-such-account-anywhere' },
+      context,
+    );
+    const payload = outcome.result as Record<string, unknown>;
+    expect(payload.available).toBe(false);
+    expect(String(payload.explanation)).toMatch(/must not read the same|rather than reporting zero/i);
+  });
+
+  it('refuses to read a sheet when Sheets is not connected', async () => {
+    const outcome = await toolByName('read_sheet_range')!.run(
+      { range: 'Monthly Budget!A1:C5' },
+      context,
+    );
+    const payload = outcome.result as Record<string, unknown>;
+    expect(payload.available).toBe(false);
+    expect(String(payload.explanation)).toMatch(/not connected/i);
+  });
+});
+
 describe('ingestion is preview-then-confirm', () => {
   it('planning writes no facts and leaves the run awaiting confirmation', async () => {
     const before = await harness.db.select().from(t.factPlActual);

@@ -1,6 +1,6 @@
 import { eq } from 'drizzle-orm';
 import * as t from '@/lib/db/schema';
-import { getDb, type Database } from '@/lib/db/client';
+import { currentDatabase, getDb, type Database } from '@/lib/db/client';
 import { decryptSecret, encryptSecret, hasCredentialKey } from '@/lib/crypto/secrets';
 import type { SourceSystemCode } from './types';
 
@@ -21,6 +21,18 @@ import type { SourceSystemCode } from './types';
  */
 
 export type AuthMethod = 'OAUTH' | 'TOKEN' | 'SERVICE_ACCOUNT';
+
+/**
+ * Which database this read or write belongs to.
+ *
+ * Explicit argument first, then whatever the caller bound with
+ * `withDatabase` — which is how a connector nested inside a sync finds the
+ * right one without the connector interface having to carry it — then the
+ * process singleton.
+ */
+async function resolveDb(db?: Database): Promise<Database> {
+  return db ?? currentDatabase() ?? (await getDb());
+}
 
 export interface StoredCredential {
   sourceSystem: SourceSystemCode;
@@ -128,7 +140,7 @@ export async function loadCredential(
   // asked about before then is simply not connected — not an error worth
   // failing a page render over.
   try {
-    const database = db ?? (await getDb());
+    const database = await resolveDb(db);
     const [row] = await database
       .select()
       .from(t.connectorCredential)
@@ -180,7 +192,7 @@ export async function credentialSummary(
   };
 
   try {
-    const database = db ?? (await getDb());
+    const database = await resolveDb(db);
     const [row] = await database
       .select()
       .from(t.connectorCredential)
@@ -235,7 +247,7 @@ export interface SaveCredentialInput {
 }
 
 export async function saveCredential(input: SaveCredentialInput, db?: Database): Promise<void> {
-  const database = db ?? (await getDb());
+  const database = await resolveDb(db);
   const secret = encryptSecret(JSON.stringify(input.data));
 
   const row = {
@@ -266,7 +278,7 @@ export async function markCredentialError(
   db?: Database,
 ): Promise<void> {
   try {
-    const database = db ?? (await getDb());
+    const database = await resolveDb(db);
     await database
       .update(t.connectorCredential)
       .set({ status: 'ERROR', lastError: message.slice(0, 500), updatedAt: new Date() })
@@ -280,7 +292,7 @@ export async function deleteCredential(
   sourceSystem: SourceSystemCode,
   db?: Database,
 ): Promise<void> {
-  const database = db ?? (await getDb());
+  const database = await resolveDb(db);
   await database
     .delete(t.connectorCredential)
     .where(eq(t.connectorCredential.sourceSystem, sourceSystem));

@@ -10,6 +10,7 @@
  * and the ARG_TOTAL constraints are exercised by the local test suite, not just
  * asserted in a comment.
  */
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { drizzle as drizzlePglite, type PgliteDatabase } from 'drizzle-orm/pglite';
 import { drizzle as drizzlePostgres, type PostgresJsDatabase } from 'drizzle-orm/postgres-js';
 import * as schema from './schema';
@@ -90,6 +91,35 @@ async function create(): Promise<Database> {
  * so the figures on a demo instance are the spec's published figures rather
  * than plausible-looking noise.
  */
+/**
+ * The database a nested call should use when it was not handed one.
+ *
+ * Connectors read their credentials several layers below whoever opened the
+ * connection — `runSync` has the database, but the token lookup happens inside
+ * `hubspotConnector.fetch`, which takes an entity and a window and nothing
+ * else. Threading a `Database` through every connector signature to reach a
+ * credential read would put a persistence detail into the connector interface,
+ * where it does not belong.
+ *
+ * So the caller binds it for the duration of the operation instead, and a
+ * credential read with no explicit database picks up the bound one before
+ * falling back to the singleton. In production these are the same object and
+ * this changes nothing. Where it matters is anywhere two databases exist at
+ * once — the test suite, and any future job running against a second tenant —
+ * because there a load could otherwise check one database for its credentials
+ * and write its facts to another, and report success either way.
+ */
+const databaseScope = new AsyncLocalStorage<Database>();
+
+export function withDatabase<T>(db: Database, run: () => Promise<T>): Promise<T> {
+  return databaseScope.run(db, run);
+}
+
+/** The bound database, if a caller established one. */
+export function currentDatabase(): Database | undefined {
+  return databaseScope.getStore();
+}
+
 export function isDemoMode(): boolean {
   return process.env.DEMO_MODE === '1' && !process.env.DATABASE_URL;
 }

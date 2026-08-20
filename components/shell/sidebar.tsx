@@ -4,6 +4,7 @@ import Link from 'next/link';
 import { usePathname, useSearchParams } from 'next/navigation';
 import {
   BookOpen,
+  Filter,
   ChartPie,
   LayoutDashboard,
   Megaphone,
@@ -31,6 +32,7 @@ const NAV_GROUPS: Array<{ label: string; items: Array<{ href: string; label: str
       { href: '/executive', label: 'Executive', icon: LayoutDashboard },
       { href: '/finance', label: 'Finance', icon: Wallet },
       { href: '/sales', label: 'Sales', icon: TrendingUp },
+      { href: '/hubspot', label: 'HubSpot Leadership', icon: Filter },
       { href: '/marketing', label: 'Marketing', icon: Megaphone },
     ],
   },

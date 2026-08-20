@@ -114,6 +114,17 @@ export interface FactBundle {
   gl: Map<string, GlDetail[]>;
   deals: DealRecord[];
   proposalEntries: Array<{ dealId: string; divisionCode: string | null; enteredAt: Date }>;
+  /**
+   * Every stage a deal has ever entered, with the timestamp.
+   *
+   * A funnel needs this and cannot be built from the current stage. A deal that
+   * is closed-won today sits in exactly one stage now, so counting current
+   * stages produces a "funnel" where a later stage can hold more deals than the
+   * one before it — the conversion reads over 100% and the chart is nonsense.
+   * HubSpot's own funnel report counts deals that *ever reached* each stage,
+   * and so does this.
+   */
+  stageEntries: Array<{ dealId: string; stage: string; divisionCode: string | null; enteredAt: Date }>;
   contacts: ContactRecord[];
   meetings: MeetingRecord[];
   config: Map<string, ConfigValue>;
@@ -189,6 +200,7 @@ export async function loadFactBundle(
       gl: new Map(),
       deals: [],
       proposalEntries: [],
+      stageEntries: [],
       contacts: [],
       meetings: [],
       config: new Map(),
@@ -261,11 +273,12 @@ export async function loadFactBundle(
   const hubspotFrom = monthBounds(addMonths(period.month, -23)).start;
   const hubspotTo = monthBounds(period.month).endExclusive;
 
-  const [dealRows, proposalRows, contactRows, meetingRows] = await Promise.all([
+  const [dealRows, stageRows, contactRows, meetingRows] = await Promise.all([
     db.select().from(t.factDeal),
     db
       .select({
         dealId: t.factDealStageHistory.dealId,
+        stage: t.factDealStageHistory.stage,
         enteredAt: t.factDealStageHistory.enteredAt,
         divisionCode: t.factDeal.divisionCode,
       })
@@ -273,8 +286,6 @@ export async function loadFactBundle(
       .innerJoin(t.factDeal, eq(t.factDeal.dealId, t.factDealStageHistory.dealId))
       .where(
         and(
-          // §6: New Proposals Sent counts deals ENTERING the Proposal stage.
-          eq(t.factDealStageHistory.stage, 'proposalsent'),
           gte(t.factDealStageHistory.enteredAt, hubspotFrom),
           lte(t.factDealStageHistory.enteredAt, hubspotTo),
         ),
@@ -414,7 +425,13 @@ export async function loadFactBundle(
       ownerId: row.ownerId,
       ownerName: row.ownerName,
     })),
-    proposalEntries: proposalRows.filter((row) => inScope(row.divisionCode)),
+    // §6: New Proposals Sent counts deals ENTERING the Proposal stage. Derived
+    // from the same rows as the funnel, so the tile and the chart can never be
+    // counting different sets.
+    proposalEntries: stageRows
+      .filter((row) => row.stage === 'proposalsent' && inScope(row.divisionCode))
+      .map(({ dealId, divisionCode, enteredAt }) => ({ dealId, divisionCode, enteredAt })),
+    stageEntries: stageRows.filter((row) => inScope(row.divisionCode)),
     contacts: contactRows.filter((row) => inScope(row.divisionCode)).map((row) => ({
       contactId: row.contactId,
       divisionCode: row.divisionCode,

@@ -69,6 +69,13 @@ const ENTITIES: EntityDescriptor[] = [
     cadence: 'DAILY',
     description: 'Meetings Completed, by meeting date in period.',
   },
+  {
+    entity: 'owners',
+    label: 'Owners (salespeople)',
+    cadence: 'WEEKLY',
+    description:
+      'Turns the owner id on a deal into a name. Without it the salesperson filter reads as ids, which nobody can use.',
+  },
 ];
 
 async function token(): Promise<string> {
@@ -115,6 +122,35 @@ async function fetchAll(
   return records;
 }
 
+/** Owners live outside the CRM object API and paginate the same way. */
+async function fetchOwners(): Promise<RawRecord[]> {
+  const records: RawRecord[] = [];
+  let after: string | undefined;
+
+  do {
+    const url = new URL(`${API}/crm/v3/owners`);
+    url.searchParams.set('limit', '100');
+    if (after) url.searchParams.set('after', after);
+
+    const response = await requestWithRetry(
+      url.toString(),
+      { headers: { Authorization: `Bearer ${await token()}`, Accept: 'application/json' } },
+      'HUBSPOT',
+    );
+
+    const json = (await response.json()) as {
+      results: Array<{ id: string }>;
+      paging?: { next?: { after?: string } };
+    };
+    for (const result of json.results) {
+      records.push({ entity: 'owners', key: result.id, payload: result });
+    }
+    after = json.paging?.next?.after;
+  } while (after);
+
+  return records;
+}
+
 export const hubspotConnector: SourceConnector = {
   sourceSystem: 'HUBSPOT',
   label: 'HubSpot',
@@ -151,6 +187,11 @@ export const hubspotConnector: SourceConnector = {
         records = await fetchAll('/crm/v3/objects/meetings', MEETING_PROPERTIES, {
           associations: 'deals,contacts',
         });
+        break;
+      case 'owners':
+        // Owners are not CRM objects and do not take a `properties` parameter,
+        // so they get their own walk rather than being forced through fetchAll.
+        records = await fetchOwners();
         break;
       default:
         throw new Error(`Unknown HubSpot entity "${entity}".`);
