@@ -3,6 +3,7 @@ import { desc, eq, sql } from 'drizzle-orm';
 import { CircleAlert, CircleCheck, CircleHelp, Download } from 'lucide-react';
 import { ConnectorCard } from '@/components/admin/connector-card';
 import { UserManager } from '@/components/admin/user-manager';
+import { AssistantCard } from '@/components/admin/assistant-card';
 import {
   can,
   capabilitiesOf,
@@ -15,6 +16,7 @@ import * as t from '@/lib/db/schema';
 import { getSessionUser } from '@/lib/auth/session';
 import { redirect } from 'next/navigation';
 import { connectorStatuses } from '@/lib/connectors';
+import { describeProvider } from '@/lib/ai/provider';
 import { Card, CardHeader, Chip, DataTable, SectionTitle, Td, Th } from '@/components/ui/primitives';
 
 export const metadata: Metadata = { title: 'Admin' };
@@ -101,6 +103,20 @@ export default async function AdminPage({
   }));
 
   const connectors = await connectorStatuses();
+
+  // A half-configured assistant throws rather than guessing a model. Admin is
+  // exactly where that should be readable, so the throw becomes the message.
+  let assistant;
+  try {
+    assistant = describeProvider();
+  } catch (error) {
+    assistant = {
+      configured: false,
+      provider: null,
+      model: null,
+      detail: error instanceof Error ? error.message : 'The assistant is misconfigured.',
+    };
+  }
 
   // The pack is anchored on the configured reporting month rather than today's
   // date: exporting an unclosed month by accident is the sort of thing that
@@ -350,6 +366,16 @@ export default async function AdminPage({
             </tbody>
           </DataTable>
         </Card>
+      </section>
+
+      {/* --- Assistant ------------------------------------------------------ */}
+      <section>
+        <SectionTitle hint="Which model answers, and whether it can call tools at all">
+          Assistant
+        </SectionTitle>
+        <div className="grid gap-3 lg:grid-cols-2">
+          <AssistantCard {...assistant} canManage={can(user, 'EDIT_MAPPINGS')} />
+        </div>
       </section>
 
       {/* --- People and access ---------------------------------------------- */}

@@ -10,7 +10,7 @@
  *   - render model-authored markup. A generated chart is a validated view spec
  *     passed to the same ChartCard the dashboards use.
  */
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { ArrowUp, CircleAlert, Database, LoaderCircle, ShieldCheck, Sparkles } from 'lucide-react';
 import { ChartCard, type ChartCardProps } from '@/components/charts/chart-card';
 
@@ -50,14 +50,94 @@ export interface AgentMessage {
   };
 }
 
-const SUGGESTIONS = [
-  'What was LITS gross margin in March, and how does it compare to budget?',
-  'Show revenue by division for the last 12 months',
-  'Why did Claims lose money in March?',
-  'Pull the latest month from QuickBooks',
+/**
+ * What it does, as verbs.
+ *
+ * The panel used to open on four example questions, and that framing was the
+ * problem: a list of questions reads as a form to fill in, not as somebody you
+ * hand work to. These are capabilities, each with one example — the example is
+ * there to show the shape of a request, not to be the only thing you can say.
+ *
+ * "Import" is conditional. It used to be offered whether or not a source was
+ * connected, so the one capability people most wanted to try was also the one
+ * most likely to fail on the first attempt.
+ */
+const CAPABILITIES: Array<{
+  id: string;
+  verb: string;
+  detail: string;
+  example: string;
+  needsSource?: boolean;
+}> = [
+  {
+    id: 'analyse',
+    verb: 'Answer with a figure you can check',
+    detail: 'Every number is cited and links to the view it came from.',
+    example: 'What was LITS gross margin in March, and how does it compare to budget?',
+  },
+  {
+    id: 'explain',
+    verb: 'Explain a movement',
+    detail: 'Breaks a line down to the accounts behind it.',
+    example: 'Why did Claims lose money in March?',
+  },
+  {
+    id: 'chart',
+    verb: 'Build a chart',
+    detail: 'Emits a validated spec rendered by the same component the dashboards use.',
+    example: 'Show revenue by division for the last 12 months',
+  },
+  {
+    id: 'records',
+    verb: 'Pull the underlying records',
+    detail: 'Deals, GL accounts, sheet cells — the working behind a total.',
+    example: 'Which deals closed in March, and who owned them?',
+  },
+  {
+    id: 'import',
+    verb: 'Import fresh data',
+    detail: 'Shows you what it will pull; nothing is written until you confirm.',
+    example: 'Pull March from QuickBooks',
+    needsSource: true,
+  },
 ];
 
-export function AgentConversation({ pageContext }: { pageContext: PageContext }) {
+export interface AgentStatus {
+  assistant: { configured: boolean; provider: string | null; model: string | null; detail: string };
+  sources: Array<{ source: string; label: string; connected: boolean; account: string | null }>;
+  canImport: boolean;
+}
+
+export function AgentConversation({
+  pageContext,
+  onStatus,
+}: {
+  pageContext: PageContext;
+  onStatus?: (status: AgentStatus) => void;
+}) {
+  const [status, setStatus] = useState<AgentStatus | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetch('/api/agent/status')
+      .then((response) => response.json())
+      .then((payload) => {
+        if (cancelled || !payload.ok) return;
+        setStatus(payload as AgentStatus);
+        onStatus?.(payload as AgentStatus);
+      })
+      .catch(() => {
+        // The panel works without this; it only changes what the empty state
+        // can promise.
+      });
+    return () => {
+      cancelled = true;
+    };
+    // Runs once: the connection state is read when the panel mounts, and the
+    // panel remounts on open.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   const [messages, setMessages] = useState<AgentMessage[]>([]);
   const [input, setInput] = useState('');
   const [busy, setBusy] = useState(false);
@@ -126,36 +206,98 @@ export function AgentConversation({ pageContext }: { pageContext: PageContext })
       <div ref={scrollRef} className="flex-1 space-y-4 overflow-y-auto px-4 py-4">
         {messages.length === 0 ? (
           <div className="space-y-4">
-            <div
-              className="rounded-[var(--radius)] p-3 text-[11.5px] leading-relaxed"
-              style={{ background: 'var(--surface-2)', color: 'var(--text-secondary)' }}
-            >
-              <p className="mb-1.5 flex items-center gap-1.5 font-medium text-[var(--text-primary)]">
-                <ShieldCheck size={13} aria-hidden style={{ color: 'var(--status-good)' }} />
-                Answers come from the same definitions the dashboards use
+            <div>
+              <p className="text-[13px] font-semibold tracking-tight">
+                Give it something to do.
               </p>
-              <p>
-                Every figure is cited and links to the view you can check it against. When the data
-                does not support an answer, it says so rather than estimating. It can also pull fresh
-                data from QuickBooks, HubSpot or Sheets — it will show you what it plans to do before
-                anything is written.
+              <p className="mt-1 text-[11.5px] leading-relaxed text-[var(--text-secondary)]">
+                It works inside this dashboard, already knowing the month, division and page you
+                are on. Ask in your own words — the examples below are shapes, not a menu.
               </p>
             </div>
 
+            {/* What is actually connected. An agent that offers to import from
+                HubSpot when HubSpot is not connected is worse than one that
+                says so up front, because the failure lands after the ask. */}
+            {status && (
+              <div
+                className="rounded-[var(--radius)] border p-2.5"
+                style={{ borderColor: 'var(--border)', background: 'var(--surface-2)' }}
+              >
+                <p
+                  className="mb-1.5 text-[10px] font-semibold uppercase tracking-[0.07em]"
+                  style={{ color: 'var(--text-muted)' }}
+                >
+                  Connected sources
+                </p>
+                <ul className="space-y-0.5">
+                  {status.sources.map((source) => (
+                    <li key={source.source} className="flex items-center gap-1.5 text-[11px]">
+                      <span
+                        aria-hidden
+                        className="h-1.5 w-1.5 shrink-0 rounded-full"
+                        style={{
+                          background: source.connected
+                            ? 'var(--status-good)'
+                            : 'var(--text-muted)',
+                        }}
+                      />
+                      <span style={{ color: source.connected ? 'var(--text-primary)' : 'var(--text-muted)' }}>
+                        {source.label}
+                      </span>
+                      <span className="truncate text-[10.5px] text-[var(--text-muted)]">
+                        {source.connected ? (source.account ?? 'connected') : 'not connected'}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+                {status.sources.every((source) => !source.connected) && (
+                  <p className="mt-1.5 text-[10.5px] leading-relaxed text-[var(--text-muted)]">
+                    Nothing is connected yet, so it can read the warehouse but cannot fetch
+                    anything new. Connect a source in Admin.
+                  </p>
+                )}
+              </div>
+            )}
+
             <ul className="space-y-1.5">
-              {SUGGESTIONS.map((suggestion) => (
-                <li key={suggestion}>
+              {CAPABILITIES.filter(
+                (capability) =>
+                  !capability.needsSource ||
+                  (status?.canImport && status.sources.some((source) => source.connected)),
+              ).map((capability) => (
+                <li key={capability.id}>
                   <button
                     type="button"
-                    onClick={() => send(suggestion)}
-                    className="w-full rounded-[var(--radius)] border px-3 py-2 text-left text-[12px] leading-snug transition-colors hover:bg-[var(--surface-2)]"
-                    style={{ borderColor: 'var(--border)', color: 'var(--text-secondary)' }}
+                    onClick={() => setInput(capability.example)}
+                    className="w-full rounded-[var(--radius)] border px-3 py-2 text-left transition-colors hover:bg-[var(--surface-2)]"
+                    style={{ borderColor: 'var(--border)' }}
                   >
-                    {suggestion}
+                    <span className="block text-[12px] font-medium leading-snug">
+                      {capability.verb}
+                    </span>
+                    <span className="mt-0.5 block text-[10.5px] leading-relaxed text-[var(--text-muted)]">
+                      {capability.detail}
+                    </span>
+                    <span
+                      className="mt-1 block text-[11px] leading-snug"
+                      style={{ color: 'var(--text-secondary)' }}
+                    >
+                      &ldquo;{capability.example}&rdquo;
+                    </span>
                   </button>
                 </li>
               ))}
             </ul>
+
+            <p className="flex items-start gap-1.5 text-[10.5px] leading-relaxed text-[var(--text-muted)]">
+              <ShieldCheck size={12} className="mt-px shrink-0" aria-hidden style={{ color: 'var(--status-good)' }} />
+              <span>
+                Figures come from the same definitions the dashboards use, so it cannot disagree
+                with the screen behind it. When the data will not support an answer it says so
+                instead of estimating, and nothing is ever written to a source.
+              </span>
+            </p>
           </div>
         ) : null}
 
