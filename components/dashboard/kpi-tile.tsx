@@ -114,11 +114,29 @@ export function KpiTile(props: KpiTileProps) {
     !unavailable && Boolean(comparisons?.length || breakdown || trend?.length || definition);
 
   const selected = comparisons?.find((comparison) => comparison.id === basis) ?? comparisons?.[0];
+  const faceComparison = unavailable ? undefined : selected;
 
+  /**
+   * The card face.
+   *
+   * Restructured to read as a report card rather than a stat in a strip. The
+   * change that matters is the comparison control: it sits on the face, always
+   * visible, because "compared to what" is not an advanced option — it is half
+   * of what a KPI means, and burying it behind an expand left every box looking
+   * like a number with no filters on it.
+   */
   const body = (
     <>
       <div className="flex items-start justify-between gap-2">
-        <p className="text-[11px] font-medium leading-tight text-[var(--text-secondary)]">{name}</p>
+        <div className="min-w-0">
+          <p className="truncate text-[12px] font-semibold leading-tight">{name}</p>
+          {periodLabel && (
+            <p className="mt-0.5 text-[10px] leading-tight text-[var(--text-muted)]">
+              {periodLabel}
+              {isOpenPeriod ? ' · preliminary' : ''}
+            </p>
+          )}
+        </div>
         {hint ? (
           <span title={hint} className="shrink-0 text-[var(--text-muted)]">
             <Info size={12} aria-hidden />
@@ -128,7 +146,7 @@ export function KpiTile(props: KpiTileProps) {
 
       {unavailable ? (
         <>
-          <p className="mt-2 text-[22px] font-semibold leading-none tracking-tight text-[var(--text-muted)]">
+          <p className="mt-3 text-[26px] font-semibold leading-none tracking-tight text-[var(--text-muted)]">
             —
           </p>
           <p className="mt-2 line-clamp-3 text-[10.5px] leading-relaxed text-[var(--text-muted)]">
@@ -137,12 +155,28 @@ export function KpiTile(props: KpiTileProps) {
         </>
       ) : (
         <>
-          <p className="mt-2 text-[22px] font-semibold leading-none tracking-tight">{formatted}</p>
+          <p className="mt-3 text-[26px] font-semibold leading-none tracking-tight">{formatted}</p>
 
-          <div className="mt-2.5 flex flex-wrap items-center gap-x-3 gap-y-1">
-            <Delta label="PM" value={deltaPriorMonth} format={format} higherIsBetter={higherIsBetter} />
-            <Delta label="PY" value={deltaPriorYear} format={format} higherIsBetter={higherIsBetter} />
-          </div>
+          {faceComparison ? (
+            <div className="mt-2 flex flex-wrap items-baseline gap-x-2 gap-y-1">
+              <Delta
+                label={`vs ${faceComparison.periodLabel}`}
+                value={faceComparison.delta}
+                format={format}
+                higherIsBetter={higherIsBetter}
+              />
+              {faceComparison.formatted && (
+                <span className="text-[10.5px] text-[var(--text-muted)]">
+                  was {faceComparison.formatted}
+                </span>
+              )}
+            </div>
+          ) : (
+            <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1">
+              <Delta label="PM" value={deltaPriorMonth} format={format} higherIsBetter={higherIsBetter} />
+              <Delta label="PY" value={deltaPriorYear} format={format} higherIsBetter={higherIsBetter} />
+            </div>
+          )}
 
           {sparkline && sparkline.filter((v) => v !== null).length > 1 ? (
             <Sparkline values={sparkline} higherIsBetter={higherIsBetter} />
@@ -182,49 +216,63 @@ export function KpiTile(props: KpiTileProps) {
       className={`flex flex-col rounded-[var(--radius-lg)] border transition-colors ${open ? 'col-span-full' : ''}`}
       style={style}
     >
-      <button
-        type="button"
-        onClick={() => setOpen(!open)}
-        aria-expanded={open}
-        className="flex flex-col p-4 text-left transition-colors hover:bg-[var(--surface-2)]"
+      <div className="flex flex-1 flex-col p-4">{body}</div>
+
+      {/* The filter row, on the face of every card.
+          "Compared to what" is half of what a KPI means, and having it behind
+          an expand is why these read as numbers with no controls. The deeper
+          breakdown still expands; the comparison does not need to. */}
+      <div
+        className="flex flex-wrap items-center justify-between gap-2 border-t px-4 py-2"
+        style={{ borderColor: 'var(--border)' }}
       >
-        {body}
-        <span className="mt-2.5 inline-flex items-center gap-1 text-[10.5px] text-[var(--text-muted)]">
+        {comparisons && comparisons.length > 1 && !unavailable ? (
+          <div className="flex flex-wrap gap-1" role="group" aria-label={`Compare ${name} against`}>
+            {comparisons.map((comparison) => (
+              <button
+                key={comparison.id}
+                type="button"
+                onClick={() => setBasis(comparison.id)}
+                aria-pressed={basis === comparison.id}
+                className="rounded-[4px] px-1.5 py-0.5 text-[10px] transition-colors"
+                style={{
+                  background: basis === comparison.id ? 'var(--surface-2)' : 'transparent',
+                  color:
+                    basis === comparison.id ? 'var(--text-primary)' : 'var(--text-muted)',
+                  fontWeight: basis === comparison.id ? 600 : 400,
+                }}
+              >
+                {comparison.label}
+              </button>
+            ))}
+          </div>
+        ) : (
+          <span />
+        )}
+
+        <button
+          type="button"
+          onClick={() => setOpen(!open)}
+          aria-expanded={open}
+          className="inline-flex items-center gap-1 text-[10.5px] transition-colors hover:text-[var(--text-primary)]"
+          style={{ color: 'var(--text-muted)' }}
+        >
           <ChevronDown
             size={11}
             aria-hidden
             style={{ transform: open ? 'rotate(180deg)' : undefined, transition: 'transform 120ms' }}
           />
-          {open ? 'Close' : 'Break down and compare'}
-        </span>
-      </button>
+          {open ? 'Close' : 'Break down'}
+        </button>
+      </div>
 
       {open && (
         <div className="border-t px-4 pb-4 pt-3" style={{ borderColor: 'var(--border)' }}>
           <div className="grid gap-5 lg:grid-cols-3">
-            {/* --- Compare against ------------------------------------- */}
+            {/* --- The selected comparison, in full --------------------- */}
             {comparisons && comparisons.length > 0 && (
               <section>
-                <Legend>Compare against</Legend>
-                <div className="flex flex-wrap gap-1">
-                  {comparisons.map((comparison) => (
-                    <button
-                      key={comparison.id}
-                      type="button"
-                      onClick={() => setBasis(comparison.id)}
-                      className="rounded-[5px] border px-2 py-0.5 text-[11px] transition-colors"
-                      style={{
-                        borderColor:
-                          basis === comparison.id ? 'var(--border-strong)' : 'var(--border)',
-                        background:
-                          basis === comparison.id ? 'var(--surface-2)' : 'transparent',
-                        fontWeight: basis === comparison.id ? 600 : 400,
-                      }}
-                    >
-                      {comparison.label}
-                    </button>
-                  ))}
-                </div>
+                <Legend>{selected?.label ?? 'Comparison'}</Legend>
 
                 {selected && (
                   <dl className="mt-2.5 space-y-1 text-[11.5px]">

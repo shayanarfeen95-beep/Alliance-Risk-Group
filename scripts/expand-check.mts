@@ -37,29 +37,48 @@ await Promise.all([page.waitForURL('**/executive**', { timeout: 30000 }), page.c
 
 await page.goto(`${BASE}/executive?month=2026-03&division=ARG_TOTAL`, { waitUntil: 'networkidle' });
 
-const toggle = page.getByRole('button', { name: /Break down and compare/ }).first();
+// The comparison control is on the card face now, so assert it there before
+// opening anything — that is the whole "every box has its own filters" claim.
+const faceFilter = page.getByRole('group', { name: /Compare .* against/ }).first();
+await faceFilter.waitFor({ state: 'visible', timeout: 15000 });
+
+const faceBefore = await page.locator('article, div').filter({ hasText: 'Revenue Run Rate' }).first().innerText();
+await faceFilter.getByRole('button', { name: 'Prior year', exact: true }).click();
+await page.waitForTimeout(250);
+const faceAfter = await page.locator('article, div').filter({ hasText: 'Revenue Run Rate' }).first().innerText();
+const faceSwitches = faceBefore !== faceAfter;
+console.log('on-face comparison switches without opening the card:', faceSwitches);
+
+const toggle = page.getByRole('button', { name: /Break down/ }).first();
 await toggle.click();
 await page.waitForTimeout(400);
 
 // Prove the panel actually opened with real content, not an empty shell.
-const panelText = await page.locator('text=Compare against').first().isVisible();
+const panelText = await page.locator('text=Prior month').first().isVisible();
 const breakdown = await page.locator('text=By division').first().isVisible().catch(() => false);
 const trend = await page.locator('text=Trailing twelve months').first().isVisible().catch(() => false);
 console.log('compare visible:', panelText, '| breakdown:', breakdown, '| trend:', trend);
 
-// Switch the comparison basis and confirm the figures change.
+// And the expanded panel shows the same selected basis in full.
 const before = await page.locator('dl').first().innerText();
-await page.getByRole('button', { name: 'Prior year', exact: true }).first().click();
-await page.waitForTimeout(200);
+await faceFilter.getByRole('button', { name: 'Prior month', exact: true }).click();
+await page.waitForTimeout(250);
 const after = await page.locator('dl').first().innerText();
-console.log('basis switch changed the figures:', before !== after);
+console.log('the panel follows the selected basis:', before !== after);
 
 await page.screenshot({ path: 'screenshots/kpi-expanded.png', fullPage: false });
 await browser.close();
 
-if (!panelText || !breakdown || !trend || before === after || errors.length > 0) {
-  console.error('FAILED', { panelText, breakdown, trend, basisSwitched: before !== after, errors });
+if (!panelText || !breakdown || !trend || !faceSwitches || before === after || errors.length > 0) {
+  console.error('FAILED', {
+    panelText,
+    breakdown,
+    trend,
+    faceSwitches,
+    panelFollows: before !== after,
+    errors,
+  });
   process.exit(1);
 }
 
-console.log('\nthe KPI card opens, breaks down and switches basis \u2014 screenshots/kpi-expanded.png');
+console.log('\nevery KPI card filters on its face and opens for the breakdown \u2014 screenshots/kpi-expanded.png');
