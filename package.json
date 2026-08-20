@@ -24,7 +24,6 @@
     "verify:agent": "tsx scripts/agent-check.mts"
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.116.0",
     "@electric-sql/pglite": "^0.5.4",
     "bcryptjs": "^3.0.2",
     "date-fns": "^4.4.0",

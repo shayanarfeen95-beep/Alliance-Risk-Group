@@ -1,5 +1,4 @@
 import 'server-only';
-import type Anthropic from '@anthropic-ai/sdk';
 
 /**
  * Which model serves the assistant.
@@ -46,7 +45,7 @@ export interface ProviderResponse {
 }
 
 export interface ModelProvider {
-  id: 'anthropic' | 'openrouter';
+  id: 'openrouter';
   label: string;
   model: string;
   complete(request: {
@@ -54,6 +53,16 @@ export interface ModelProvider {
     messages: AgentMessage[];
     tools: ToolSpec[];
   }): Promise<ProviderResponse>;
+  /**
+   * A single completion with no tools.
+   *
+   * Close commentary uses this. It does not need tools and must not have them:
+   * every figure is resolved before the model is called and handed over as
+   * finished strings, and the draft is checked against that list afterwards.
+   * Giving it a way to look something up would give it a way to introduce a
+   * number the verifier has no record of.
+   */
+  completeText(request: { system: string; prompt: string; maxTokens?: number }): Promise<string>;
 }
 
 export class AgentNotConfiguredError extends Error {
@@ -67,21 +76,13 @@ export class AgentNotConfiguredError extends Error {
 // Selection
 // ---------------------------------------------------------------------------
 
-/**
- * OpenRouter wins when both are set.
- *
- * Deliberate: somebody who has gone to the trouble of setting an OpenRouter key
- * on a deployment that already had an Anthropic one is switching, and silently
- * continuing to bill the Anthropic account would be the wrong reading of that.
- */
 export function selectProvider(): ModelProvider | null {
   if (process.env.OPENROUTER_API_KEY) return openRouterProvider();
-  if (process.env.ANTHROPIC_API_KEY) return anthropicProvider();
   return null;
 }
 
 export function isAgentConfigured(): boolean {
-  return Boolean(process.env.OPENROUTER_API_KEY || process.env.ANTHROPIC_API_KEY);
+  return Boolean(process.env.OPENROUTER_API_KEY);
 }
 
 /** What Admin shows, without revealing any part of a key. */
@@ -98,8 +99,8 @@ export function describeProvider(): {
       provider: null,
       model: null,
       detail:
-        'Set OPENROUTER_API_KEY or ANTHROPIC_API_KEY to enable the assistant. Every dashboard, ' +
-        'export and control works without it — only the conversational layer is unavailable.',
+        'Set OPENROUTER_API_KEY to enable the assistant. Every dashboard, export and control ' +
+        'works without it — only the conversational layer is unavailable.',
     };
   }
 
@@ -108,112 +109,9 @@ export function describeProvider(): {
     provider: provider.label,
     model: provider.model,
     detail:
-      provider.id === 'openrouter'
-        ? 'OpenRouter is serving the assistant. The model must support tool calling — the assistant is nothing but tool calls, and a model without it will answer confidently from nothing.'
-        : 'Anthropic is serving the assistant.',
+      'OpenRouter is serving the assistant. The model must support tool calling — the assistant ' +
+      'is nothing but tool calls, and one without it will answer confidently from nothing.',
   };
-}
-
-// ---------------------------------------------------------------------------
-// Anthropic
-// ---------------------------------------------------------------------------
-
-function anthropicProvider(): ModelProvider {
-  const model = process.env.ANTHROPIC_MODEL_INTERACTIVE ?? 'claude-sonnet-5';
-
-  return {
-    id: 'anthropic',
-    label: 'Anthropic',
-    model,
-
-    async complete({ system, messages, tools }) {
-      const { default: AnthropicClient } = await import('@anthropic-ai/sdk');
-      const client = new AnthropicClient();
-
-      const response = await client.messages.create({
-        model,
-        max_tokens: 8000,
-        system,
-        tools: tools.map((tool) => ({
-          name: tool.name,
-          description: tool.description,
-          input_schema: tool.input_schema as Anthropic.Tool.InputSchema,
-        })),
-        messages: toAnthropicMessages(messages) as Anthropic.MessageParam[],
-      });
-
-      if (response.stop_reason === 'refusal') {
-        return { text: '', toolCalls: [], refused: true };
-      }
-
-      return {
-        text: response.content
-          .filter((block): block is Anthropic.TextBlock => block.type === 'text')
-          .map((block) => block.text)
-          .join('\n')
-          .trim(),
-        toolCalls: response.content
-          .filter((block): block is Anthropic.ToolUseBlock => block.type === 'tool_use')
-          .map((block) => ({
-            id: block.id,
-            name: block.name,
-            input: (block.input ?? {}) as Record<string, unknown>,
-          })),
-        refused: false,
-      };
-    },
-  };
-}
-
-/**
- * Anthropic wants tool results batched into one user message.
- *
- * Splitting them across messages trains the model out of parallel tool calls,
- * which roughly doubles the number of round trips on any question that needs
- * two figures — and most useful questions need two figures.
- */
-export function toAnthropicMessages(messages: AgentMessage[]): Array<{
-  role: 'user' | 'assistant';
-  content: unknown;
-}> {
-  const out: Array<{ role: 'user' | 'assistant'; content: unknown }> = [];
-  let pendingResults: unknown[] = [];
-
-  const flush = () => {
-    if (pendingResults.length > 0) {
-      out.push({ role: 'user', content: pendingResults });
-      pendingResults = [];
-    }
-  };
-
-  for (const message of messages) {
-    if (message.role === 'tool') {
-      pendingResults.push({
-        type: 'tool_result',
-        tool_use_id: message.toolCallId,
-        content: message.content,
-        ...(message.isError ? { is_error: true } : {}),
-      });
-      continue;
-    }
-
-    flush();
-
-    if (message.role === 'user') {
-      out.push({ role: 'user', content: message.content });
-      continue;
-    }
-
-    const blocks: unknown[] = [];
-    if (message.content) blocks.push({ type: 'text', text: message.content });
-    for (const call of message.toolCalls ?? []) {
-      blocks.push({ type: 'tool_use', id: call.id, name: call.name, input: call.input });
-    }
-    out.push({ role: 'assistant', content: blocks.length > 0 ? blocks : message.content });
-  }
-
-  flush();
-  return out;
 }
 
 // ---------------------------------------------------------------------------
@@ -223,32 +121,42 @@ export function toAnthropicMessages(messages: AgentMessage[]): Array<{
 const OPENROUTER_BASE = 'https://openrouter.ai/api/v1';
 
 /**
- * No default model, on purpose.
+ * The model, defaulting to the one ARG chose.
  *
- * Which free models OpenRouter offers, and which of those support tool calling,
- * changes month to month — a model id hardcoded today is a model id that 404s
- * or silently loses tool support later. The assistant is nothing but tool
- * calls, so a model without them does not degrade: it answers confidently with
- * numbers it invented, which is the single worst failure this system can have.
+ * A hardcoded default is a real risk and worth naming: which free models
+ * OpenRouter offers, and which of those support tool calling, changes month to
+ * month. When this one is withdrawn or loses tool support the failure will not
+ * be an error — the assistant is nothing but tool calls, so a model without
+ * them answers confidently with numbers it invented, which is the worst failure
+ * this system can have.
  *
- * So the model is named explicitly, and `verifyOpenRouterModel` checks it
- * against OpenRouter's live catalogue before anyone trusts it.
+ * The default stands because it is the model ARG asked for, and the mitigation
+ * is that Admin → Assistant checks it against OpenRouter's live catalogue: does
+ * this id still exist, does it still list `tools`, is it still free. Run that
+ * check whenever the assistant starts behaving oddly, and before trusting a
+ * figure from a deployment nobody has looked at in a while.
  */
-function openRouterProvider(): ModelProvider {
-  const model = process.env.OPENROUTER_MODEL;
+export const DEFAULT_OPENROUTER_MODEL = 'z-ai/glm-5.2:free';
 
-  if (!model) {
-    throw new AgentNotConfiguredError(
-      'OPENROUTER_API_KEY is set but OPENROUTER_MODEL is not. Name a model that supports tool ' +
-        'calling — the assistant is entirely tool calls, and one without them will answer from ' +
-        'nothing rather than fail. Admin → Assistant checks a model before you rely on it.',
-    );
-  }
+function openRouterProvider(): ModelProvider {
+  const model = process.env.OPENROUTER_MODEL || DEFAULT_OPENROUTER_MODEL;
 
   return {
     id: 'openrouter',
     label: 'OpenRouter',
     model,
+
+    async completeText({ system, prompt, maxTokens }) {
+      const response = await postCompletion({
+        model,
+        messages: [
+          { role: 'system', content: system },
+          { role: 'user', content: prompt },
+        ],
+        max_tokens: maxTokens ?? 2000,
+      });
+      return (response.choices?.[0]?.message?.content ?? '').trim();
+    },
 
     async complete({ system, messages, tools }) {
       const response = await fetch(`${OPENROUTER_BASE}/chat/completions`, {
@@ -317,6 +225,28 @@ function openRouterProvider(): ModelProvider {
       };
     },
   };
+}
+
+async function postCompletion(body: Record<string, unknown>): Promise<OpenAiCompletion> {
+  const response = await fetch(`${OPENROUTER_BASE}/chat/completions`, {
+    method: 'POST',
+    headers: {
+      authorization: `Bearer ${process.env.OPENROUTER_API_KEY}`,
+      'content-type': 'application/json',
+      'HTTP-Referer': process.env.OAUTH_REDIRECT_BASE ?? 'https://alliance-risk-group.vercel.app',
+      'X-Title': 'Alliance Risk Group — FP&A',
+    },
+    body: JSON.stringify(body),
+  });
+
+  const text = await response.text();
+  if (!response.ok) {
+    throw new Error(`OpenRouter returned HTTP ${response.status}: ${text.slice(0, 300)}`);
+  }
+
+  const parsed = JSON.parse(text) as OpenAiCompletion;
+  if (parsed.error) throw new Error(`OpenRouter: ${parsed.error.message ?? 'provider error'}`);
+  return parsed;
 }
 
 interface OpenAiCompletion {

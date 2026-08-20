@@ -1,4 +1,3 @@
-import Anthropic from '@anthropic-ai/sdk';
 import Decimal from 'decimal.js';
 import { formatValue } from '@/lib/money';
 import { resolveKpi, CONSOLIDATED_CODE, type SemanticSession } from '@/lib/semantic/resolve';
@@ -23,16 +22,16 @@ import type { Finding } from './goals';
  *      the deterministic one. §11 Requirement 3 does not have a "usually" in it.
  *
  * That means the worst case here is plainer writing, never a wrong number. When
- * ANTHROPIC_API_KEY is absent the deterministic draft is what ships, and it is
+ * OPENROUTER_API_KEY is absent the deterministic draft is what ships, and it is
  * written to be publishable on its own — Westport edits and signs either way.
  *
  * This module deliberately carries no `server-only` marker: the seed loader and
- * the overnight refresh both draft commentary outside a request, and the
- * Anthropic client is constructed inside the function rather than at import, so
- * nothing here runs on a key that is not present.
+ * the overnight refresh both draft commentary outside a request, from plain
+ * Node. The provider is therefore imported *inside* the function — it does
+ * carry the marker, and a static import here would throw at module load in the
+ * seed, which is exactly what happened the first time this was wired up.
  */
 
-const MODEL = process.env.ANTHROPIC_MODEL_COMMENTARY ?? 'claude-opus-5';
 
 export interface CommentaryFact {
   label: string;
@@ -358,38 +357,35 @@ export async function generateCommentary(
     periodState: session.periodIsClosed ? 'CLOSED' : 'OPEN',
   };
 
-  if (!process.env.ANTHROPIC_API_KEY) return fallback;
+  // The env check comes before the import, not after it.
+  //
+  // This module is loaded from plain Node by the seed, and `provider` carries
+  // a `server-only` marker that throws the moment it is imported there. So the
+  // cheap check happens first and the import never runs when there is no key —
+  // which is the case the seed is always in. The previous code checked the key
+  // before constructing its client for the same reason.
+  if (!process.env.OPENROUTER_API_KEY) return fallback;
+
+  const { selectProvider } = await import('./provider');
+  const provider = selectProvider();
+  if (!provider) return fallback;
 
   try {
-    const client = new Anthropic();
-    const response = await client.messages.create({
-      model: MODEL,
-      max_tokens: 2000,
-      thinking: { type: 'adaptive' },
+    // No tools, deliberately. Every figure is resolved before this call and
+    // handed over as finished strings; the draft is then checked against that
+    // list. A way to look something up would be a way to introduce a number the
+    // verifier has no record of.
+    const body = await provider.completeText({
       system: SYSTEM_PROMPT,
-      messages: [
-        {
-          role: 'user',
-          content:
-            `Reporting month: ${session.period.month} (${session.periodIsClosed ? 'closed' : 'open — preliminary'}).\n` +
-            `Accounting basis: ${session.accountingBasis}.\n\n` +
-            `Fact pack:\n` +
-            facts
-              .map((fact) => `- ${fact.label}: ${fact.value}${fact.note ? ` (${fact.note})` : ''}`)
-              .join('\n'),
-        },
-      ],
+      prompt:
+        `Reporting month: ${session.period.month} (${session.periodIsClosed ? 'closed' : 'open — preliminary'}).\n` +
+        `Accounting basis: ${session.accountingBasis}.\n\n` +
+        `Fact pack:\n` +
+        facts
+          .map((fact) => `- ${fact.label}: ${fact.value}${fact.note ? ` (${fact.note})` : ''}`)
+          .join('\n'),
+      maxTokens: 2000,
     });
-
-    if (response.stop_reason === 'refusal') {
-      return { ...fallback, rejectionReason: 'The model declined to draft this month’s commentary.' };
-    }
-
-    const body = response.content
-      .filter((block): block is Anthropic.TextBlock => block.type === 'text')
-      .map((block) => block.text)
-      .join('\n')
-      .trim();
 
     if (!body) return fallback;
 

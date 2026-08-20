@@ -11,7 +11,15 @@
  *     passed to the same ChartCard the dashboards use.
  */
 import { useEffect, useRef, useState } from 'react';
-import { ArrowUp, CircleAlert, Database, LoaderCircle, ShieldCheck, Sparkles } from 'lucide-react';
+import {
+  ArrowUp,
+  CircleAlert,
+  Database,
+  LoaderCircle,
+  ShieldCheck,
+  Sparkles,
+  Square,
+} from 'lucide-react';
 import { ChartCard, type ChartCardProps } from '@/components/charts/chart-card';
 
 export interface PageContext {
@@ -142,44 +150,109 @@ export function AgentConversation({
   const [input, setInput] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  /** Steps completed so far in the turn in flight. Cleared when it lands. */
+  const [steps, setSteps] = useState<AgentToolActivity[]>([]);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const abortRef = useRef<AbortController | null>(null);
+  const inputRef = useRef<HTMLTextAreaElement>(null);
 
+  function scrollToEnd() {
+    requestAnimationFrame(() => {
+      scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' });
+    });
+  }
+
+  /**
+   * Sends, then follows the stream.
+   *
+   * Three things this fixes, all of which read as the panel being broken:
+   * the view did not scroll to the message you just sent until the whole
+   * round trip finished; a multi-step answer showed one unchanging "Working…"
+   * for the better part of a minute; and there was no way to stop it.
+   */
   async function send(text: string) {
     if (!text.trim() || busy) return;
     setError(null);
     setInput('');
+    setSteps([]);
+    // Clearing the value does not shrink a grown textarea on its own.
+    if (inputRef.current) inputRef.current.style.height = 'auto';
 
     const history = [...messages, { role: 'user' as const, content: text }];
     setMessages(history);
     setBusy(true);
 
+    // Scroll now, to the message just sent, rather than when the answer lands.
+    scrollToEnd();
+
+    const controller = new AbortController();
+    abortRef.current = controller;
+
     try {
       const response = await fetch('/api/agent', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        signal: controller.signal,
         body: JSON.stringify({
           messages: history.map((m) => ({ role: m.role, content: m.content })),
           pageContext,
         }),
       });
 
-      const payload = (await response.json()) as
-        | { ok: true; message: AgentMessage }
-        | { ok: false; error: string };
-
-      if (!payload.ok) {
-        setError(payload.error);
-      } else {
-        setMessages((current) => [...current, payload.message]);
+      if (!response.body) {
+        setError('The assistant returned nothing. Try again.');
+        return;
       }
-    } catch {
-      setError('Could not reach the assistant. Your session is still signed in — try again.');
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+
+      // Newline-delimited JSON: a chunk can split a line, so only whole lines
+      // are parsed and the remainder is carried forward.
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop() ?? '';
+
+        for (const line of lines) {
+          if (!line.trim()) continue;
+
+          let event: { type: string; activity?: AgentToolActivity; message?: AgentMessage; error?: string };
+          try {
+            event = JSON.parse(line);
+          } catch {
+            continue;
+          }
+
+          if (event.type === 'activity' && event.activity) {
+            setSteps((current) => [...current, event.activity!]);
+            scrollToEnd();
+          } else if (event.type === 'message' && event.message) {
+            setMessages((current) => [...current, event.message!]);
+          } else if (event.type === 'error') {
+            setError(event.error ?? 'The assistant could not complete that.');
+          }
+        }
+      }
+    } catch (error) {
+      // An abort is the user pressing Stop, not a failure to report.
+      if ((error as Error)?.name !== 'AbortError') {
+        setError('Could not reach the assistant. Your session is still signed in — try again.');
+      }
     } finally {
+      abortRef.current = null;
       setBusy(false);
-      requestAnimationFrame(() => {
-        scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' });
-      });
+      setSteps([]);
+      scrollToEnd();
     }
+  }
+
+  function stop() {
+    abortRef.current?.abort();
   }
 
   async function confirmAction(actionId: string) {
@@ -198,6 +271,7 @@ export function AgentConversation({
       else setMessages((current) => [...current, payload.message]);
     } finally {
       setBusy(false);
+      scrollToEnd();
     }
   }
 
@@ -305,11 +379,25 @@ export function AgentConversation({
           <MessageBubble key={index} message={message} onConfirm={confirmAction} busy={busy} />
         ))}
 
+        {/* Progress, as it happens. Each step is the assistant showing its
+            work — and on a slow model it is the difference between a panel
+            that is thinking and one that has hung. */}
         {busy ? (
-          <p className="flex items-center gap-2 text-[11.5px] text-[var(--text-muted)]">
-            <LoaderCircle size={13} className="animate-spin" aria-hidden />
-            Working…
-          </p>
+          <div className="space-y-1.5" aria-live="polite">
+            {steps.map((step, index) => (
+              <p
+                key={`${step.tool}-${index}`}
+                className="flex items-start gap-2 text-[11px] leading-relaxed text-[var(--text-secondary)]"
+              >
+                <Database size={11} className="mt-0.5 shrink-0 text-[var(--text-muted)]" aria-hidden />
+                {step.summary}
+              </p>
+            ))}
+            <p className="flex items-center gap-2 text-[11.5px] text-[var(--text-muted)]">
+              <LoaderCircle size={13} className="animate-spin" aria-hidden />
+              {steps.length === 0 ? 'Thinking…' : 'Working…'}
+            </p>
+          </div>
         ) : null}
 
         {error ? (
@@ -337,8 +425,16 @@ export function AgentConversation({
           style={{ borderColor: 'var(--border-strong)', background: 'var(--surface-1)' }}
         >
           <textarea
+            ref={inputRef}
             value={input}
-            onChange={(event) => setInput(event.target.value)}
+            onChange={(event) => {
+              setInput(event.target.value);
+              // Grow with the content, to a limit. A fixed single row makes a
+              // two-line question feel like typing through a letterbox.
+              const el = event.target;
+              el.style.height = 'auto';
+              el.style.height = `${Math.min(el.scrollHeight, 128)}px`;
+            }}
             onKeyDown={(event) => {
               if (event.key === 'Enter' && !event.shiftKey) {
                 event.preventDefault();
@@ -349,15 +445,27 @@ export function AgentConversation({
             placeholder="Ask about the numbers, or ask it to pull data…"
             className="max-h-32 min-h-[20px] flex-1 resize-none bg-transparent text-[12.5px] outline-none placeholder:text-[var(--text-muted)]"
           />
-          <button
-            type="submit"
-            disabled={busy || !input.trim()}
-            className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full transition-opacity disabled:opacity-30"
-            style={{ background: 'var(--text-primary)', color: 'var(--text-inverse)' }}
-          >
-            <ArrowUp size={13} aria-hidden />
-            <span className="sr-only">Send</span>
-          </button>
+          {busy ? (
+            <button
+              type="button"
+              onClick={stop}
+              className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full transition-opacity"
+              style={{ background: 'var(--text-primary)', color: 'var(--text-inverse)' }}
+            >
+              <Square size={9} fill="currentColor" aria-hidden />
+              <span className="sr-only">Stop</span>
+            </button>
+          ) : (
+            <button
+              type="submit"
+              disabled={!input.trim()}
+              className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full transition-opacity disabled:opacity-30"
+              style={{ background: 'var(--text-primary)', color: 'var(--text-inverse)' }}
+            >
+              <ArrowUp size={13} aria-hidden />
+              <span className="sr-only">Send</span>
+            </button>
+          )}
         </div>
       </form>
     </>

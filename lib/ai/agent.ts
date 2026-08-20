@@ -36,6 +36,18 @@ export interface AgentTurnInput {
   pageContext: PageContext;
   messages: Array<{ role: 'user' | 'assistant'; content: string }>;
   conversationId: string | null;
+  /**
+   * Called as each step completes, so the panel can show progress.
+   *
+   * A question needing four figures is four tool calls plus the model's turns
+   * between them, and on a free model that is a long time to show one
+   * unchanging "Working…". The steps are interesting in themselves — "read
+   * Revenue · CLAIMS · March 2026" is the assistant showing its work — so
+   * they are worth surfacing as they happen rather than collected at the end.
+   */
+  onActivity?: (activity: { tool: string; summary: string }) => void;
+  /** Aborts the loop between steps when the caller has gone away. */
+  signal?: AbortSignal;
 }
 
 export interface AgentCitation {
@@ -97,6 +109,19 @@ export async function runAgentTurn(input: AgentTurnInput): Promise<AgentTurnResu
   let pendingAction: AgentTurnResult['pendingAction'];
 
   for (let iteration = 0; iteration < MAX_ITERATIONS; iteration++) {
+    // Checked between steps rather than mid-request: a tool that has started
+    // should finish and be logged, because a half-recorded load run is worse
+    // than a wasted one.
+    if (input.signal?.aborted) {
+      return {
+        content: 'Stopped.',
+        citations,
+        activity,
+        view,
+        pendingAction,
+      };
+    }
+
     const response = await provider.complete({ system, messages, tools });
 
     if (response.refused) {
@@ -145,7 +170,11 @@ export async function runAgentTurn(input: AgentTurnInput): Promise<AgentTurnResu
       try {
         const outcome = await tool.run(call.input, context);
 
-        if (outcome.activity) activity.push({ tool: tool.name, summary: outcome.activity });
+        if (outcome.activity) {
+          const step = { tool: tool.name, summary: outcome.activity };
+          activity.push(step);
+          input.onActivity?.(step);
+        }
         if (outcome.view) view = outcome.view;
         if (outcome.pendingAction) pendingAction = outcome.pendingAction;
         if (outcome.citations) citations.push(...outcome.citations);

@@ -114,7 +114,7 @@ TypeScript, against `resolveKpi`, not by re-reading an instruction string each
 night. An exception that lands on the CEO's dashboard has to fire for the same
 reason every time.
 
-Without `ANTHROPIC_API_KEY`, every dashboard, export and control still works.
+Without `OPENROUTER_API_KEY`, every dashboard, export and control still works.
 Only the conversational layer is unavailable, and it says so.
 
 ## Layout

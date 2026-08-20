@@ -8,18 +8,17 @@
  *   • **Mispaired results.** If a tool result is matched to the wrong call, the
  *     model receives March's revenue labelled as February's and answers
  *     confidently. Nothing errors.
- *   • **Unbatched results.** Anthropic wants every tool result for one turn in
- *     a single user message. Splitting them trains the model out of parallel
- *     calls, roughly doubling the round trips on any question needing two
- *     figures — which is most of them.
+ *   • **Dropped tool calls.** The assistant's whole surface is tool calling, so
+ *     an assistant turn that loses its `tool_calls` on the way back into the
+ *     conversation leaves the model unable to see what it just asked for.
  */
 import { describe, expect, it, beforeEach, afterEach, vi } from 'vitest';
 import {
-  toAnthropicMessages,
   toOpenAiMessages,
   verifyOpenRouterModel,
   describeProvider,
   isAgentConfigured,
+  DEFAULT_OPENROUTER_MODEL,
   type AgentMessage,
 } from '@/lib/ai/provider';
 
@@ -37,55 +36,12 @@ const conversation: AgentMessage[] = [
   { role: 'tool', toolCallId: 'call_b', name: 'get_kpi', content: '{"value":"$465,391"}' },
 ];
 
-describe('the Anthropic conversion', () => {
-  it('batches both tool results into one user message', () => {
-    const converted = toAnthropicMessages(conversation);
-
-    // user, assistant, then ONE user message holding both results.
-    expect(converted).toHaveLength(3);
-    expect(converted[2]!.role).toBe('user');
-    expect(converted[2]!.content).toHaveLength(2);
-  });
-
-  it('keeps each result attached to the call that produced it', () => {
-    const converted = toAnthropicMessages(conversation);
-    const results = converted[2]!.content as Array<Record<string, unknown>>;
-
-    const a = results.find((result) => result.tool_use_id === 'call_a')!;
-    const b = results.find((result) => result.tool_use_id === 'call_b')!;
-
-    // March is 544,844 and February is 465,391. Swapping them is the failure
-    // that produces a confident, wrong answer with no error anywhere.
-    expect(String(a.content)).toContain('544,844');
-    expect(String(b.content)).toContain('465,391');
-  });
-
-  it('emits tool_use blocks the assistant turn can be replayed from', () => {
-    const converted = toAnthropicMessages(conversation);
-    const blocks = converted[1]!.content as Array<Record<string, unknown>>;
-
-    const uses = blocks.filter((block) => block.type === 'tool_use');
-    expect(uses).toHaveLength(2);
-    expect(uses[0]!.id).toBe('call_a');
-    expect(uses[0]!.input).toEqual({ metric: 'revenue', month: '2026-03' });
-  });
-
-  it('marks an errored result so the model does not read it as data', () => {
-    const converted = toAnthropicMessages([
-      { role: 'tool', toolCallId: 'x', name: 'get_kpi', content: 'failed', isError: true },
-    ]);
-    const results = converted[0]!.content as Array<Record<string, unknown>>;
-    expect(results[0]!.is_error).toBe(true);
-  });
-});
-
 describe('the OpenAI-compatible conversion', () => {
   it('puts the system prompt first and each result in its own message', () => {
     const converted = toOpenAiMessages('You are the analyst.', conversation);
 
     expect(converted[0]).toEqual({ role: 'system', content: 'You are the analyst.' });
-    // OpenAI's shape is one message per result — the opposite of Anthropic's,
-    // which is exactly why this conversion is not shared.
+    // One message per result, each carrying the id of the call it answers.
     expect(converted).toHaveLength(5);
     expect(converted[3]!.role).toBe('tool');
     expect(converted[4]!.role).toBe('tool');
@@ -204,34 +160,48 @@ describe('provider selection', () => {
   beforeEach(() => {
     delete process.env.OPENROUTER_API_KEY;
     delete process.env.OPENROUTER_MODEL;
-    delete process.env.ANTHROPIC_API_KEY;
   });
 
   afterEach(() => {
     process.env = { ...saved };
   });
 
-  it('reports unconfigured without either key, and says the dashboards still work', () => {
+  it('reports unconfigured without a key, and says the dashboards still work', () => {
     expect(isAgentConfigured()).toBe(false);
     expect(describeProvider().configured).toBe(false);
     expect(describeProvider().detail).toMatch(/dashboard/i);
   });
 
-  it('prefers OpenRouter when both are set', () => {
-    process.env.ANTHROPIC_API_KEY = 'sk-ant-test';
+  it('uses the named model when one is set', () => {
     process.env.OPENROUTER_API_KEY = 'sk-or-test';
     process.env.OPENROUTER_MODEL = 'vendor/model:free';
-
-    // Setting an OpenRouter key on a deployment that already had an Anthropic
-    // one is a switch. Quietly continuing to bill Anthropic misreads it.
     expect(describeProvider().provider).toBe('OpenRouter');
     expect(describeProvider().model).toBe('vendor/model:free');
   });
 
-  it('refuses to start OpenRouter without a named model', () => {
+  it('falls back to the model ARG chose', () => {
     process.env.OPENROUTER_API_KEY = 'sk-or-test';
-    // No default model on purpose: which free models exist and which support
-    // tools changes month to month, and a stale default fails silently.
-    expect(() => describeProvider()).toThrow(/OPENROUTER_MODEL/);
+    // A hardcoded default carries real risk — the free tier changes, and a
+    // withdrawn model fails silently rather than loudly. It stands because it
+    // is the model ARG asked for, and Admin → Assistant re-checks it against
+    // the live catalogue.
+    expect(describeProvider().model).toBe(DEFAULT_OPENROUTER_MODEL);
+  });
+});
+
+describe('commentary loads outside a request', () => {
+  it('imports from plain Node without tripping the server-only guard', async () => {
+    // The seed and the overnight refresh both draft commentary outside a
+    // request. `lib/ai/provider` carries a `server-only` marker that throws the
+    // moment it is imported there, so commentary must check for a key before
+    // importing it — not after.
+    //
+    // Wiring this up with a static import broke `pnpm db:seed` outright, which
+    // is a good outcome (loud, immediate) but only because the seed happened to
+    // exercise it. This asserts it directly.
+    delete process.env.OPENROUTER_API_KEY;
+
+    const module = await import('@/lib/ai/commentary');
+    expect(typeof module.generateCommentary).toBe('function');
   });
 });

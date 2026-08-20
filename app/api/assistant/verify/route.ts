@@ -54,17 +54,6 @@ export async function POST(request: Request) {
     });
   }
 
-  // Anthropic publishes no equivalent catalogue endpoint, and its models all
-  // support tool calling, so there is nothing to check.
-  if (described.provider === 'Anthropic') {
-    return NextResponse.json({
-      ok: true,
-      provider: described.provider,
-      model,
-      detail: 'Anthropic is configured. Its models support tool calling.',
-    });
-  }
-
   const check = await verifyOpenRouterModel(model);
 
   return NextResponse.json({
