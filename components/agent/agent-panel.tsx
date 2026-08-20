@@ -53,7 +53,17 @@ export function AgentPanel() {
 
   return (
     <aside
-      className="fixed inset-y-0 right-0 z-30 flex w-full max-w-[420px] flex-col border-l shadow-2xl xl:static xl:z-auto xl:shadow-none"
+      /*
+       * Fixed on narrow viewports, sticky and viewport-height from xl up.
+       *
+       * `xl:static` alone was a real bug: in flow, the panel had no bounded
+       * height, so its conversation area — which relies on `overflow-y-auto` —
+       * never scrolled internally. The page scrolled instead, taking the
+       * header and the whole transcript off screen and leaving just the
+       * composer floating at the bottom. Pinning it to the viewport is what
+       * makes the internal scroll work at all.
+       */
+      className="fixed inset-y-0 right-0 z-30 flex w-full max-w-[420px] flex-col border-l shadow-2xl xl:sticky xl:top-0 xl:z-auto xl:h-dvh xl:shadow-none"
       style={{ background: 'var(--surface-1)', borderColor: 'var(--border)' }}
       aria-label="Data assistant"
     >

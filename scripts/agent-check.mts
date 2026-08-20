@@ -81,20 +81,26 @@ await page
   .waitFor({ state: 'visible', timeout: 20000 });
 const streamed = true;
 
+// The header must still be on screen after the transcript has grown.
+// `xl:static` left the panel unbounded, so the page scrolled instead of the
+// conversation and everything but the composer went off screen.
+const headerVisible = await page.getByRole('heading', { name: 'Assistant' }).isVisible();
+
 await page.screenshot({ path: 'screenshots/assistant.png' });
 await browser.close();
 
 const staging = staged.includes('Claims');
-console.log({ ...checks, staging, echoed, streamed, errors: errors.length });
+console.log({ ...checks, staging, echoed, streamed, headerVisible, errors: errors.length });
 
 if (
   Object.values(checks).some((value) => !value) ||
   !staging ||
   !echoed ||
   !streamed ||
+  !headerVisible ||
   errors.length > 0
 ) {
-  console.error('FAILED', { checks, staged, echoed, streamed, errors });
+  console.error('FAILED', { checks, staged, echoed, streamed, headerVisible, errors });
   process.exit(1);
 }
 console.log('\nthe assistant panel presents as an agent — screenshots/assistant.png');
