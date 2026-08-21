@@ -25,7 +25,7 @@ import { executeViewSpec, ViewSpecSchema, ViewSpecError } from './viewspec';
 
 const KPI_IDS = KPI_REGISTRY.map((definition) => definition.id) as [string, ...string[]];
 
-export const PINNABLE_PAGES = ['executive', 'finance', 'sales', 'marketing'] as const;
+export const PINNABLE_PAGES = ['executive', 'finance', 'sales', 'marketing', 'pipeline'] as const;
 export type PinnablePage = (typeof PINNABLE_PAGES)[number];
 
 export const TileSpecSchema = z

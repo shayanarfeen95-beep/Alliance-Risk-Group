@@ -65,6 +65,17 @@ const PAGES: PageGuide[] = [
     ],
   },
   {
+    page: 'Pipeline',
+    href: '/pipeline',
+    answers:
+      'Where every open HubSpot deal is, what it is worth weighted by stage probability, which deals have sat too long, who owns them, and what entered each stage in the window.',
+    keyControls: [
+      'A board by stage — the HubSpot leadership view, inside this app',
+      'Weighted value beside face value; a stage with no agreed probability says "unweighted" rather than guessing',
+      'Days in stage from stage history, so a stalled deal is visible rather than implied',
+    ],
+  },
+  {
     page: 'Marketing',
     href: '/marketing',
     answers:
