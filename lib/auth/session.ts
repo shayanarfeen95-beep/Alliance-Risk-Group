@@ -9,10 +9,10 @@
  */
 import 'server-only';
 import { cookies } from 'next/headers';
-import { eq, sql } from 'drizzle-orm';
+import { and, eq, gt, isNull, or, sql } from 'drizzle-orm';
 import { SignJWT, jwtVerify } from 'jose';
 import { getDb, isDemoMode } from '@/lib/db/client';
-import { sessions, users, userDivisionAccess } from '@/lib/db/schema';
+import { accessGrant, sessions, users, userDivisionAccess } from '@/lib/db/schema';
 
 const COOKIE_NAME = 'arg_session';
 const SESSION_DAYS = 7;
@@ -28,6 +28,18 @@ export interface SessionUser {
   canViewConsolidated: boolean;
   /** Division codes this user is entitled to. Empty when consolidated. */
   divisionCodes: string[];
+  /**
+   * Owns the deployment — connections, mappings, and lending access.
+   * Westport holds this; ARG's administrators manage ARG's people.
+   */
+  isSuperAdmin: boolean;
+  /**
+   * Capabilities lent to this person and still live.
+   *
+   * Filtered by expiry and revocation as the session loads, so nothing
+   * downstream has to remember to check the clock.
+   */
+  grantedCapabilities: string[];
 }
 
 /**
@@ -91,6 +103,7 @@ interface SessionClaims {
   role: Role;
   consolidated: boolean;
   divisions: string[];
+  superAdmin?: boolean;
 }
 
 export async function createSession(userId: string): Promise<void> {
@@ -116,6 +129,7 @@ export async function createSession(userId: string): Promise<void> {
     role: user.role as Role,
     consolidated: user.canViewConsolidated,
     divisions: access.map((a) => a.divisionCode),
+    superAdmin: user.isSuperAdmin,
   };
 
   const token = await new SignJWT({ ...claims })
@@ -198,6 +212,10 @@ export async function getSessionUser(): Promise<SessionUser | null> {
     role: claims.role,
     canViewConsolidated: claims.consolidated,
     divisionCodes: claims.divisions ?? [],
+    // The token carries the role, not lent capabilities: a grant is a database
+    // fact and must not survive in a cookie after it is revoked.
+    isSuperAdmin: claims.superAdmin ?? false,
+    grantedCapabilities: [],
   };
 }
 
@@ -210,6 +228,20 @@ async function withAccess(
     .from(userDivisionAccess)
     .where(eq(userDivisionAccess.userId, user.id));
 
+  // Live grants only: never revoked, and either open-ended or not yet expired.
+  // An expired grant is invisible rather than filtered later, so a capability
+  // check cannot accidentally honour one.
+  const grants = await db
+    .select({ capability: accessGrant.capability })
+    .from(accessGrant)
+    .where(
+      and(
+        eq(accessGrant.userId, user.id),
+        isNull(accessGrant.revokedAt),
+        or(isNull(accessGrant.expiresAt), gt(accessGrant.expiresAt, new Date())),
+      ),
+    );
+
   return {
     id: user.id,
     email: user.email,
@@ -217,6 +249,8 @@ async function withAccess(
     role: user.role as Role,
     canViewConsolidated: user.canViewConsolidated,
     divisionCodes: access.map((a) => a.divisionCode),
+    isSuperAdmin: user.isSuperAdmin,
+    grantedCapabilities: [...new Set(grants.map((grant) => grant.capability))],
   };
 }
 

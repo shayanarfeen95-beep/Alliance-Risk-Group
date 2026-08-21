@@ -233,6 +233,9 @@ export async function seedDatabase(db: Database, options: SeedOptions = {}): Pro
         role: u.role,
         canViewConsolidated: u.canViewConsolidated,
         passwordHash,
+        // Westport owns the deployment: the connections, the mappings, and the
+        // ability to lend access. ARG's own administrators manage ARG's people.
+        isSuperAdmin: u.email === 'cfo@westportfinancial.com',
       })),
     )
     .returning();
@@ -482,6 +485,8 @@ export async function seedDatabase(db: Database, options: SeedOptions = {}): Pro
         role: user.role as 'ADMIN',
         canViewConsolidated: user.canViewConsolidated,
         divisionCodes: seedUser?.divisions ?? [],
+        isSuperAdmin: user.isSuperAdmin,
+        grantedCapabilities: [],
       },
       LAST_CLOSED_MONTH,
     );
@@ -497,6 +502,8 @@ export async function seedDatabase(db: Database, options: SeedOptions = {}): Pro
         role: user.role as 'CFO',
         canViewConsolidated: user.canViewConsolidated,
         divisionCodes: [],
+        isSuperAdmin: user.isSuperAdmin,
+        grantedCapabilities: [],
       }, LAST_CLOSED_MONTH);
 
       const commentary = await generateCommentary(session, findings);

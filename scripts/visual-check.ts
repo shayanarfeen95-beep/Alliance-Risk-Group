@@ -23,6 +23,7 @@ const ALL_PAGES: Array<{ name: string; path: string }> = [
   { name: 'finance', path: '/finance?month=2026-03&division=ARG_TOTAL' },
   { name: 'finance-division', path: '/finance?month=2026-03&division=CLAIMS' },
   { name: 'sales', path: '/sales?month=2026-03&division=ARG_TOTAL' },
+  { name: 'pipeline', path: '/pipeline?month=2026-03&division=ARG_TOTAL' },
   { name: 'marketing', path: '/marketing?month=2026-03&division=ARG_TOTAL' },
   { name: 'forecast', path: '/forecast?month=2026-04&division=ARG_TOTAL' },
   { name: 'forecast-accuracy', path: '/forecast/accuracy?month=2026-03&division=ARG_TOTAL' },
