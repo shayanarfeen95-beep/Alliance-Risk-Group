@@ -2,7 +2,16 @@
 
 import { useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { CircleCheck, Key, Link2, Loader2, Plug, TriangleAlert, Unplug } from 'lucide-react';
+import {
+  CircleCheck,
+  DownloadCloud,
+  Key,
+  Link2,
+  Loader2,
+  Plug,
+  TriangleAlert,
+  Unplug,
+} from 'lucide-react';
 
 /**
  * One source connection.
@@ -40,6 +49,7 @@ export function ConnectorCard(props: ConnectorCardProps) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [warning, setWarning] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
   const [showManual, setShowManual] = useState(false);
   const [fields, setFields] = useState<Record<string, string>>({});
 
@@ -69,6 +79,37 @@ export function ConnectorCard(props: ConnectorCardProps) {
       router.refresh();
     } catch {
       setError('The request did not complete.');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  /**
+   * Pulls one entity now.
+   *
+   * Ingestion used to run only through the assistant, so a deployment without
+   * an ANTHROPIC_API_KEY could connect a source and never read from it. The
+   * click is the confirmation; the server runs the same landing, conform and
+   * reconciliation the assistant's confirm path does.
+   */
+  async function syncNow(entity: string) {
+    setBusy(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const response = await fetch(`/api/connect/${sourceSystem.toLowerCase()}/sync`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ entity }),
+      });
+      const payload = await response.json();
+      if (!payload.ok) setError(payload.error ?? 'The pull did not complete.');
+      else {
+        setNotice(payload.message);
+        router.refresh();
+      }
+    } catch {
+      setError('The pull did not complete. Nothing was written.');
     } finally {
       setBusy(false);
     }
@@ -108,11 +149,36 @@ export function ConnectorCard(props: ConnectorCardProps) {
 
       <ul className="mt-3 space-y-1">
         {props.entities.map((entity) => (
-          <li key={entity.entity} className="text-[11.5px] text-[var(--text-secondary)]">
-            {entity.label}{' '}
-            <span className="text-[10.5px] text-[var(--text-muted)]">
-              {entity.cadence.toLowerCase().replace('_', ' ')}
+          <li
+            key={entity.entity}
+            className="flex items-center justify-between gap-2 text-[11.5px] text-[var(--text-secondary)]"
+          >
+            <span className="min-w-0 truncate">
+              {entity.label}{' '}
+              <span className="text-[10.5px] text-[var(--text-muted)]">
+                {entity.cadence.toLowerCase().replace('_', ' ')}
+              </span>
             </span>
+
+            {/* Pulling is a button, not a conversation: the assistant is
+                optional and importing data is not. */}
+            {c.connected && props.canManage ? (
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() => syncNow(entity.entity)}
+                title={`Pull ${entity.label} for the last three months`}
+                className="flex shrink-0 items-center gap-1 rounded-[5px] border px-1.5 py-0.5 text-[10.5px] transition-colors hover:bg-[var(--surface-2)] disabled:opacity-40"
+                style={{ borderColor: 'var(--border)', color: 'var(--text-secondary)' }}
+              >
+                {busy ? (
+                  <Loader2 size={10} className="animate-spin" aria-hidden />
+                ) : (
+                  <DownloadCloud size={10} aria-hidden />
+                )}
+                Pull
+              </button>
+            ) : null}
           </li>
         ))}
       </ul>
@@ -144,6 +210,12 @@ export function ConnectorCard(props: ConnectorCardProps) {
 
       {error && (
         <p className="mt-3 text-[11px] leading-relaxed text-[var(--status-critical)]">{error}</p>
+      )}
+
+      {notice && (
+        <p className="mt-3 text-[11px] leading-relaxed" style={{ color: 'var(--status-good)' }}>
+          {notice}
+        </p>
       )}
 
       {/* Connected, with something that will matter later — a token that

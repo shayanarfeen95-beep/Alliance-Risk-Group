@@ -140,13 +140,13 @@ Only the conversational layer is unavailable, and it says so.
 lib/semantic/     the KPI registry, period conventions, resolver — the heart
 lib/db/           schema, migrations, the three DB-level guards
 lib/connectors/   QBO, HubSpot, Sheets. Read-only adapters, and the division mapping
-lib/etl/          conform (HubSpot raw -> facts), rollup, load provenance
+lib/etl/          conform (QBO, HubSpot, Sheets raw -> facts), rollup, provenance
 lib/recon/        the five standing controls
 lib/forecast/     projection, scenarios, locking, accuracy scoring
 lib/ai/           tools, view specs, pinned boxes, goals, commentary, the guide
 lib/export/       the audit pack
 lib/seed/         deterministic dataset reproducing the spec's tie-out figures
-app/(app)/        Executive, Finance, Sales, Marketing, Forecast, Admin
+app/(app)/        Executive, Finance, Sales, Pipeline, Marketing, Forecast, Admin
 components/       one chart component, one tile component, the shell
 docs/             RUNBOOK, OPEN_ITEMS, PHASE2_ASSESSMENT
 ```
@@ -154,7 +154,7 @@ docs/             RUNBOOK, OPEN_ITEMS, PHASE2_ASSESSMENT
 ## Verification
 
 ```bash
-pnpm test           # tie-out, agent, boxes, HubSpot, goals, export — 142 tests
+pnpm test           # tie-out, agent, boxes, connectors, access, goals, export — 157 tests
 pnpm verify:visual  # every page, both themes, checks overflow and console errors
 ```
 

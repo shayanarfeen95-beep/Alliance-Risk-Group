@@ -158,7 +158,22 @@ it up leaves.
 
 ---
 
-## 5. The assistant
+## 5. Pulling data
+
+Two ways to start a load, one way for a load to happen.
+
+- **Admin → Source connections → Pull**, per entity. The click is the
+  confirmation.
+- **Ask the assistant.** It proposes; a confirm control appears; you decide.
+
+Both go through the same path: land the raw payload, conform it into facts,
+record the provenance, then run the five standing reconciliation controls and
+report what they said. The assistant is optional — a deployment with no
+`ANTHROPIC_API_KEY` still imports data.
+
+---
+
+## 6. The assistant
 
 | Variable | Purpose |
 |---|---|
@@ -166,7 +181,7 @@ it up leaves.
 
 ---
 
-## 6. Application secrets
+## 7. Application secrets
 
 | Variable | Purpose | How to generate |
 |---|---|---|
@@ -192,6 +207,20 @@ QBO_CLIENT_SECRET
 HubSpot and Google Sheets need no environment variables at all when connected by
 token or service account — those credentials are stored encrypted in the
 database, where an administrator can change them without a redeploy.
+
+---
+
+## Who does what, in one line each
+
+| Capability | Westport (super admin) | ARG administrator | Delegable |
+|---|---|---|---|
+| Connections and mappings | yes | mappings only | mappings |
+| Lend access to somebody | yes | no | never |
+| Manage ARG's people | yes | yes | yes |
+| Pull data, close a period, lock a forecast | yes | yes | yes |
+
+A grant is temporary by design: it carries a reason and usually an end date, and
+it expires without anybody having to remember. Lending is not itself lendable.
 
 ---
 
