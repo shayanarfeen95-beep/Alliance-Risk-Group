@@ -111,6 +111,14 @@ export const users = pgTable(
     /** false = scoped to the rows in user_division_access. */
     canViewConsolidated: boolean('can_view_consolidated').notNull().default(false),
     isActive: boolean('is_active').notNull().default(true),
+    /**
+     * Owns the deployment: connections, mappings, and the ability to delegate.
+     *
+     * Westport is the super admin; ARG's administrators manage ARG's people.
+     * Without the distinction the only choice was to withhold administration
+     * from ARG or to let it disconnect QuickBooks.
+     */
+    isSuperAdmin: boolean('is_super_admin').notNull().default(false),
     lastLoginAt: timestamp('last_login_at', { withTimezone: true }),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },
@@ -128,6 +136,41 @@ export const userDivisionAccess = pgTable(
       .references(() => dimDivision.divisionCode),
   },
   (t) => [primaryKey({ columns: [t.userId, t.divisionCode] })],
+);
+
+/**
+ * Access lent for a while, rather than a role changed permanently.
+ *
+ * "Let Scott close the books while I'm away" is a grant with an end date. Doing
+ * it as a role change means somebody has to remember to undo it, and nobody
+ * does — which is how a temporary permission becomes a standing one.
+ *
+ * A grant records who gave it and why, because the first question after an
+ * unexpected write is always "who could do that, and since when?".
+ */
+export const accessGrant = pgTable(
+  'access_grant',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    userId: uuid('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    /** A capability name. Text, so a new capability needs no migration. */
+    capability: text('capability').notNull(),
+    /** Optional narrowing to one division. */
+    divisionCode: text('division_code').references(() => dimDivision.divisionCode),
+    grantedBy: uuid('granted_by')
+      .notNull()
+      .references(() => users.id),
+    /** Required: a grant with no stated reason cannot be reviewed later. */
+    reason: text('reason').notNull(),
+    /** NULL = until revoked. Allowed, and the screen says so plainly. */
+    expiresAt: timestamp('expires_at', { withTimezone: true }),
+    revokedAt: timestamp('revoked_at', { withTimezone: true }),
+    revokedBy: uuid('revoked_by').references(() => users.id),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index('access_grant_user_idx').on(t.userId, t.revokedAt)],
 );
 
 export const sessions = pgTable('sessions', {
@@ -775,6 +818,38 @@ export const generatedView = pgTable('generated_view', {
   pinnedTo: text('pinned_to'),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
 });
+
+/**
+ * A write the agent has proposed and a human has not yet confirmed.
+ *
+ * Ingestion already worked this way — `load_run` holds a PREVIEW row and
+ * nothing lands until somebody clicks confirm. Mapping changes join it, for a
+ * stronger reason: changing how a HubSpot deal is attributed silently restates
+ * every divisional sales figure in every prior month.
+ *
+ * The payload is stored server-side rather than round-tripped through the
+ * browser, so what gets applied is exactly what was shown.
+ */
+export const agentPendingAction = pgTable(
+  'agent_pending_action',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    userId: uuid('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    conversationId: uuid('conversation_id'),
+    /** 'HUBSPOT_MAPPING' today. Text, so a new kind needs no migration. */
+    kind: text('kind').notNull(),
+    label: text('label').notNull(),
+    detail: text('detail').notNull(),
+    payload: jsonb('payload').notNull(),
+    /** 'PENDING' | 'APPLIED' | 'CANCELLED' */
+    status: text('status').notNull().default('PENDING'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    appliedAt: timestamp('applied_at', { withTimezone: true }),
+  },
+  (t) => [index('agent_pending_action_user_idx').on(t.userId, t.status)],
+);
 
 /** Named standing goals the agent evaluates on refresh and on close. */
 export const agentGoal = pgTable('agent_goal', {

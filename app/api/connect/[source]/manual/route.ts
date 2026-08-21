@@ -4,7 +4,7 @@ import { can } from '@/lib/auth/scope';
 import { getDb } from '@/lib/db/client';
 import * as t from '@/lib/db/schema';
 import { saveCredential } from '@/lib/connectors/credentials';
-import { fetchHubspotAccount } from '@/lib/connectors/oauth';
+import { verifyHubspotToken } from '@/lib/connectors/verify';
 import { hasCredentialKey } from '@/lib/crypto/secrets';
 import type { SourceSystemCode } from '@/lib/connectors/types';
 
@@ -56,18 +56,20 @@ export async function POST(request: Request, context: { params: Promise<{ source
 
   const db = await getDb();
 
+  // A connection can succeed and still be worth a word — a token that will
+  // expire, a missing optional scope. Silence there is how a working demo
+  // becomes a dead overnight refresh.
+  let hubspotWarning: string | null = null;
+
   if (sourceSystem === 'HUBSPOT') {
     const token = (body.accessToken ?? '').trim();
     if (!token) return NextResponse.json({ ok: false, error: 'A private-app token is required.' });
 
-    const account = await fetchHubspotAccount(token);
-    if (!account) {
-      return NextResponse.json({
-        ok: false,
-        error:
-          'HubSpot rejected that token, or it lacks the account-info scope. Nothing was saved. ' +
-          'The private app needs the deals, contacts and companies read scopes.',
-      });
+    // Verified by reading a deal — the same call the connector makes. Anything
+    // stricter refuses tokens that would have worked.
+    const check = await verifyHubspotToken(token);
+    if (!check.ok) {
+      return NextResponse.json({ ok: false, error: check.error });
     }
 
     await saveCredential(
@@ -75,13 +77,15 @@ export async function POST(request: Request, context: { params: Promise<{ source
         sourceSystem,
         authMethod: 'TOKEN',
         data: { accessToken: token },
-        accountLabel: account.label,
-        accountId: account.portalId,
-        scopes: 'private app',
+        accountLabel: check.label ?? 'HubSpot portal',
+        accountId: check.accountId ?? null,
+        scopes: 'private app · verified by reading deals',
         connectedByUserId: user.id,
       },
       db,
     );
+
+    if (check.warning) hubspotWarning = check.warning;
   } else if (sourceSystem === 'SHEETS') {
     const spreadsheetId = (body.spreadsheetId ?? '').trim();
     const raw = (body.serviceAccountJson ?? '').trim();
@@ -144,7 +148,7 @@ export async function POST(request: Request, context: { params: Promise<{ source
     detail: { authMethod: sourceSystem === 'HUBSPOT' ? 'TOKEN' : 'SERVICE_ACCOUNT' },
   });
 
-  return NextResponse.json({ ok: true });
+  return NextResponse.json({ ok: true, ...(hubspotWarning ? { warning: hubspotWarning } : {}) });
 }
 
 /**

@@ -164,6 +164,7 @@ async function callApi(path: string, params: Record<string, string>): Promise<un
  * but it is the only shape that yields a division dimension.
  */
 async function fetchMonthlyReport(
+  entity: string,
   reportName: string,
   window: FetchWindow,
   extraParams: Record<string, string> = {},
@@ -179,7 +180,10 @@ async function fetchMonthlyReport(
       summarize_column_by: 'Classes',
       ...extraParams,
     });
-    records.push({ entity: reportName, key: month, payload });
+    // The warehouse's name for the entity, not Intuit's report name: conform
+    // reads the landing table by this value, and a mismatch makes every landed
+    // payload invisible to it.
+    records.push({ entity, key: month, payload });
   }
 
   return records;
@@ -200,19 +204,19 @@ export const qboConnector: SourceConnector = {
 
     switch (entity) {
       case 'profit_and_loss':
-        records = await fetchMonthlyReport('ProfitAndLoss', window);
+        records = await fetchMonthlyReport('profit_and_loss', 'ProfitAndLoss', window);
         break;
       case 'balance_sheet':
-        records = await fetchMonthlyReport('BalanceSheet', window);
+        records = await fetchMonthlyReport('balance_sheet', 'BalanceSheet', window);
         break;
       case 'trial_balance':
-        records = await fetchMonthlyReport('TrialBalance', window);
+        records = await fetchMonthlyReport('trial_balance', 'TrialBalance', window);
         break;
       case 'ar_aging':
-        records = await fetchMonthlyReport('AgedReceivables', window);
+        records = await fetchMonthlyReport('ar_aging', 'AgedReceivables', window);
         break;
       case 'ap_aging':
-        records = await fetchMonthlyReport('AgedPayables', window);
+        records = await fetchMonthlyReport('ap_aging', 'AgedPayables', window);
         break;
       case 'accounts':
         records = [

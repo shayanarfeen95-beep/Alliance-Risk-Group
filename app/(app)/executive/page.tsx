@@ -6,6 +6,8 @@ import { buildDivisionColorMap } from '@/lib/charts/colors';
 import { formatMonth } from '@/lib/semantic/periods';
 import { formatNumber, formatSignedNumber, sentimentColorVar, sentimentOf } from '@/lib/format';
 import { KpiTile } from '@/components/dashboard/kpi-tile';
+import { BoxFilter } from '@/components/dashboard/box-filter';
+import { PinnedBoxes } from '@/components/dashboard/pinned-boxes';
 import { ChartCard } from '@/components/charts/chart-card';
 import { Card, CardHeader, DataTable, EmptyState, SectionTitle, Td, Th } from '@/components/ui/primitives';
 import { CommentaryPanel } from '@/components/dashboard/commentary-panel';
@@ -22,7 +24,8 @@ export default async function ExecutivePage({
   const context = await loadDashboardContext(await searchParams);
   const { session, divisionCode } = context;
   const colors = buildDivisionColorMap(session.bundle.divisions);
-  const model = await loadExecutive(session, divisionCode, colors);
+  const model = await loadExecutive(session, divisionCode, colors, context.boxScope);
+  const boxOptions = context.boxFilterOptions;
 
   const divisionLabel =
     divisionCode === 'ARG_TOTAL'
@@ -47,7 +50,7 @@ export default async function ExecutivePage({
       <section>
         <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
           {model.tiles.map((tile) => (
-            <KpiTile key={tile.name} {...tile} />
+            <KpiTile key={tile.box?.boxId ?? tile.name} {...tile} boxOptions={boxOptions} />
           ))}
         </div>
       </section>
@@ -106,6 +109,13 @@ export default async function ExecutivePage({
           <CardHeader
             title="Revenue and net profit by division"
             subtitle="Contribution % is division revenue ÷ ARG Total revenue. Net profit contribution divides by the absolute value of the total, so the sign stays readable in a loss month."
+            action={
+              <BoxFilter
+                state={model.boxes.contributions}
+                options={boxOptions}
+                fields={['month']}
+              />
+            }
           />
           <DataTable>
             <thead>
@@ -167,6 +177,7 @@ export default async function ExecutivePage({
           <CardHeader
             title="YTD revenue against plan"
             subtitle="Attainment % and Variance $ are labelled distinctly on purpose — they are different measures, and the Excel's layout invited reading both as variances."
+            action={<BoxFilter state={model.boxes.baselines} options={boxOptions} />}
           />
           <DataTable>
             <thead>
@@ -232,7 +243,11 @@ export default async function ExecutivePage({
         valueFormat="currency"
         height={280}
         note="Each division keeps its colour across every chart in the app, so filtering never repaints the others."
+        filter={<BoxFilter state={model.boxes.trend} options={boxOptions} />}
       />
+
+      {/* Boxes the assistant built for this reader. */}
+      <PinnedBoxes page="executive" context={context} />
 
       {/* §9.1 — AI-generated monthly summary. */}
       <section>
@@ -240,8 +255,15 @@ export default async function ExecutivePage({
           Monthly summary
         </SectionTitle>
         <Card>
+          <CardHeader
+            title={`Close commentary — ${formatMonth(model.boxes.commentary.month)}`}
+            subtitle="Every figure in the draft is resolved before the model is called and verified against that list afterwards."
+            action={
+              <BoxFilter state={model.boxes.commentary} options={boxOptions} fields={['month']} />
+            }
+          />
           <CommentaryPanel
-            month={session.period.month}
+            month={model.boxes.commentary.month}
             initial={model.commentary}
             canDraft={can(session.user, 'SIGN_COMMENTARY')}
           />

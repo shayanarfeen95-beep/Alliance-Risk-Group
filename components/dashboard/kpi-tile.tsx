@@ -1,6 +1,8 @@
 import Link from 'next/link';
 import { ArrowDownRight, ArrowRight, ArrowUpRight, Info } from 'lucide-react';
 import { formatSignedNumber, sentimentColorVar, sentimentOf, type ValueFormat } from '@/lib/format';
+import { BoxFilter } from './box-filter';
+import type { BoxFilterOptions, BoxFilterState } from '@/lib/dashboards/box-filter';
 
 export interface KpiTileProps {
   name: string;
@@ -18,6 +20,10 @@ export interface KpiTileProps {
   href?: string;
   /** Shown on hover — usually the formula or the denominator. */
   hint?: string;
+  /** The box's own scope. Present on every dashboard tile. */
+  box?: BoxFilterState;
+  /** Choices for this tile's filter. Supplied by the page, not the loader. */
+  boxOptions?: BoxFilterOptions;
 }
 
 /**
@@ -38,62 +44,71 @@ export function KpiTile({
   sparkline,
   href,
   hint,
+  box,
+  boxOptions,
 }: KpiTileProps) {
-  const body = (
-    <>
-      <div className="flex items-start justify-between gap-2">
-        <p className="text-[11px] font-medium leading-tight text-[var(--text-secondary)]">{name}</p>
+  // The filter sits outside the drill-through link: a control nested inside a
+  // link is a control that navigates when you click it.
+  const header = (
+    <div className="flex items-start justify-between gap-2">
+      <p className="text-[11px] font-medium leading-tight text-[var(--text-secondary)]">{name}</p>
+      <div className="flex shrink-0 items-center gap-1">
         {hint ? (
-          <span title={hint} className="shrink-0 text-[var(--text-muted)]">
+          <span title={hint} className="text-[var(--text-muted)]">
             <Info size={12} aria-hidden />
           </span>
         ) : null}
+        {box && boxOptions ? (
+          <BoxFilter state={box} options={boxOptions} />
+        ) : null}
+      </div>
+    </div>
+  );
+
+  const figure = unavailable ? (
+    <>
+      <p className="mt-2 text-[22px] font-semibold leading-none tracking-tight text-[var(--text-muted)]">
+        —
+      </p>
+      <p className="mt-2 line-clamp-3 text-[10.5px] leading-relaxed text-[var(--text-muted)]">
+        {unavailable.detail}
+      </p>
+    </>
+  ) : (
+    <>
+      <p className="mt-2 text-[22px] font-semibold leading-none tracking-tight">{formatted}</p>
+
+      <div className="mt-2.5 flex flex-wrap items-center gap-x-3 gap-y-1">
+        <Delta label="PM" value={deltaPriorMonth} format={format} higherIsBetter={higherIsBetter} />
+        <Delta label="PY" value={deltaPriorYear} format={format} higherIsBetter={higherIsBetter} />
       </div>
 
-      {unavailable ? (
-        <>
-          <p className="mt-2 text-[22px] font-semibold leading-none tracking-tight text-[var(--text-muted)]">
-            —
-          </p>
-          <p className="mt-2 line-clamp-3 text-[10.5px] leading-relaxed text-[var(--text-muted)]">
-            {unavailable.detail}
-          </p>
-        </>
-      ) : (
-        <>
-          <p className="mt-2 text-[22px] font-semibold leading-none tracking-tight">{formatted}</p>
-
-          <div className="mt-2.5 flex flex-wrap items-center gap-x-3 gap-y-1">
-            <Delta label="PM" value={deltaPriorMonth} format={format} higherIsBetter={higherIsBetter} />
-            <Delta label="PY" value={deltaPriorYear} format={format} higherIsBetter={higherIsBetter} />
-          </div>
-
-          {sparkline && sparkline.filter((v) => v !== null).length > 1 ? (
-            <Sparkline values={sparkline} higherIsBetter={higherIsBetter} />
-          ) : null}
-        </>
-      )}
+      {sparkline && sparkline.filter((v) => v !== null).length > 1 ? (
+        <Sparkline values={sparkline} higherIsBetter={higherIsBetter} />
+      ) : null}
     </>
   );
 
-  const className =
-    'flex flex-col rounded-[var(--radius-lg)] border p-4 transition-colors';
+  const className = 'flex flex-col rounded-[var(--radius-lg)] border p-4 transition-colors';
   const style = {
     background: 'var(--surface-1)',
     borderColor: 'var(--border)',
     boxShadow: 'var(--shadow-card)',
   } as const;
 
-  if (href && !unavailable) {
-    return (
-      <Link href={href} className={`${className} hover:border-[var(--border-strong)]`} style={style}>
-        {body}
-      </Link>
-    );
-  }
   return (
-    <div className={className} style={style}>
-      {body}
+    <div
+      className={`${className} ${href && !unavailable ? 'hover:border-[var(--border-strong)]' : ''}`}
+      style={style}
+    >
+      {header}
+      {href && !unavailable ? (
+        <Link href={href} className="flex flex-1 flex-col">
+          {figure}
+        </Link>
+      ) : (
+        figure
+      )}
     </div>
   );
 }

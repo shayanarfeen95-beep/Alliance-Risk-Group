@@ -1,14 +1,23 @@
 import type { Metadata } from 'next';
-import { desc, eq, sql } from 'drizzle-orm';
+import { and, desc, eq, gt, isNull, or, sql } from 'drizzle-orm';
 import { CircleAlert, CircleCheck, CircleHelp, Download } from 'lucide-react';
 import { ConnectorCard } from '@/components/admin/connector-card';
+import { HubspotMapping } from '@/components/admin/hubspot-mapping';
+import { ConnectionReadiness } from '@/components/admin/connection-readiness';
+import { AccessDelegation } from '@/components/admin/access-delegation';
 import { UserManager } from '@/components/admin/user-manager';
-import { can } from '@/lib/auth/scope';
+import { can, DELEGABLE_CAPABILITIES } from '@/lib/auth/scope';
 import { getDb } from '@/lib/db/client';
 import * as t from '@/lib/db/schema';
 import { getSessionUser } from '@/lib/auth/session';
 import { redirect } from 'next/navigation';
 import { connectorStatuses } from '@/lib/connectors';
+import { sourceReadiness } from '@/lib/connectors/readiness';
+import {
+  ATTRIBUTION_RULES,
+  loadHubspotMapping,
+  observedAttributionValues,
+} from '@/lib/connectors/hubspot-mapping';
 import { Card, CardHeader, Chip, DataTable, SectionTitle, Td, Th } from '@/components/ui/primitives';
 
 export const metadata: Metadata = { title: 'Admin' };
@@ -69,7 +78,40 @@ export default async function AdminPage({
     lastLoginAt: row.lastLoginAt?.toISOString() ?? null,
   }));
 
+  // Access that is currently lent. Live only: revoked and expired grants belong
+  // in the audit trail, not on a screen that answers "what is loose right now".
+  const grantRows = await db
+    .select({
+      id: t.accessGrant.id,
+      capability: t.accessGrant.capability,
+      divisionCode: t.accessGrant.divisionCode,
+      reason: t.accessGrant.reason,
+      expiresAt: t.accessGrant.expiresAt,
+      createdAt: t.accessGrant.createdAt,
+      userId: t.accessGrant.userId,
+      grantedBy: t.accessGrant.grantedBy,
+    })
+    .from(t.accessGrant)
+    .where(
+      and(
+        isNull(t.accessGrant.revokedAt),
+        or(isNull(t.accessGrant.expiresAt), gt(t.accessGrant.expiresAt, new Date())),
+      ),
+    )
+    .orderBy(desc(t.accessGrant.createdAt));
+
+  const nameById = new Map(userRows.map((row) => [row.id, row.name]));
+
   const connectors = await connectorStatuses();
+
+  // Open item 2, made operable: the rule, the values HubSpot actually holds, and
+  // how many deals each of them covers.
+  const hubspotMapping = await loadHubspotMapping(db);
+  const hubspotObserved = await observedAttributionValues(
+    db,
+    hubspotMapping,
+    divisionRows.map((row) => row.divisionCode),
+  );
 
   // The pack is anchored on the configured reporting month rather than today's
   // date: exporting an unclosed month by accident is the sort of thing that
@@ -143,6 +185,12 @@ export default async function AdminPage({
           </div>
         )}
 
+        {/* What the environment is still missing, said before anyone makes a
+            token they cannot store. */}
+        <div className="mb-4">
+          <ConnectionReadiness readiness={sourceReadiness()} />
+        </div>
+
         <div className="grid gap-3 lg:grid-cols-3">
           {connectors.map((connector) => (
             <ConnectorCard
@@ -157,6 +205,76 @@ export default async function AdminPage({
             />
           ))}
         </div>
+      </section>
+
+      {/* --- Delegated access ---------------------------------------------- */}
+      <section>
+        <SectionTitle hint="Capabilities lent temporarily, rather than roles changed permanently">
+          Delegated access
+        </SectionTitle>
+        <Card padded>
+          <p className="mb-3 max-w-3xl text-[12px] leading-relaxed text-[var(--text-muted)]">
+            &ldquo;Let Scott close the books while I&rsquo;m away&rdquo; is a grant with an end
+            date, not a role change somebody has to remember to undo — a role change survives the
+            reason for it. Every grant records who gave it and why, because the first question
+            after an unexpected write is always who could do that, and since when.
+          </p>
+          <AccessDelegation
+            grants={grantRows.map((row) => ({
+              id: row.id,
+              userName: nameById.get(row.userId) ?? 'Unknown',
+              capability: row.capability,
+              divisionCode: row.divisionCode,
+              reason: row.reason,
+              grantedByName: nameById.get(row.grantedBy) ?? 'Unknown',
+              expiresAt: row.expiresAt?.toISOString() ?? null,
+              createdAt: row.createdAt.toISOString(),
+            }))}
+            people={userRows.map((row) => ({
+              id: row.id,
+              name: row.name,
+              email: row.email,
+              isSuperAdmin: row.isSuperAdmin,
+            }))}
+            capabilities={[...DELEGABLE_CAPABILITIES]}
+            divisions={divisionRows.map((row) => ({
+              divisionCode: row.divisionCode,
+              divisionName: row.divisionName,
+            }))}
+            canDelegate={can(user, 'DELEGATE_ACCESS')}
+          />
+        </Card>
+      </section>
+
+      {/* --- HubSpot division mapping -------------------------------------- */}
+      <section>
+        <SectionTitle hint="Open item 2 — the rule that decides which division a HubSpot deal belongs to">
+          HubSpot division mapping
+        </SectionTitle>
+        <Card padded>
+          <p className="mb-4 max-w-3xl text-[12px] leading-relaxed text-[var(--text-muted)]">
+            A deal attributed to the wrong division moves revenue between two divisional P&amp;Ls and
+            is invisible at ARG Total, which is how that kind of error survives a year. So the rule
+            lives here as data rather than in code, the values come from what HubSpot actually sent,
+            and anything unmapped stays unattributed rather than being guessed into a division.
+            Saving re-applies the mapping to every deal already landed — no re-fetch.
+          </p>
+          <HubspotMapping
+            rule={hubspotMapping.rule}
+            isConfirmed={hubspotMapping.isConfirmed}
+            property={hubspotMapping.property}
+            values={hubspotMapping.values}
+            observed={hubspotObserved.values}
+            sampledDeals={hubspotObserved.sampledDeals}
+            lastLandedAt={hubspotObserved.lastLandedAt}
+            divisions={divisionRows.map((row) => ({
+              divisionCode: row.divisionCode,
+              divisionName: row.divisionName,
+            }))}
+            rules={ATTRIBUTION_RULES.map((rule) => ({ ...rule }))}
+            canManage={can(user, 'EDIT_MAPPINGS')}
+          />
+        </Card>
       </section>
 
       {/* --- Open items --------------------------------------------------- */}

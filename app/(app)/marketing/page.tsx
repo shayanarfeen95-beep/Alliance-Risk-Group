@@ -4,6 +4,8 @@ import { loadMarketing } from '@/lib/dashboards/marketing';
 import { formatMonth } from '@/lib/semantic/periods';
 import { formatNumber } from '@/lib/format';
 import { KpiTile } from '@/components/dashboard/kpi-tile';
+import { BoxFilter } from '@/components/dashboard/box-filter';
+import { PinnedBoxes } from '@/components/dashboard/pinned-boxes';
 import { ChartCard } from '@/components/charts/chart-card';
 import { Card, CardHeader, DataTable, Td, Th, Unavailable } from '@/components/ui/primitives';
 
@@ -17,7 +19,8 @@ export default async function MarketingPage({
 }) {
   const context = await loadDashboardContext(await searchParams);
   const { session, divisionCode } = context;
-  const model = loadMarketing(session, divisionCode);
+  const model = loadMarketing(session, divisionCode, context.boxScope);
+  const boxOptions = context.boxFilterOptions;
 
   const divisionLabel =
     divisionCode === 'ARG_TOTAL'
@@ -44,7 +47,7 @@ export default async function MarketingPage({
 
       <div className="grid grid-cols-2 gap-3 lg:grid-cols-5">
         {model.tiles.map((tile) => (
-          <KpiTile key={tile.name} {...tile} />
+          <KpiTile key={tile.box?.boxId ?? tile.name} {...tile} boxOptions={boxOptions} />
         ))}
       </div>
 
@@ -64,6 +67,7 @@ export default async function MarketingPage({
           form="bar"
           valueFormat="currency"
           height={250}
+          filter={<BoxFilter state={model.boxes.spendTrend} options={boxOptions} />}
         />
         <ChartCard
           title="Leads received"
@@ -73,14 +77,19 @@ export default async function MarketingPage({
           form="line"
           valueFormat="count"
           height={250}
+          filter={<BoxFilter state={model.boxes.leadsTrend} options={boxOptions} />}
         />
       </div>
+
+      {/* Boxes the assistant built for this reader. */}
+      <PinnedBoxes page="marketing" context={context} />
 
       <div className="grid gap-4 xl:grid-cols-[2fr_1fr]">
         <Card>
           <CardHeader
             title="Leads by original source"
             subtitle="Cost per lead is apportioned by lead share — HubSpot carries no per-source spend, so this is an allocation, not a measured figure."
+            action={<BoxFilter state={model.boxes.sources} options={boxOptions} />}
           />
           {model.sources.length === 0 ? (
             <p className="text-[12px] text-[var(--text-muted)]">
@@ -115,7 +124,11 @@ export default async function MarketingPage({
         </Card>
 
         <Card>
-          <CardHeader title="Conversion" subtitle="Lead to customer, this period" />
+          <CardHeader
+            title="Conversion"
+            subtitle="Lead to customer, this period"
+            action={<BoxFilter state={model.boxes.conversion} options={boxOptions} />}
+          />
           <ul className="space-y-2">
             <li
               className="flex items-baseline justify-between gap-3 border-b pb-2"

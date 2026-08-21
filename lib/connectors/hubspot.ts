@@ -19,6 +19,8 @@ import {
   type SourceConnector,
 } from './types';
 import { isConnected, loadCredential } from './credentials';
+import { loadHubspotMapping } from './hubspot-mapping';
+import { getDb } from '@/lib/db/client';
 
 const API = 'https://api.hubapi.com';
 
@@ -78,8 +80,16 @@ async function token(): Promise<string> {
   return value;
 }
 
-/** Walks HubSpot's cursor pagination to completion. */
+/**
+ * Walks HubSpot's cursor pagination to completion.
+ *
+ * `entity` is the warehouse's name for the object — `deals`, not
+ * `/crm/v3/objects/deals`. The landing table is queried by that name when a
+ * mapping is re-applied, so storing the URL path there would make every landed
+ * payload invisible to the conform step.
+ */
 async function fetchAll(
+  entity: string,
   path: string,
   properties: string[],
   extraParams: Record<string, string> = {},
@@ -107,7 +117,7 @@ async function fetchAll(
     };
 
     for (const result of json.results) {
-      records.push({ entity: path, key: result.id, payload: result });
+      records.push({ entity, key: result.id, payload: result });
     }
     after = json.paging?.next?.after;
   } while (after);
@@ -130,25 +140,27 @@ export const hubspotConnector: SourceConnector = {
 
     switch (entity) {
       case 'deals': {
-        // §14.3 open item 2: the division property is confirmed with Westport in
-        // week 1. If it is unset we still fetch the deals — we simply cannot
-        // attribute them to a division, and the KPI layer reports at ARG Total
-        // only rather than inventing an attribution rule.
-        const divisionProperty = process.env.HUBSPOT_DIVISION_PROPERTY;
-        const properties = divisionProperty
-          ? [...DEAL_PROPERTIES, divisionProperty]
-          : DEAL_PROPERTIES;
+        // §14.3 open item 2: the division property is a Westport decision,
+        // configured in Admin → HubSpot division mapping rather than in an
+        // environment variable somebody has to redeploy to change. If it is
+        // unset we still fetch the deals — they simply arrive unattributed, and
+        // the KPI layer reports at ARG Total only rather than inventing a rule.
+        const mapping = await loadHubspotMapping(await getDb());
+        const properties =
+          mapping.rule === 'deal_property' && mapping.property
+            ? [...DEAL_PROPERTIES, mapping.property]
+            : DEAL_PROPERTIES;
 
-        records = await fetchAll('/crm/v3/objects/deals', properties, {
+        records = await fetchAll('deals', '/crm/v3/objects/deals', properties, {
           propertiesWithHistory: 'dealstage',
         });
         break;
       }
       case 'contacts':
-        records = await fetchAll('/crm/v3/objects/contacts', CONTACT_PROPERTIES);
+        records = await fetchAll('contacts', '/crm/v3/objects/contacts', CONTACT_PROPERTIES);
         break;
       case 'meetings':
-        records = await fetchAll('/crm/v3/objects/meetings', MEETING_PROPERTIES, {
+        records = await fetchAll('meetings', '/crm/v3/objects/meetings', MEETING_PROPERTIES, {
           associations: 'deals,contacts',
         });
         break;

@@ -36,6 +36,20 @@
       "when": 1786531100000,
       "tag": "0004_deal_owner_name",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1786531110000,
+      "tag": "0005_agent_actions",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1786531120000,
+      "tag": "0006_delegation",
+      "breakpoints": true
     }
   ]
 }

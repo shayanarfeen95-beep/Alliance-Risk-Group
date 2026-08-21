@@ -5,6 +5,9 @@ import { resolveKpi, CONSOLIDATED_CODE, type SemanticSession } from '@/lib/seman
 import { monthBounds, formatMonthShort } from '@/lib/semantic/periods';
 import { sumSpend } from '@/lib/semantic/facts';
 import type { KpiTileProps } from '@/components/dashboard/kpi-tile';
+import { buildKpiTiles } from './tiles';
+import { boxState, type BoxScopeResolver } from './context';
+import type { BoxFilterState } from './box-filter';
 
 /**
  * §9.4 — Marketing dashboard, HubSpot + QuickBooks.
@@ -47,6 +50,12 @@ export interface LeadSourceRow {
 
 export interface MarketingViewModel {
   tiles: KpiTileProps[];
+  boxes: {
+    spendTrend: BoxFilterState;
+    leadsTrend: BoxFilterState;
+    sources: BoxFilterState;
+    conversion: BoxFilterState;
+  };
   sources: LeadSourceRow[];
   spendTrend: Array<{ x: string; xLabel: string } & Record<string, number | null | string>>;
   spendTrendSeries: Array<{ id: string; label: string; color: string }>;
@@ -62,48 +71,42 @@ const num = (result: { value: Decimal | null }): number | null =>
 export function loadMarketing(
   session: SemanticSession,
   divisionCode: string,
+  boxScope: BoxScopeResolver,
 ): MarketingViewModel {
-  const { period, bundle } = session;
-  const isConsolidated = divisionCode === CONSOLIDATED_CODE;
-  const divisions = isConsolidated ? session.visibleDivisions : [divisionCode];
 
-  const tiles: KpiTileProps[] = MARKETING_TILES.map(({ id, hint }) => {
-    const current = resolveKpi(session, id, divisionCode);
-    const pm = num(resolveKpi(session, id, divisionCode, { month: period.priorMonth }));
-    const py = num(resolveKpi(session, id, divisionCode, { month: period.priorYearMonth }));
-    const value = num(current);
+  const tiles = buildKpiTiles(boxScope, MARKETING_TILES, 'marketing');
 
-    return {
-      name: current.name,
-      formatted: current.formatted,
-      unavailable: current.unavailable,
-      higherIsBetter: current.higherIsBetter,
-      format: current.format,
-      deltaPriorMonth: value !== null && pm !== null ? value - pm : null,
-      deltaPriorYear: value !== null && py !== null ? value - py : null,
-      sparkline: period.trailingTwelveMonths.map((month) =>
-        num(resolveKpi(session, id, divisionCode, { month })),
-      ),
-      hint,
-    };
-  });
+  const spendTrendScope = boxScope('marketing_spend_trend');
+  const leadsTrendScope = boxScope('marketing_leads_trend');
+  const sourcesScope = boxScope('marketing_sources');
+  const conversionScope = boxScope('marketing_conversion');
+
+  /** The divisions one box sums over. */
+  const divisionsFor = (scope: { divisionCode: string; session: SemanticSession }) =>
+    scope.divisionCode === CONSOLIDATED_CODE ? scope.session.visibleDivisions : [scope.divisionCode];
 
   const spendPending = resolveKpi(session, 'cost_per_lead', divisionCode).unavailable;
 
-  const inScope = (code: string | null) =>
-    isConsolidated || (code !== null && code === divisionCode);
+  /** Whether a contact belongs to one box's division. */
+  const inBoxScope = (boxDivision: string) => (code: string | null) =>
+    boxDivision === CONSOLIDATED_CODE || (code !== null && code === boxDivision);
 
   // --- Leads by original source, with each source's cost per lead --------
-  const { start, endExclusive } = monthBounds(period.month);
-  const leadsThisMonth = bundle.contacts.filter(
+  const sourcesInScope = inBoxScope(sourcesScope.divisionCode);
+  const { start, endExclusive } = monthBounds(sourcesScope.month);
+  const leadsThisMonth = sourcesScope.session.bundle.contacts.filter(
     (contact) =>
       contact.becameLeadDate !== null &&
       contact.becameLeadDate >= start &&
       contact.becameLeadDate < endExclusive &&
-      inScope(contact.divisionCode),
+      sourcesInScope(contact.divisionCode),
   );
 
-  const totalSpend = sumSpend(bundle.marketingSpend, [period.month], divisions);
+  const totalSpend = sumSpend(
+    sourcesScope.session.bundle.marketingSpend,
+    [sourcesScope.month],
+    divisionsFor(sourcesScope),
+  );
 
   const bySource = new Map<string, { leads: number; customers: number }>();
   for (const contact of leadsThisMonth) {
@@ -138,27 +141,46 @@ export function loadMarketing(
     { id: 'closedWon', label: 'Closed-won revenue', color: 'var(--series-1)' },
   ];
 
-  const spendTrend = period.trailingTwelveMonths.map((month) => ({
+  const spendTrend = spendTrendScope.session.period.trailingTwelveMonths.map((month) => ({
     x: month,
     xLabel: formatMonthShort(month),
-    spend: spendPending ? null : sumSpend(bundle.marketingSpend, [month], divisions).toNumber(),
-    closedWon: num(resolveKpi(session, 'dollars_booked', divisionCode, { month })),
+    spend: spendPending
+      ? null
+      : sumSpend(
+          spendTrendScope.session.bundle.marketingSpend,
+          [month],
+          divisionsFor(spendTrendScope),
+        ).toNumber(),
+    closedWon: num(
+      resolveKpi(spendTrendScope.session, 'dollars_booked', spendTrendScope.divisionCode, { month }),
+    ),
   }));
 
   const leadsTrendSeries = [{ id: 'leads', label: 'Leads received', color: 'var(--series-3)' }];
-  const leadsTrend = period.trailingTwelveMonths.map((month) => ({
+  const leadsTrend = leadsTrendScope.session.period.trailingTwelveMonths.map((month) => ({
     x: month,
     xLabel: formatMonthShort(month),
-    leads: num(resolveKpi(session, 'leads_received', divisionCode, { month })),
+    leads: num(
+      resolveKpi(leadsTrendScope.session, 'leads_received', leadsTrendScope.divisionCode, { month }),
+    ),
   }));
 
   // --- Lead-to-customer conversion and average days lead to close --------
-  const customersThisMonth = bundle.contacts.filter(
+  const conversionInScope = inBoxScope(conversionScope.divisionCode);
+  const conversionBounds = monthBounds(conversionScope.month);
+  const conversionLeads = conversionScope.session.bundle.contacts.filter(
+    (contact) =>
+      contact.becameLeadDate !== null &&
+      contact.becameLeadDate >= conversionBounds.start &&
+      contact.becameLeadDate < conversionBounds.endExclusive &&
+      conversionInScope(contact.divisionCode),
+  );
+  const customersThisMonth = conversionScope.session.bundle.contacts.filter(
     (contact) =>
       contact.becameCustomerDate !== null &&
-      contact.becameCustomerDate >= start &&
-      contact.becameCustomerDate < endExclusive &&
-      inScope(contact.divisionCode),
+      contact.becameCustomerDate >= conversionBounds.start &&
+      contact.becameCustomerDate < conversionBounds.endExclusive &&
+      conversionInScope(contact.divisionCode),
   );
 
   const daysLeadToClose = customersThisMonth
@@ -170,13 +192,20 @@ export function loadMarketing(
 
   return {
     tiles,
+    boxes: {
+      spendTrend: boxState(spendTrendScope),
+      leadsTrend: boxState(leadsTrendScope),
+      sources: boxState(sourcesScope),
+      conversion: boxState(conversionScope),
+    },
     sources,
     spendTrend,
     spendTrendSeries,
     leadsTrend,
     leadsTrendSeries,
     conversion: {
-      leadToCustomer: totalLeads === 0 ? null : customersThisMonth.length / totalLeads,
+      leadToCustomer:
+        conversionLeads.length === 0 ? null : customersThisMonth.length / conversionLeads.length,
       averageDaysLeadToClose:
         daysLeadToClose.length === 0
           ? null

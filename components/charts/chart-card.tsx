@@ -18,7 +18,7 @@
  * below 3:1 against the surface, and the relief rule requires either visible
  * labels or a table view.
  */
-import { useId, useState } from 'react';
+import { useId, useState, type ReactNode } from 'react';
 import {
   Area,
   AreaChart,
@@ -60,6 +60,13 @@ export interface ChartCardProps {
   note?: string;
   /** Draws a zero line when the data crosses it. */
   showZeroLine?: boolean;
+  /**
+   * This box's own filter, rendered beside the table toggle.
+   *
+   * Never part of a generated view spec — the agent emits data, the page
+   * decides whether the box is filterable.
+   */
+  filter?: ReactNode;
 }
 
 export function ChartCard({
@@ -72,6 +79,7 @@ export function ChartCard({
   height = 260,
   note,
   showZeroLine = true,
+  filter,
 }: ChartCardProps) {
   const [asTable, setAsTable] = useState(false);
   const titleId = useId();
@@ -99,17 +107,20 @@ export function ChartCard({
             <p className="mt-0.5 text-[11px] leading-snug text-[var(--text-muted)]">{subtitle}</p>
           ) : null}
         </div>
-        <button
-          type="button"
-          onClick={() => setAsTable((value) => !value)}
-          aria-pressed={asTable}
-          title={asTable ? 'Show chart' : 'Show the underlying numbers'}
-          className="flex h-7 w-7 shrink-0 items-center justify-center rounded-[var(--radius-sm)] border transition-colors hover:bg-[var(--surface-2)]"
-          style={{ borderColor: 'var(--border)', color: 'var(--text-secondary)' }}
-        >
-          {asTable ? <ChartColumn size={14} aria-hidden /> : <Table2 size={14} aria-hidden />}
-          <span className="sr-only">{asTable ? 'Show chart' : 'Show table'}</span>
-        </button>
+        <div className="flex shrink-0 items-center gap-1.5">
+          {filter}
+          <button
+            type="button"
+            onClick={() => setAsTable((value) => !value)}
+            aria-pressed={asTable}
+            title={asTable ? 'Show chart' : 'Show the underlying numbers'}
+            className="flex h-7 w-7 shrink-0 items-center justify-center rounded-[var(--radius-sm)] border transition-colors hover:bg-[var(--surface-2)]"
+            style={{ borderColor: 'var(--border)', color: 'var(--text-secondary)' }}
+          >
+            {asTable ? <ChartColumn size={14} aria-hidden /> : <Table2 size={14} aria-hidden />}
+            <span className="sr-only">{asTable ? 'Show chart' : 'Show table'}</span>
+          </button>
+        </div>
       </div>
 
       {/* A legend is always present for two or more series, so identity is never

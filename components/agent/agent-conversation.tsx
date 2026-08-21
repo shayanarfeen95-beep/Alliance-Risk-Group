@@ -3,15 +3,28 @@
 /**
  * The conversation surface.
  *
- * Two things it deliberately does NOT do:
+ * Three things it deliberately does NOT do:
  *   - render numbers the model typed. Every figure on screen arrives inside a
  *     citation or a view spec that the server resolved through the semantic
  *     layer.
  *   - render model-authored markup. A generated chart is a validated view spec
  *     passed to the same ChartCard the dashboards use.
+ *   - forget. The transcript is held in local storage and the thread id travels
+ *     with it, so moving between dashboards — which is most of what anyone does
+ *     here — continues the same conversation instead of starting a new one. An
+ *     assistant that loses the thread every time you click a tab is an
+ *     assistant people stop opening.
  */
-import { useRef, useState } from 'react';
-import { ArrowUp, CircleAlert, Database, LoaderCircle, ShieldCheck, Sparkles } from 'lucide-react';
+import { useEffect, useRef, useState } from 'react';
+import {
+  ArrowUp,
+  CircleAlert,
+  Database,
+  ExternalLink,
+  LoaderCircle,
+  ShieldCheck,
+  Sparkles,
+} from 'lucide-react';
 import { ChartCard, type ChartCardProps } from '@/components/charts/chart-card';
 
 export interface PageContext {
@@ -40,6 +53,8 @@ export interface AgentMessage {
   activity?: AgentToolActivity[];
   /** A resolved view the server built from a validated spec. */
   view?: ChartCardProps;
+  /** Places to go — a filtered dashboard, the mapping screen, a new box. */
+  links?: Array<{ label: string; href: string }>;
   verifyHref?: string;
   isRefusal?: boolean;
   /** A pending write the user must confirm before anything is committed. */
@@ -50,19 +65,83 @@ export interface AgentMessage {
   };
 }
 
+/**
+ * What it can do, said as things somebody would actually ask for.
+ *
+ * The four cover the four jobs: answer, build, map, guide.
+ */
 const SUGGESTIONS = [
-  'What was LITS gross margin in March, and how does it compare to budget?',
-  'Show revenue by division for the last 12 months',
   'Why did Claims lose money in March?',
-  'Pull the latest month from QuickBooks',
+  'Add a cash runway tile for LITS to the executive dashboard',
+  'Which HubSpot values are not mapped to a division?',
+  'How do I compare two divisions on one screen?',
 ];
 
-export function AgentConversation({ pageContext }: { pageContext: PageContext }) {
+const STORAGE_KEY = 'arg.assistant.transcript.v1';
+
+interface StoredTranscript {
+  conversationId: string | null;
+  messages: AgentMessage[];
+}
+
+function loadStored(): StoredTranscript {
+  if (typeof window === 'undefined') return { conversationId: null, messages: [] };
+  try {
+    const raw = window.localStorage.getItem(STORAGE_KEY);
+    if (!raw) return { conversationId: null, messages: [] };
+    const parsed = JSON.parse(raw) as StoredTranscript;
+    if (!Array.isArray(parsed.messages)) return { conversationId: null, messages: [] };
+    return { conversationId: parsed.conversationId ?? null, messages: parsed.messages };
+  } catch {
+    return { conversationId: null, messages: [] };
+  }
+}
+
+export function AgentConversation({
+  pageContext,
+  resetSignal = 0,
+}: {
+  pageContext: PageContext;
+  /** Incremented by the panel's "new chat" control. */
+  resetSignal?: number;
+}) {
   const [messages, setMessages] = useState<AgentMessage[]>([]);
+  const [conversationId, setConversationId] = useState<string | null>(null);
   const [input, setInput] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
+
+  // Restored after mount rather than during render: the server has no local
+  // storage, and reading it in the initial state would hydrate a different tree
+  // than it rendered.
+  useEffect(() => {
+    const stored = loadStored();
+    setMessages(stored.messages);
+    setConversationId(stored.conversationId);
+  }, []);
+
+  useEffect(() => {
+    if (resetSignal === 0) return;
+    setMessages([]);
+    setConversationId(null);
+    setError(null);
+    window.localStorage.removeItem(STORAGE_KEY);
+  }, [resetSignal]);
+
+  useEffect(() => {
+    if (messages.length === 0) return;
+    try {
+      window.localStorage.setItem(STORAGE_KEY, JSON.stringify({ conversationId, messages }));
+    } catch {
+      // A full or blocked storage quota must not break the conversation; it
+      // simply stops surviving navigation.
+    }
+  }, [messages, conversationId]);
+
+  useEffect(() => {
+    scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' });
+  }, [messages, busy]);
 
   async function send(text: string) {
     if (!text.trim() || busy) return;
@@ -80,25 +159,24 @@ export function AgentConversation({ pageContext }: { pageContext: PageContext })
         body: JSON.stringify({
           messages: history.map((m) => ({ role: m.role, content: m.content })),
           pageContext,
+          conversationId,
         }),
       });
 
       const payload = (await response.json()) as
-        | { ok: true; message: AgentMessage }
+        | { ok: true; message: AgentMessage; conversationId?: string }
         | { ok: false; error: string };
 
       if (!payload.ok) {
         setError(payload.error);
       } else {
+        if (payload.conversationId) setConversationId(payload.conversationId);
         setMessages((current) => [...current, payload.message]);
       }
     } catch {
       setError('Could not reach the assistant. Your session is still signed in — try again.');
     } finally {
       setBusy(false);
-      requestAnimationFrame(() => {
-        scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' });
-      });
     }
   }
 
@@ -115,7 +193,18 @@ export function AgentConversation({ pageContext }: { pageContext: PageContext })
         | { ok: true; message: AgentMessage }
         | { ok: false; error: string };
       if (!payload.ok) setError(payload.error);
-      else setMessages((current) => [...current, payload.message]);
+      else {
+        setMessages((current) => [
+          // The proposal has been acted on; leaving its button on screen invites
+          // a second click that would fail.
+          ...current.map((message) =>
+            message.pendingAction?.id === actionId
+              ? { ...message, pendingAction: undefined }
+              : message,
+          ),
+          payload.message,
+        ]);
+      }
     } finally {
       setBusy(false);
     }
@@ -132,13 +221,12 @@ export function AgentConversation({ pageContext }: { pageContext: PageContext })
             >
               <p className="mb-1.5 flex items-center gap-1.5 font-medium text-[var(--text-primary)]">
                 <ShieldCheck size={13} aria-hidden style={{ color: 'var(--status-good)' }} />
-                Answers come from the same definitions the dashboards use
+                It works on the same definitions the dashboards use
               </p>
               <p>
-                Every figure is cited and links to the view you can check it against. When the data
-                does not support an answer, it says so rather than estimating. It can also pull fresh
-                data from QuickBooks, HubSpot or Sheets — it will show you what it plans to do before
-                anything is written.
+                Ask it about the numbers and every figure comes back cited. It can also build boxes
+                onto your dashboards, map HubSpot values to divisions, pull fresh data, and show you
+                where things are. Anything that writes shows you what it plans to do first.
               </p>
             </div>
 
@@ -204,7 +292,7 @@ export function AgentConversation({ pageContext }: { pageContext: PageContext })
               }
             }}
             rows={1}
-            placeholder="Ask about the numbers, or ask it to pull data…"
+            placeholder="Ask about the numbers, or ask it to build something…"
             className="max-h-32 min-h-[20px] flex-1 resize-none bg-transparent text-[12.5px] outline-none placeholder:text-[var(--text-muted)]"
           />
           <button
@@ -217,6 +305,10 @@ export function AgentConversation({ pageContext }: { pageContext: PageContext })
             <span className="sr-only">Send</span>
           </button>
         </div>
+        <p className="mt-1.5 text-[10px] text-[var(--text-muted)]">
+          Knows the page, month and division you are looking at. Enter sends, Shift+Enter for a new
+          line.
+        </p>
       </form>
     </>
   );
@@ -268,6 +360,22 @@ function MessageBubble({
       </div>
 
       {message.view ? <ChartCard {...message.view} /> : null}
+
+      {message.links?.length ? (
+        <div className="flex flex-wrap gap-1.5">
+          {message.links.map((link, index) => (
+            <a
+              key={index}
+              href={link.href}
+              className="inline-flex items-center gap-1.5 rounded-[var(--radius-sm)] border px-2.5 py-1 text-[11px] font-medium transition-colors hover:bg-[var(--surface-2)]"
+              style={{ borderColor: 'var(--border-strong)', color: 'var(--text-primary)' }}
+            >
+              <ExternalLink size={11} aria-hidden />
+              {link.label}
+            </a>
+          ))}
+        </div>
+      ) : null}
 
       {message.citations?.length ? (
         <details className="group">

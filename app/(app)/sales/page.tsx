@@ -8,6 +8,8 @@ import { KpiTile } from '@/components/dashboard/kpi-tile';
 import { ChartCard } from '@/components/charts/chart-card';
 import { Card, CardHeader, DataTable, SectionTitle, Td, Th, Unavailable } from '@/components/ui/primitives';
 import { OwnerFilter } from '@/components/dashboard/owner-filter';
+import { BoxFilter } from '@/components/dashboard/box-filter';
+import { PinnedBoxes } from '@/components/dashboard/pinned-boxes';
 
 export const metadata: Metadata = { title: 'Sales' };
 export const dynamic = 'force-dynamic';
@@ -20,7 +22,12 @@ export default async function SalesPage({
   const context = await loadDashboardContext(await searchParams);
   const { session, divisionCode, range, owners, ownerName } = context;
   const colors = buildDivisionColorMap(session.bundle.divisions);
-  const model = loadSales(session, divisionCode, colors, { range, ownerName });
+  const model = loadSales(session, divisionCode, colors, {
+    range,
+    ownerName,
+    boxScope: context.boxScope,
+  });
+  const boxOptions = context.boxFilterOptions;
 
   const divisionLabel =
     divisionCode === 'ARG_TOTAL'
@@ -46,7 +53,7 @@ export default async function SalesPage({
 
       <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
         {model.tiles.map((tile) => (
-          <KpiTile key={tile.name} {...tile} />
+          <KpiTile key={tile.box?.boxId ?? tile.name} {...tile} boxOptions={boxOptions} />
         ))}
       </div>
 
@@ -70,10 +77,17 @@ export default async function SalesPage({
           valueFormat="currency"
           height={260}
           note="Bookings and recognised revenue are different measures — a deal closed this month may be delivered over several. QBO revenue is the secondary check."
+          filter={<BoxFilter state={model.boxes.bookedVsBudget} options={boxOptions} />}
         />
 
         <Card>
-          <CardHeader title="Pipeline by stage" subtitle="Open deals as of the reporting date" />
+          <CardHeader
+            title="Pipeline by stage"
+            subtitle="Open deals as of the reporting date"
+            action={
+              <BoxFilter state={model.boxes.pipeline} options={boxOptions} fields={['division']} />
+            }
+          />
           {model.pipelineByStage.length === 0 ? (
             <p className="text-[12px] text-[var(--text-muted)]">No open deals in scope.</p>
           ) : (
@@ -109,6 +123,7 @@ export default async function SalesPage({
         form="bar"
         valueFormat="currency"
         height={240}
+        filter={<BoxFilter state={model.boxes.bookingsTrend} options={boxOptions} />}
       />
 
       {/* Per-salesperson performance — the leaderboard leadership asked for. */}
@@ -117,6 +132,17 @@ export default async function SalesPage({
           By salesperson
         </SectionTitle>
         <Card>
+          <CardHeader
+            title="Leaderboard"
+            subtitle={`Deals in ${model.dealScope.rangeLabel}. Win rate uses deals closed — won plus lost — as the denominator.`}
+            action={
+              <BoxFilter
+                state={model.boxes.bySalesperson}
+                options={boxOptions}
+                fields={['division']}
+              />
+            }
+          />
           {model.bySalesperson.length === 0 ? (
             <p className="text-[12px] text-[var(--text-muted)]">
               No deals closed or open in {model.dealScope.rangeLabel}.
@@ -157,6 +183,9 @@ export default async function SalesPage({
         </Card>
       </section>
 
+      {/* Boxes the assistant built for this reader. */}
+      <PinnedBoxes page="sales" context={context} />
+
       {/* §9.3: a deal-level table behind every tile. */}
       <Card>
         <CardHeader
@@ -166,7 +195,12 @@ export default async function SalesPage({
               ? `${model.dealScope.ownerName}'s deals closed in ${model.dealScope.rangeLabel}, plus everything still open.`
               : `Deals closed in ${model.dealScope.rangeLabel}, plus everything still open. Sales leadership will not trust an aggregate they cannot open.`
           }
-          action={<OwnerFilter owners={owners} selected={ownerName} />}
+          action={
+            <div className="flex items-center gap-2">
+              <OwnerFilter owners={owners} selected={ownerName} />
+              <BoxFilter state={model.boxes.deals} options={boxOptions} fields={['division']} />
+            </div>
+          }
         />
         <DataTable maxHeight={520}>
           <thead>

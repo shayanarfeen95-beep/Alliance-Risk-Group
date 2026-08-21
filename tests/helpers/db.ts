@@ -42,6 +42,8 @@ export const CFO_USER = {
   role: 'CFO' as const,
   canViewConsolidated: true,
   divisionCodes: [] as string[],
+  isSuperAdmin: true,
+  grantedCapabilities: [] as string[],
 };
 
 /** A division-scoped persona, used to prove entitlements are enforced. */
@@ -52,6 +54,8 @@ export const CLAIMS_MANAGER_USER = {
   role: 'DIVISION_MANAGER' as const,
   canViewConsolidated: false,
   divisionCodes: ['CLAIMS'],
+  isSuperAdmin: false,
+  grantedCapabilities: [] as string[],
 };
 
 /**
@@ -80,5 +84,7 @@ export async function loadSeededUser(db: Database, email: string): Promise<Sessi
     role: row.role as SessionUser['role'],
     canViewConsolidated: row.canViewConsolidated,
     divisionCodes: access.map((a) => a.divisionCode),
+    isSuperAdmin: row.isSuperAdmin,
+    grantedCapabilities: [],
   };
 }
