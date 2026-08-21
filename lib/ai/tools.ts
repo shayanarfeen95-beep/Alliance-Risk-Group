@@ -1147,9 +1147,28 @@ export async function confirmExtraction(
       );
       rowsWritten = conformed.written;
       conformLine = ` ${describeConform(conformed)}`;
+    } else if (run.sourceSystem === 'QBO') {
+      const { conformQbo, describeQboConform } = await import('@/lib/etl/qbo');
+      const conformed = await conformQbo(
+        db,
+        loadRunId,
+        run.entity,
+        batch.records.map((record) => ({ payload: record.payload, key: record.key })),
+      );
+      rowsWritten = conformed.written;
+      conformLine = ` ${describeQboConform(conformed)}`;
+    } else if (run.sourceSystem === 'SHEETS') {
+      const { conformSheets, describeSheetsConform } = await import('@/lib/etl/sheets');
+      const conformed = await conformSheets(
+        db,
+        loadRunId,
+        run.entity,
+        batch.records.map((record) => ({ payload: record.payload })),
+      );
+      rowsWritten = conformed.written;
+      conformLine = ` ${describeSheetsConform(conformed)}`;
     } else {
-      conformLine =
-        ` They are landed and queryable, but ${connector.label} conform is not built yet — no dashboard figure has changed.`;
+      conformLine = ` They are landed and queryable but not yet conformed.`;
     }
 
     await db
