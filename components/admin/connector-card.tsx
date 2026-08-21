@@ -39,6 +39,7 @@ export function ConnectorCard(props: ConnectorCardProps) {
   const router = useRouter();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [warning, setWarning] = useState<string | null>(null);
   const [showManual, setShowManual] = useState(false);
   const [fields, setFields] = useState<Record<string, string>>({});
 
@@ -58,6 +59,10 @@ export function ConnectorCard(props: ConnectorCardProps) {
       if (!payload.ok) {
         setError(payload.error ?? 'The credential was rejected.');
         return;
+      }
+      if (payload.warning) {
+        // Connected, but something about the credential will bite later.
+        setWarning(payload.warning);
       }
       setShowManual(false);
       setFields({});
@@ -139,6 +144,17 @@ export function ConnectorCard(props: ConnectorCardProps) {
 
       {error && (
         <p className="mt-3 text-[11px] leading-relaxed text-[var(--status-critical)]">{error}</p>
+      )}
+
+      {/* Connected, with something that will matter later — a token that
+          expires, a scope that was not granted. */}
+      {warning && (
+        <p
+          className="mt-3 rounded-[var(--radius-sm)] px-2.5 py-2 text-[11px] leading-relaxed"
+          style={{ background: 'var(--status-warning-wash)', color: 'var(--text-secondary)' }}
+        >
+          {warning}
+        </p>
       )}
 
       {showManual && (

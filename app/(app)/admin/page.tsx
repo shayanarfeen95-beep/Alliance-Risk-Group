@@ -3,6 +3,7 @@ import { desc, eq, sql } from 'drizzle-orm';
 import { CircleAlert, CircleCheck, CircleHelp, Download } from 'lucide-react';
 import { ConnectorCard } from '@/components/admin/connector-card';
 import { HubspotMapping } from '@/components/admin/hubspot-mapping';
+import { ConnectionReadiness } from '@/components/admin/connection-readiness';
 import { UserManager } from '@/components/admin/user-manager';
 import { can } from '@/lib/auth/scope';
 import { getDb } from '@/lib/db/client';
@@ -10,6 +11,7 @@ import * as t from '@/lib/db/schema';
 import { getSessionUser } from '@/lib/auth/session';
 import { redirect } from 'next/navigation';
 import { connectorStatuses } from '@/lib/connectors';
+import { sourceReadiness } from '@/lib/connectors/readiness';
 import {
   ATTRIBUTION_RULES,
   loadHubspotMapping,
@@ -157,6 +159,12 @@ export default async function AdminPage({
             </span>
           </div>
         )}
+
+        {/* What the environment is still missing, said before anyone makes a
+            token they cannot store. */}
+        <div className="mb-4">
+          <ConnectionReadiness readiness={sourceReadiness()} />
+        </div>
 
         <div className="grid gap-3 lg:grid-cols-3">
           {connectors.map((connector) => (
