@@ -1,7 +1,14 @@
 import { eq } from 'drizzle-orm';
 import * as t from '@/lib/db/schema';
 import { getDb, type Database } from '@/lib/db/client';
-import { decryptSecret, encryptSecret, hasCredentialKey } from '@/lib/crypto/secrets';
+import {
+  decodeReference,
+  decryptSecret,
+  encodeReference,
+  encryptSecret,
+  hasCredentialKey,
+  isReference,
+} from '@/lib/crypto/secrets';
 import type { SourceSystemCode } from './types';
 
 /**
@@ -20,7 +27,14 @@ import type { SourceSystemCode } from './types';
  * position rather than a misconfiguration.
  */
 
-export type AuthMethod = 'OAUTH' | 'TOKEN' | 'SERVICE_ACCOUNT';
+/**
+ * COMPOSIO is the path a person actually uses: they click "Sign in with
+ * QuickBooks", authorise at Intuit, and the only thing stored here is the
+ * identifier of the connection Composio now holds. The other three remain for
+ * deployments that manage their own OAuth application or must keep third-party
+ * tokens inside their own infrastructure.
+ */
+export type AuthMethod = 'OAUTH' | 'TOKEN' | 'SERVICE_ACCOUNT' | 'COMPOSIO';
 
 export interface StoredCredential {
   sourceSystem: SourceSystemCode;
@@ -135,11 +149,17 @@ export async function loadCredential(
       .where(eq(t.connectorCredential.sourceSystem, sourceSystem))
       .limit(1);
 
-    if (row && hasCredentialKey()) {
+    // A Composio connection holds no secret, so it is readable whether or not
+    // CREDENTIAL_KEY was ever configured. An encrypted credential without the
+    // key is unreadable, and falls through to the environment rather than
+    // throwing on a page render.
+    if (row && (isReference(row.secret) || hasCredentialKey())) {
       return {
         sourceSystem,
         authMethod: row.authMethod as AuthMethod,
-        data: JSON.parse(decryptSecret(row.secret)) as Record<string, string>,
+        data: JSON.parse(
+          isReference(row.secret) ? decodeReference(row.secret) : decryptSecret(row.secret),
+        ) as Record<string, string>,
         accountLabel: row.accountLabel,
         accountId: row.accountId,
         scopes: row.scopes,
@@ -232,11 +252,19 @@ export interface SaveCredentialInput {
   scopes?: string | null;
   expiresAt?: Date | null;
   connectedByUserId?: string | null;
+  /**
+   * True when `data` contains nothing secret — a Composio connected-account id
+   * and the non-secret account context around it. Such a record is stored in the
+   * clear on purpose, so that connecting a source does not require an encryption
+   * key to exist for a secret that is never held.
+   */
+  isReference?: boolean;
 }
 
 export async function saveCredential(input: SaveCredentialInput, db?: Database): Promise<void> {
   const database = db ?? (await getDb());
-  const secret = encryptSecret(JSON.stringify(input.data));
+  const payload = JSON.stringify(input.data);
+  const secret = input.isReference ? encodeReference(payload) : encryptSecret(payload);
 
   const row = {
     sourceSystem: input.sourceSystem,

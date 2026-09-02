@@ -25,7 +25,7 @@ Three env vars, in increasing order of seriousness:
 |---|---|
 | A live demo, no database | `DEMO_MODE=1` (already in `vercel.json`) |
 | A real deployment | `DATABASE_URL` — a Neon pooled connection string |
-| Connectable sources | `CREDENTIAL_KEY`, plus each provider's client id/secret |
+| Connectable sources | `COMPOSIO_API_KEY` — and nothing else |
 
 `DATABASE_URL` takes precedence over `DEMO_MODE`, so the same deployment starts
 as a self-seeding demo and becomes real the moment a database is attached —
@@ -39,13 +39,60 @@ cannot hold them, so it would not be the same system.
 
 ## Connecting QuickBooks, HubSpot and Sheets
 
-From **Admin → Source connections**: OAuth for QuickBooks and HubSpot, a pasted
-private-app token for HubSpot if you prefer, a service account for Sheets.
-Credentials are AES-256-GCM encrypted before they reach the database, verified
-against the provider before they are stored, and QuickBooks' rotating refresh
-token is written back on every refresh — the omission that kills a QBO
+Set `COMPOSIO_API_KEY`, then go to **Admin → Source connections** and press *Sign
+in with QuickBooks*. That is the whole procedure. There is no Intuit developer
+app to register, no HubSpot private app to create, no Google service-account key
+file to download and share a spreadsheet with.
+
+Composio holds the OAuth applications and the tokens. What this system stores is
+a connection identifier that opens nothing on its own, and every request to
+QuickBooks and HubSpot goes through Composio's proxy, which attaches the
+credential server-side. No provider token exists in this process to be logged,
+cached or leaked — and `CREDENTIAL_KEY` is not needed, because there is no secret
+here to encrypt.
+
+Google grants access to an *account*, not to a document, so a signed-in Sheets
+connection asks once for the spreadsheet's link. That is a document identifier,
+not a credential, and it is verified by actually reading the sheet before it is
+saved.
+
+Without `COMPOSIO_API_KEY` the older path still works — your own OAuth
+applications, a pasted HubSpot private-app token, a Google service account, and
+`CREDENTIAL_KEY` to encrypt them at rest. QuickBooks' rotating refresh token is
+written back on every refresh there, which is the omission that kills a QBO
 integration months after anyone last looked at it. See
 [`docs/RUNBOOK.md`](docs/RUNBOOK.md).
+
+**Connecting is not the same as loading.** A source supplies nothing until a pull
+runs. **Admin → Data → Pull everything** fetches the last three months from every
+connected source and writes it into the warehouse: QuickBooks into the profit and
+loss, balance sheet and chart of accounts, HubSpot into deals, contacts and
+meetings, Sheets into budget and headcount. Closed months are left untouched and
+the reconciliation controls run immediately afterwards.
+
+You can also ask the assistant to pull a specific month and confirm it. Both go
+through the same code in `lib/etl/ingest.ts` and produce the same reversible
+`load_run` — there is no second, weaker ingestion path.
+
+## Demonstration data, and switching to live
+
+The warehouse ships seeded so every dashboard, control and export can be
+exercised before a source is connected. That is useful and dangerous in equal
+measure: a plausible number does not announce itself as fabricated.
+
+So the state is explicit, shown as a banner on every page, and switching is one
+control in **Admin → Data**:
+
+| Mode | What the dashboards read |
+|---|---|
+| `DEMONSTRATION` (default) | The seeded dataset, with a banner on every page saying so |
+| `LIVE` | Only rows a source loaded. A month nothing has loaded reads *unavailable*, never zero |
+
+Live is a filter, not a deletion — switching back is a click and nothing is
+destroyed by a misclick. It is applied in `loadFactBundle`, the single point
+where facts enter the system, so a view cannot forget it. Deleting the seeded
+rows for good is offered separately, because *hidden* and *gone* are different
+promises and the operator should choose which one they are making.
 
 ---
 
@@ -98,7 +145,7 @@ TypeScript, against `resolveKpi`, not by re-reading an instruction string each
 night. An exception that lands on the CEO's dashboard has to fire for the same
 reason every time.
 
-Without `ANTHROPIC_API_KEY`, every dashboard, export and control still works.
+Without `OPENROUTER_API_KEY`, every dashboard, export and control still works.
 Only the conversational layer is unavailable, and it says so.
 
 ## Layout

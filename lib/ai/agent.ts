@@ -1,24 +1,40 @@
 import 'server-only';
-import Anthropic from '@anthropic-ai/sdk';
 import { getDb } from '@/lib/db/client';
 import * as t from '@/lib/db/schema';
 import type { SessionUser } from '@/lib/auth/session';
 import type { SemanticSession } from '@/lib/semantic/resolve';
 import { AGENT_TOOLS, toolByName, type ToolContext } from './tools';
 import { buildSystemPrompt, type PageContext } from './prompt';
+import {
+  activeModel,
+  isModelConfigured,
+  ModelNotConfiguredError,
+  streamTurn,
+  type AgentToolResult,
+  type ConversationMessage,
+} from './provider';
 import type { ChartCardProps } from '@/components/charts/chart-card';
 
 /**
  * The agent loop.
  *
- * A manual tool-use loop rather than the SDK's tool runner: every tool call is
+ * A manual tool-use loop rather than a framework's runner: every tool call is
  * authorised and logged against the caller's entitlements before it runs, and
  * the loop needs the per-request semantic session in scope. Owning the loop
  * keeps that check in one place.
+ *
+ * The model is reached through lib/ai/provider.ts, so nothing here knows which
+ * model answered — only that a figure it states came from a tool call made in
+ * this loop.
  */
 
-const MODEL = process.env.ANTHROPIC_MODEL_INTERACTIVE ?? 'claude-opus-5';
-const MAX_ITERATIONS = 8;
+/**
+ * Enough room to look something up, notice it does not answer the question, and
+ * look up the right thing. Eight cut real chains of reasoning short — a variance
+ * question legitimately costs a period check, a statement, the drivers, a
+ * comparison and a chart before there is anything worth saying.
+ */
+const MAX_ITERATIONS = 14;
 
 export interface AgentTurnInput {
   user: SessionUser;
@@ -26,7 +42,22 @@ export interface AgentTurnInput {
   pageContext: PageContext;
   messages: Array<{ role: 'user' | 'assistant'; content: string }>;
   conversationId: string | null;
+  /**
+   * Called as the turn happens, so the panel can show the answer being written
+   * and the lookups being made rather than a spinner. A financial question can
+   * legitimately take half a minute of tool calls; half a minute of "Working…"
+   * reads as a broken application.
+   */
+  onEvent?: (event: AgentStreamEvent) => void;
+  signal?: AbortSignal;
 }
+
+export type AgentStreamEvent =
+  | { type: 'text'; delta: string }
+  | { type: 'activity'; tool: string; summary: string }
+  | { type: 'citations'; citations: AgentCitation[] }
+  | { type: 'view'; view: ChartCardProps }
+  | { type: 'pendingAction'; pendingAction: { id: string; label: string; detail: string } };
 
 export interface AgentCitation {
   label: string;
@@ -46,23 +77,16 @@ export interface AgentTurnResult {
   pendingAction?: { id: string; label: string; detail: string };
 }
 
-export class AgentNotConfiguredError extends Error {
-  constructor() {
-    super(
-      'The assistant is not configured: ANTHROPIC_API_KEY is not set. Every dashboard still works — only the conversational layer is unavailable.',
-    );
-    this.name = 'AgentNotConfiguredError';
-  }
-}
+export { ModelNotConfiguredError as AgentNotConfiguredError } from './provider';
 
 export function isAgentConfigured(): boolean {
-  return Boolean(process.env.ANTHROPIC_API_KEY);
+  return isModelConfigured();
 }
 
 export async function runAgentTurn(input: AgentTurnInput): Promise<AgentTurnResult> {
-  if (!isAgentConfigured()) throw new AgentNotConfiguredError();
+  if (!isModelConfigured()) throw new ModelNotConfiguredError();
 
-  const client = new Anthropic();
+  const model = activeModel();
   const db = await getDb();
   const started = Date.now();
 
@@ -76,56 +100,48 @@ export async function runAgentTurn(input: AgentTurnInput): Promise<AgentTurnResu
   const tools = AGENT_TOOLS.map((tool) => ({
     name: tool.name,
     description: tool.description,
-    input_schema: tool.input_schema as Anthropic.Tool.InputSchema,
+    input_schema: tool.input_schema,
   }));
 
-  const messages: Anthropic.MessageParam[] = input.messages.map((message) => ({
+  const messages: ConversationMessage[] = input.messages.map((message) => ({
     role: message.role,
     content: message.content,
   }));
 
   const activity: AgentTurnResult['activity'] = [];
   const citations: AgentCitation[] = [];
+  const emit = input.onEvent ?? (() => {});
   let view: ChartCardProps | undefined;
   let pendingAction: AgentTurnResult['pendingAction'];
 
+  /**
+   * Text the model produced across the whole turn, including what it said before
+   * reaching for a tool. It is streamed as it arrives, so the transcript and the
+   * stream must agree — showing a preamble and then replacing it with something
+   * shorter is how a working answer comes to look like a glitch.
+   */
+  let spoken = '';
+
   for (let iteration = 0; iteration < MAX_ITERATIONS; iteration++) {
-    const response = await client.messages.create({
-      model: MODEL,
-      max_tokens: 8000,
+    const turn = await streamTurn({
       system: buildSystemPrompt(input.user, input.session, input.pageContext),
       tools,
       messages,
+      signal: input.signal,
+      onText: (delta) => {
+        spoken += delta;
+        emit({ type: 'text', delta });
+      },
     });
 
-    // Safety classifiers can decline a request outright. That arrives as a
-    // successful response with an empty or partial body, so check the stop
-    // reason before reading content.
-    if (response.stop_reason === 'refusal') {
-      const detail = response.stop_details;
-      await logTurn(db, input, 'assistant', 'Declined by safety classifier', true, Date.now() - started);
-      return {
-        content:
-          'I was unable to answer that. If it was a routine question about ARG’s figures, rephrasing it usually helps; otherwise the dashboards have the same numbers.',
-        citations: [],
-        activity,
-        isRefusal: true,
-        ...(detail ? {} : {}),
-      };
-    }
-
-    const toolUses = response.content.filter(
-      (block): block is Anthropic.ToolUseBlock => block.type === 'tool_use',
-    );
+    const toolUses = turn.toolCalls;
 
     if (toolUses.length === 0) {
-      const text = response.content
-        .filter((block): block is Anthropic.TextBlock => block.type === 'text')
-        .map((block) => block.text)
-        .join('\n')
-        .trim();
+      const text = spoken.trim();
 
-      await logTurn(db, input, 'assistant', text, false, Date.now() - started, citations);
+      await logTurn(db, input, 'assistant', text, false, Date.now() - started, citations, model);
+
+      if (citations.length) emit({ type: 'citations', citations });
 
       return {
         content: text || 'I could not produce an answer for that.',
@@ -136,33 +152,46 @@ export async function runAgentTurn(input: AgentTurnInput): Promise<AgentTurnResu
       };
     }
 
-    messages.push({ role: 'assistant', content: response.content });
+    // A preamble before a tool call is a separate paragraph from whatever comes
+    // after it. Without the break they run together mid-sentence.
+    if (spoken && !spoken.endsWith('\n\n')) {
+      spoken += '\n\n';
+      emit({ type: 'text', delta: '\n\n' });
+    }
 
-    // All tool results go back in a single user message — splitting them
-    // trains the model out of parallel calls.
-    const toolResults: Anthropic.ToolResultBlockParam[] = [];
+    messages.push({ role: 'assistant_tool_use', text: turn.text, toolCalls: toolUses });
+
+    // Results are collected for the whole round and appended together, so a
+    // model that called three tools at once gets three answers at once rather
+    // than being trained out of calling them in parallel.
+    const toolResults: AgentToolResult[] = [];
 
     for (const toolUse of toolUses) {
       const tool = toolByName(toolUse.name);
       if (!tool) {
         toolResults.push({
-          type: 'tool_result',
-          tool_use_id: toolUse.id,
+          id: toolUse.id,
           content: `No such tool: ${toolUse.name}`,
-          is_error: true,
+          isError: true,
         });
         continue;
       }
 
       try {
-        const outcome = await tool.run(
-          (toolUse.input ?? {}) as Record<string, unknown>,
-          context,
-        );
+        const outcome = await tool.run(toolUse.input ?? {}, context);
 
-        if (outcome.activity) activity.push({ tool: tool.name, summary: outcome.activity });
-        if (outcome.view) view = outcome.view;
-        if (outcome.pendingAction) pendingAction = outcome.pendingAction;
+        if (outcome.activity) {
+          activity.push({ tool: tool.name, summary: outcome.activity });
+          emit({ type: 'activity', tool: tool.name, summary: outcome.activity });
+        }
+        if (outcome.view) {
+          view = outcome.view;
+          emit({ type: 'view', view: outcome.view });
+        }
+        if (outcome.pendingAction) {
+          pendingAction = outcome.pendingAction;
+          emit({ type: 'pendingAction', pendingAction: outcome.pendingAction });
+        }
         if (outcome.citations) citations.push(...outcome.citations);
 
         await db.insert(t.aiQueryLog).values({
@@ -172,29 +201,25 @@ export async function runAgentTurn(input: AgentTurnInput): Promise<AgentTurnResu
           toolName: tool.name,
           toolInput: (toolUse.input ?? {}) as object,
           toolOutput: outcome.result as object,
-          model: MODEL,
+          model,
         });
 
-        toolResults.push({
-          type: 'tool_result',
-          tool_use_id: toolUse.id,
-          content: JSON.stringify(outcome.result),
-        });
+        toolResults.push({ id: toolUse.id, content: JSON.stringify(outcome.result) });
       } catch (error) {
         toolResults.push({
-          type: 'tool_result',
-          tool_use_id: toolUse.id,
+          id: toolUse.id,
           content: `The tool failed: ${error instanceof Error ? error.message : 'unknown error'}. Do not guess the figure — tell the user it could not be retrieved.`,
-          is_error: true,
+          isError: true,
         });
       }
     }
 
-    messages.push({ role: 'user', content: toolResults });
+    messages.push({ role: 'tool_results', results: toolResults });
   }
 
   return {
     content:
+      spoken.trim() ||
       'I worked through several steps but did not reach a settled answer. Narrowing the question to one metric, division and month usually gets there.',
     citations,
     activity,
@@ -211,6 +236,7 @@ async function logTurn(
   wasRefusal: boolean,
   latencyMs: number,
   citations: AgentCitation[] = [],
+  model: string = activeModel(),
 ): Promise<void> {
   // §11 Requirement 6: every question and answer is logged. Westport reviews
   // this during the audit pass, and the refusals are the most useful rows.
@@ -221,7 +247,7 @@ async function logTurn(
     content,
     wasRefusal,
     citations: citations.length ? (citations as unknown as object) : null,
-    model: MODEL,
+    model,
     latencyMs,
   });
 }

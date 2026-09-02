@@ -1,0 +1,12 @@
+# Build scripts approved to run on install.
+#
+# esbuild's postinstall puts its platform binary in place; without it, tsx,
+# vitest and drizzle-kit have nothing to execute. It arrives three times over,
+# through those three packages.
+#
+# Declared here as well as in package.json's `pnpm` field because pnpm moved this
+# setting to this file in 10.16 while still reading the older location. Which of
+# the two a given CI runner honours is not worth guessing at, and the cost of
+# both agreeing is one duplicated line.
+onlyBuiltDependencies:
+  - esbuild

@@ -4,7 +4,7 @@ import { getSessionUser } from '@/lib/auth/session';
 import { getDb } from '@/lib/db/client';
 import * as t from '@/lib/db/schema';
 import { openSemanticSession } from '@/lib/semantic/resolve';
-import { runAgentTurn, isAgentConfigured, AgentNotConfiguredError } from '@/lib/ai/agent';
+import { runAgentTurn, isAgentConfigured, AgentNotConfiguredError, type AgentStreamEvent } from '@/lib/ai/agent';
 
 export const dynamic = 'force-dynamic';
 export const maxDuration = 120;
@@ -31,7 +31,9 @@ export async function POST(request: Request) {
     return NextResponse.json({
       ok: false,
       error:
-        'The assistant is not configured — ANTHROPIC_API_KEY is not set in this environment. Every dashboard and export still works; only the conversational layer is unavailable.',
+        'The assistant is not configured — OPENROUTER_API_KEY is not set in this environment. A ' +
+        'free key is enough. Every dashboard and export still works; only the conversational ' +
+        'layer is unavailable.',
     });
   }
 
@@ -78,39 +80,88 @@ export async function POST(request: Request) {
     content: body.messages[body.messages.length - 1]?.content ?? '',
   });
 
-  try {
-    const result = await runAgentTurn({
-      user,
-      session,
-      pageContext: body.pageContext ?? { page: 'executive' },
-      messages: body.messages.slice(-20),
-      conversationId: conversation!.id,
-    });
+  /**
+   * The answer is streamed rather than returned whole.
+   *
+   * A question like "why did Claims lose money in March" legitimately costs five
+   * or six tool calls. Returning one JSON object at the end means half a minute
+   * of a spinner, which reads as a hung application — and it hides the part that
+   * builds trust, which is watching it look the figures up rather than recall
+   * them.
+   */
+  const encoder = new TextEncoder();
 
-    return NextResponse.json({
-      ok: true,
-      message: {
-        role: 'assistant',
-        content: result.content,
-        citations: result.citations,
-        activity: result.activity,
-        view: result.view,
-        verifyHref: result.verifyHref,
-        isRefusal: result.isRefusal,
-        pendingAction: result.pendingAction,
-      },
-    });
-  } catch (error) {
-    if (error instanceof AgentNotConfiguredError) {
-      return NextResponse.json({ ok: false, error: error.message });
-    }
-    console.error('agent turn failed', error);
-    return NextResponse.json({
-      ok: false,
-      error:
-        error instanceof Error
-          ? `The assistant could not complete that: ${error.message}`
-          : 'The assistant could not complete that.',
-    });
-  }
+  const stream = new ReadableStream<Uint8Array>({
+    async start(controller) {
+      let closed = false;
+      const send = (event: Record<string, unknown>) => {
+        if (closed) return;
+        try {
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify(event)}\n\n`));
+        } catch {
+          closed = true;
+        }
+      };
+
+      send({ type: 'conversation', conversationId: conversation!.id });
+
+      try {
+        const result = await runAgentTurn({
+          user,
+          session,
+          pageContext: body.pageContext ?? { page: 'executive' },
+          messages: body.messages.slice(-20),
+          conversationId: conversation!.id,
+          signal: request.signal,
+          onEvent: (event: AgentStreamEvent) => send(event as unknown as Record<string, unknown>),
+        });
+
+        send({
+          type: 'done',
+          message: {
+            role: 'assistant',
+            content: result.content,
+            citations: result.citations,
+            activity: result.activity,
+            view: result.view,
+            verifyHref: result.verifyHref,
+            isRefusal: result.isRefusal,
+            pendingAction: result.pendingAction,
+          },
+        });
+      } catch (error) {
+        if (request.signal.aborted) {
+          send({ type: 'aborted' });
+        } else if (error instanceof AgentNotConfiguredError) {
+          send({ type: 'error', error: error.message });
+        } else {
+          console.error('agent turn failed', error);
+          send({
+            type: 'error',
+            error:
+              error instanceof Error
+                ? `The assistant could not complete that: ${error.message}`
+                : 'The assistant could not complete that.',
+          });
+        }
+      } finally {
+        closed = true;
+        try {
+          controller.close();
+        } catch {
+          // Already closed by an aborted request.
+        }
+      }
+    },
+  });
+
+  return new Response(stream, {
+    headers: {
+      'content-type': 'text/event-stream; charset=utf-8',
+      'cache-control': 'no-cache, no-transform',
+      connection: 'keep-alive',
+      // Proxies that buffer will hold the whole stream and defeat the point.
+      'x-accel-buffering': 'no',
+    },
+  });
 }

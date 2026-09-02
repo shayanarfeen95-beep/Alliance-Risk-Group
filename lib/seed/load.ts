@@ -84,6 +84,13 @@ export const SEED_USERS = [
  */
 export const SEED_CONFIG = [
   {
+    key: 'DATA_MODE',
+    value: 'DEMONSTRATION',
+    description:
+      'Which figures the dashboards read. DEMONSTRATION shows the seeded dataset so every view can be exercised before a source is connected, and says so on every page. LIVE excludes every seeded row, so only data loaded from QuickBooks, HubSpot or Google Sheets is shown and an unloaded month reads as unavailable rather than as a figure.',
+    isConfirmed: true,
+  },
+  {
     key: 'BALANCE_SHEET_CLASSED',
     value: 'true',
     description:

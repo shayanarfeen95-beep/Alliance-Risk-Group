@@ -139,7 +139,7 @@ estimating. Check whether the figure genuinely exists for that period and
 division — an unavailable metric returns a typed reason, and the assistant will
 repeat that reason rather than guessing.
 
-**If `ANTHROPIC_API_KEY` is unset:** every dashboard, export and control still
+**If `OPENROUTER_API_KEY` is unset:** every dashboard, export and control still
 works. Only the conversational layer is unavailable, and it says so.
 
 ---
@@ -167,7 +167,7 @@ Nothing is required to run locally. In production:
 - `DATABASE_URL` — Neon connection string. Without it the app uses PGlite.
 - `AUTH_SECRET` — **required in production**; the app refuses to start without
   it. Development falls back to a fixed value.
-- `ANTHROPIC_API_KEY` — enables the assistant. Everything else works without it.
+- `OPENROUTER_API_KEY` — enables the assistant. A free key is enough; everything else works without it.
 - `QBO_*`, `HUBSPOT_*`, `GOOGLE_SHEETS_*` — connector credentials. Each connector
   reports its own configured/not-configured state in Admin, and an unconfigured
   connector refuses to pretend it pulled anything.
@@ -238,7 +238,7 @@ request may land on a different instance.
 |---|---|
 | `AUTH_SECRET` | output of `openssl rand -base64 48` |
 | `DATABASE_URL` | the Neon connection string |
-| `ANTHROPIC_API_KEY` | optional — enables the assistant; everything else works without it |
+| `OPENROUTER_API_KEY` | optional — enables the assistant; a free key is enough, and everything else works without it |
 
 Do **not** set `DEMO_MODE`. `DATABASE_URL` takes precedence over it anyway, so a
 real deployment cannot end up seeded by accident, but leaving it unset keeps the

@@ -933,6 +933,13 @@ export const oauthState = pgTable(
       .references(() => users.id, { onDelete: 'cascade' }),
     redirectTo: text('redirect_to'),
     codeVerifier: text('code_verifier'),
+    /**
+     * Set when the flow is brokered by Composio. The connection is created
+     * before the user leaves, so this is known up front — and taking it from
+     * here rather than from the callback's query string is what stops a crafted
+     * callback from binding the dashboard to another company's books.
+     */
+    composioConnectedAccountId: text('composio_connected_account_id'),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
   },

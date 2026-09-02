@@ -19,6 +19,7 @@ import {
   type SourceConnector,
 } from './types';
 import { isConnected, loadCredential } from './credentials';
+import { proxy } from './composio';
 
 const API = 'https://api.hubapi.com';
 
@@ -71,11 +72,52 @@ const ENTITIES: EntityDescriptor[] = [
   },
 ];
 
-async function token(): Promise<string> {
+interface HubspotPage {
+  results: Array<{ id: string }>;
+  paging?: { next?: { after?: string } };
+}
+
+/**
+ * One page from HubSpot, however the connection was authorised.
+ *
+ * The Composio path sends the identical request to the identical endpoint; the
+ * only difference is that the bearer token is attached on Composio's side, so
+ * no HubSpot credential exists in this process to be logged, cached or leaked.
+ */
+async function fetchPage(
+  path: string,
+  query: Record<string, string>,
+): Promise<HubspotPage> {
   const credential = await loadCredential('HUBSPOT');
-  const value = credential?.data.accessToken;
-  if (!value) throw new ConnectorNotConfiguredError('HUBSPOT');
-  return value;
+  if (!credential) throw new ConnectorNotConfiguredError('HUBSPOT');
+
+  if (credential.authMethod === 'COMPOSIO') {
+    const connectedAccountId = credential.data.connectedAccountId;
+    if (!connectedAccountId) throw new ConnectorNotConfiguredError('HUBSPOT');
+
+    const page = await proxy<HubspotPage>({
+      connectedAccountId,
+      endpoint: path,
+      method: 'GET',
+      query,
+      headers: { accept: 'application/json' },
+    });
+    return { results: page.results ?? [], paging: page.paging };
+  }
+
+  const accessToken = credential.data.accessToken;
+  if (!accessToken) throw new ConnectorNotConfiguredError('HUBSPOT');
+
+  const url = new URL(`${API}${path}`);
+  for (const [key, value] of Object.entries(query)) url.searchParams.set(key, value);
+
+  const response = await requestWithRetry(
+    url.toString(),
+    { headers: { Authorization: `Bearer ${accessToken}`, Accept: 'application/json' } },
+    'HUBSPOT',
+  );
+
+  return (await response.json()) as HubspotPage;
 }
 
 /** Walks HubSpot's cursor pagination to completion. */
@@ -88,23 +130,13 @@ async function fetchAll(
   let after: string | undefined;
 
   do {
-    const url = new URL(`${API}${path}`);
-    url.searchParams.set('limit', '100');
-    url.searchParams.set('properties', properties.join(','));
-    url.searchParams.set('archived', 'false');
-    for (const [key, value] of Object.entries(extraParams)) url.searchParams.set(key, value);
-    if (after) url.searchParams.set('after', after);
-
-    const response = await requestWithRetry(
-      url.toString(),
-      { headers: { Authorization: `Bearer ${(await token())}`, Accept: 'application/json' } },
-      'HUBSPOT',
-    );
-
-    const json = (await response.json()) as {
-      results: Array<{ id: string }>;
-      paging?: { next?: { after?: string } };
-    };
+    const json = await fetchPage(path, {
+      limit: '100',
+      properties: properties.join(','),
+      archived: 'false',
+      ...extraParams,
+      ...(after ? { after } : {}),
+    });
 
     for (const result of json.results) {
       records.push({ entity: path, key: result.id, payload: result });

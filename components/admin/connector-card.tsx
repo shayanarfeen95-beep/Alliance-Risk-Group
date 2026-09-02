@@ -32,6 +32,10 @@ export interface ConnectorCardProps {
   };
   oauthAvailable: boolean;
   oauthBlockedReason: string | null;
+  connectVia: 'composio' | 'oauth' | null;
+  signInLabel: string;
+  supportsManual: boolean;
+  needsSpreadsheet: boolean;
   canManage: boolean;
 }
 
@@ -43,7 +47,7 @@ export function ConnectorCard(props: ConnectorCardProps) {
   const [fields, setFields] = useState<Record<string, string>>({});
 
   const { credential: c, sourceSystem } = props;
-  const supportsManual = sourceSystem === 'HUBSPOT' || sourceSystem === 'SHEETS';
+  const supportsManual = props.supportsManual;
 
   async function submitManual() {
     setBusy(true);
@@ -98,7 +102,11 @@ export function ConnectorCard(props: ConnectorCardProps) {
             </p>
           )}
         </div>
-        <StatusChip connected={c.connected} hasError={Boolean(c.lastError)} />
+        <StatusChip
+          connected={c.connected}
+          hasError={Boolean(c.lastError)}
+          incomplete={props.needsSpreadsheet}
+        />
       </div>
 
       <ul className="mt-3 space-y-1">
@@ -139,6 +147,32 @@ export function ConnectorCard(props: ConnectorCardProps) {
 
       {error && (
         <p className="mt-3 text-[11px] leading-relaxed text-[var(--status-critical)]">{error}</p>
+      )}
+
+      {props.needsSpreadsheet && (
+        <div className="mt-3 space-y-2">
+          <p className="text-[11px] leading-relaxed text-[var(--text-secondary)]">
+            Signed in. Google grants access to an account rather than to a document, so name the
+            spreadsheet that holds the budget — paste its link from the address bar.
+          </p>
+          <Field
+            label="Spreadsheet link"
+            placeholder="https://docs.google.com/spreadsheets/d/…"
+            reveal
+            value={fields.spreadsheetId ?? ''}
+            onChange={(v) => setFields((f) => ({ ...f, spreadsheetId: v }))}
+          />
+          <button
+            type="button"
+            onClick={submitManual}
+            disabled={busy || !fields.spreadsheetId?.trim()}
+            className="flex items-center gap-1.5 rounded-[5px] px-3 py-1.5 text-[11.5px] font-medium disabled:opacity-40"
+            style={{ background: 'var(--text-primary)', color: 'var(--text-inverse)' }}
+          >
+            {busy && <Loader2 size={12} className="animate-spin" aria-hidden />}
+            {busy ? 'Checking the sheet…' : 'Use this spreadsheet'}
+          </button>
+        </div>
       )}
 
       {showManual && (
@@ -217,11 +251,14 @@ export function ConnectorCard(props: ConnectorCardProps) {
               {props.oauthAvailable && (
                 <a
                   href={`/api/connect/${sourceSystem.toLowerCase()}/start`}
-                  className="flex items-center gap-1.5 rounded-[5px] border px-2.5 py-1 text-[11px] font-medium transition-colors hover:bg-[var(--surface-2)]"
-                  style={{ borderColor: 'var(--border)' }}
+                  className="flex items-center gap-1.5 rounded-[5px] px-3 py-1.5 text-[11.5px] font-medium transition-opacity hover:opacity-90"
+                  style={{
+                    background: 'var(--text-primary)',
+                    color: 'var(--text-inverse)',
+                  }}
                 >
                   <Link2 size={12} aria-hidden />
-                  Connect {props.label}
+                  {props.signInLabel}
                 </a>
               )}
               {supportsManual && (
@@ -245,13 +282,15 @@ export function ConnectorCard(props: ConnectorCardProps) {
 
 function describeAuth(method: string | null, origin: string | null): string {
   const how =
-    method === 'OAUTH'
-      ? 'OAuth'
-      : method === 'TOKEN'
-        ? 'private-app token'
-        : method === 'SERVICE_ACCOUNT'
-          ? 'service account'
-          : 'unknown';
+    method === 'COMPOSIO'
+      ? 'sign-in via Composio'
+      : method === 'OAUTH'
+        ? 'OAuth'
+        : method === 'TOKEN'
+          ? 'private-app token'
+          : method === 'SERVICE_ACCOUNT'
+            ? 'service account'
+            : 'unknown';
   return origin === 'environment' ? `${how} (from environment)` : how;
 }
 
@@ -264,11 +303,21 @@ function Row({ label, value, mono }: { label: string; value: string; mono?: bool
   );
 }
 
-function StatusChip({ connected, hasError }: { connected: boolean; hasError: boolean }) {
+function StatusChip({
+  connected,
+  hasError,
+  incomplete,
+}: {
+  connected: boolean;
+  hasError: boolean;
+  incomplete: boolean;
+}) {
   const [Icon, text, color] = connected
     ? hasError
       ? [TriangleAlert, 'Needs attention', 'var(--status-warning)']
-      : [CircleCheck, 'Connected', 'var(--status-good)']
+      : incomplete
+        ? [TriangleAlert, 'Signed in', 'var(--status-warning)']
+        : [CircleCheck, 'Connected', 'var(--status-good)']
     : [Plug, 'Not connected', 'var(--text-muted)'];
 
   return (
@@ -288,12 +337,15 @@ function Field({
   onChange,
   placeholder,
   multiline,
+  reveal,
 }: {
   label: string;
   value: string;
   onChange: (v: string) => void;
   placeholder?: string;
   multiline?: boolean;
+  /** A document link is not a credential; masking it only hides typos. */
+  reveal?: boolean;
 }) {
   const shared = {
     value,
@@ -307,7 +359,11 @@ function Field({
   return (
     <label className="block">
       <span className="mb-1 block text-[11px] text-[var(--text-secondary)]">{label}</span>
-      {multiline ? <textarea rows={4} {...shared} /> : <input type="password" {...shared} />}
+      {multiline ? (
+        <textarea rows={4} {...shared} />
+      ) : (
+        <input type={reveal ? 'text' : 'password'} {...shared} />
+      )}
     </label>
   );
 }

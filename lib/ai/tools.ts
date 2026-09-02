@@ -232,40 +232,127 @@ const comparePeriods: ToolDefinition = {
 
     if (against === 'budget' || against === 'tenx') {
       const scenario = against === 'tenx' ? 'TENX' : 'MONTHLY_BUDGET';
-      const lineItem = ['revenue', 'cogs', 'opex'].includes(metric) ? metric : 'revenue';
-      const attainment = resolveKpi(session, 'budget_attainment', division, {
-        month,
-        options: { scenario, lineItem },
-      });
-      if (attainment.unavailable) {
+
+      /**
+       * Which budget lines this metric is made of.
+       *
+       * The budget carries three lines — revenue, COGS and OpEx. Gross and net
+       * profit are derived from them by the same identity the rest of the system
+       * uses, never imported, so a budgeted gross profit always equals budgeted
+       * revenue minus budgeted COGS.
+       *
+       * Anything not on this list has no budget, and that is the whole answer.
+       * This previously fell back to comparing REVENUE while labelling the
+       * result with the requested metric's name. Asking for LITS gross profit
+       * against budget in March 2026 returned revenue of $203,363 against the
+       * revenue plan of $124,620 — titled "Gross Profit", at 163% attainment.
+       * The real figures are gross profit of $123,919 against a gross-profit
+       * plan of $44,425. Both the actual and the plan were the wrong line, and
+       * nothing in the response said so. A wrong figure under a confident label
+       * is the exact failure this system exists to prevent, and a silent
+       * substitution is how it got there.
+       */
+      const COMPOSITION: Record<string, Array<{ lineItem: 'revenue' | 'cogs' | 'opex'; sign: 1 | -1 }>> = {
+        revenue: [{ lineItem: 'revenue', sign: 1 }],
+        cogs: [{ lineItem: 'cogs', sign: 1 }],
+        opex: [{ lineItem: 'opex', sign: 1 }],
+        gross_profit: [
+          { lineItem: 'revenue', sign: 1 },
+          { lineItem: 'cogs', sign: -1 },
+        ],
+        net_profit: [
+          { lineItem: 'revenue', sign: 1 },
+          { lineItem: 'cogs', sign: -1 },
+          { lineItem: 'opex', sign: -1 },
+        ],
+      };
+
+      const composition = COMPOSITION[metric];
+      if (!composition) {
         return {
           result: {
             available: false,
-            reason: attainment.unavailable.reason,
-            explanation: attainment.unavailable.detail,
+            reason: 'NO_BUDGET_FOR_METRIC',
+            explanation:
+              `The budget carries revenue, COGS and OpEx. ${definition.name} is not budgeted and ` +
+              `cannot be derived from those three, so there is no plan figure to compare against. ` +
+              `Tell the user that plainly. Comparing ${definition.name} to a different line's ` +
+              `budget would be a wrong number under a confident label.`,
+            budgetedMetrics: Object.keys(COMPOSITION),
           },
         };
       }
-      const actual = attainment.components?.actual?.toNumber() ?? null;
-      const budget = attainment.components?.budget?.toNumber() ?? null;
-      const variance = attainment.components?.varianceDollars?.toNumber() ?? null;
-      const favourable =
-        variance === null ? null : definition.higherIsBetter ? variance > 0 : variance < 0;
+
+      let actualTotal: number | null = 0;
+      let budgetTotal: number | null = 0;
+
+      for (const part of composition) {
+        const attainment = resolveKpi(session, 'budget_attainment', division, {
+          month,
+          options: { scenario, lineItem: part.lineItem },
+        });
+        if (attainment.unavailable) {
+          return {
+            result: {
+              available: false,
+              reason: attainment.unavailable.reason,
+              explanation: attainment.unavailable.detail,
+            },
+          };
+        }
+        const partActual = attainment.components?.actual?.toNumber();
+        const partBudget = attainment.components?.budget?.toNumber();
+        if (partActual === undefined || partBudget === undefined) {
+          actualTotal = null;
+          budgetTotal = null;
+          break;
+        }
+        actualTotal = (actualTotal ?? 0) + part.sign * partActual;
+        budgetTotal = (budgetTotal ?? 0) + part.sign * partBudget;
+      }
+
+      if (actualTotal === null || budgetTotal === null) {
+        return {
+          result: {
+            available: false,
+            reason: 'NO_DATA',
+            explanation: `The ${scenario} figures for ${definition.name} could not be resolved.`,
+          },
+        };
+      }
+
+      const actual = actualTotal;
+      const budget = budgetTotal;
+      const variance = actual - budget;
+      const favourable = variance === 0 ? null : definition.higherIsBetter ? variance > 0 : variance < 0;
 
       return {
         result: {
           metric: definition.name,
           division,
           period: formatMonth(month),
+          // Named so they cannot be mistaken for one another. These are the
+          // figures for THIS metric, not for any line it was derived from.
+          actualLabel: `${definition.name} actual`,
           actual,
+          planLabel: `${definition.name} plan`,
           plan: budget,
-          attainmentPercent: attainment.value!.toNumber(),
+          attainmentPercent: budget === 0 ? null : actual / budget,
           varianceDollars: variance,
+          derivedFrom:
+            composition.length > 1
+              ? composition
+                  .map((part) => `${part.sign === 1 ? '+' : '−'}${part.lineItem}`)
+                  .join(' ')
+              : undefined,
           assessment:
-            favourable === null ? 'unknown' : favourable ? 'favourable' : 'unfavourable',
+            favourable === null ? 'unchanged' : favourable ? 'favourable' : 'unfavourable',
           directionNote: definition.higherIsBetter
             ? 'Higher is better for this line, so above plan is favourable.'
             : 'Lower is better for this line — above plan means overspending, which is unfavourable.',
+          instruction:
+            'Quote actual and plan as the figures for this metric. They are not revenue unless ' +
+            'the metric is revenue.',
         },
         activity: `Compared ${definition.name} against ${scenario}`,
       };
@@ -661,6 +748,123 @@ const getLoadHistory: ToolDefinition = {
   },
 };
 
+
+/**
+ * Where the figures on screen actually came from.
+ *
+ * The question this answers — "am I looking at ARG's books or at seeded data?" —
+ * is the one a reader most needs answered and the one an application is most
+ * likely to leave ambiguous. Every fact table carries its source system, so the
+ * answer is read from the rows themselves rather than inferred from whether a
+ * connector happens to hold a credential.
+ */
+const getDataProvenance: ToolDefinition = {
+  name: 'get_data_provenance',
+  description:
+    'Report where the figures currently in the warehouse came from: which source system wrote each fact table, when, and whether any of it is still seeded demonstration data rather than the live books. Call this whenever the user asks whether the numbers are real, live, seeded or up to date.',
+  input_schema: { type: 'object', properties: {} },
+  async run(_input, context) {
+    const [plSources, dealCount, budgetSources, lastLoads, connectors] = await Promise.all([
+      context.db
+        .select({
+          sourceSystem: t.factPlActual.sourceSystem,
+          months: sql<number>`count(distinct ${t.factPlActual.periodMonth})::int`,
+          earliest: sql<string>`min(${t.factPlActual.periodMonth})::text`,
+          latest: sql<string>`max(${t.factPlActual.periodMonth})::text`,
+        })
+        .from(t.factPlActual)
+        .groupBy(t.factPlActual.sourceSystem),
+      context.db.select({ count: sql<number>`count(*)::int` }).from(t.factDeal),
+      context.db
+        .select({
+          sourceSystem: t.factBudget.sourceSystem,
+          rows: sql<number>`count(*)::int`,
+        })
+        .from(t.factBudget)
+        .groupBy(t.factBudget.sourceSystem),
+      context.db
+        .select()
+        .from(t.loadRun)
+        .where(eq(t.loadRun.status, 'SUCCEEDED'))
+        .orderBy(desc(t.loadRun.finishedAt))
+        .limit(5),
+      connectorStatuses(),
+    ]);
+
+    const seeded = plSources.filter((row) => row.sourceSystem === 'SEED');
+    const live = plSources.filter((row) => row.sourceSystem !== 'SEED');
+
+    return {
+      result: {
+        profitAndLoss: plSources.map((row) => ({
+          sourceSystem: row.sourceSystem,
+          months: row.months,
+          window: `${row.earliest?.slice(0, 7)} → ${row.latest?.slice(0, 7)}`,
+        })),
+        budgetRows: budgetSources,
+        dealCount: dealCount[0]?.count ?? 0,
+        sourcesConnected: connectors.map((connector) => ({
+          source: connector.sourceSystem,
+          connected: connector.isConfigured,
+          account: connector.credential.accountLabel,
+        })),
+        recentLoads: lastLoads.map((run) => ({
+          source: run.sourceSystem,
+          entity: run.entity,
+          rowsWritten: run.rowsWritten,
+          finishedAt: run.finishedAt?.toISOString() ?? null,
+        })),
+        verdict: live.length === 0
+          ? 'Every profit-and-loss row in the warehouse is seeded demonstration data. No month has been loaded from a source system.'
+          : seeded.length === 0
+            ? 'Every profit-and-loss row was loaded from a source system. Nothing seeded remains.'
+            : 'The warehouse holds a mix: some months are seeded and some were loaded from a source system. Name which are which from the windows above.',
+        instruction:
+          'Answer this plainly and without softening it. A reader who believes seeded figures are their own books will act on them.',
+      },
+      activity: 'Checked where the figures in the warehouse came from',
+    };
+  },
+};
+
+/**
+ * The connection state, and what to do about it.
+ *
+ * Distinct from list_sources, which describes what each source can supply. This
+ * one answers "why can I not see my own numbers yet", which is a different
+ * question and the one people actually ask.
+ */
+const getConnectionStatus: ToolDefinition = {
+  name: 'get_connection_status',
+  description:
+    'Report whether each source system is signed in, which account it is signed in to, and what remains to be done before it can supply data. Call this when the user asks about connecting QuickBooks, HubSpot or Google Sheets, or reports that a connection is not working.',
+  input_schema: { type: 'object', properties: {} },
+  async run() {
+    const connectors = await connectorStatuses();
+
+    return {
+      result: {
+        sources: connectors.map((connector) => ({
+          source: connector.sourceSystem,
+          label: connector.label,
+          connected: connector.isConfigured,
+          account: connector.credential.accountLabel,
+          signInAvailable: connector.oauthAvailable,
+          signInLabel: connector.signInLabel,
+          howToConnect: connector.oauthAvailable
+            ? `Open Admin and choose "${connector.signInLabel}". Nothing else is needed — no token, no key file.`
+            : connector.oauthBlockedReason,
+          needsSpreadsheet: connector.needsSpreadsheet,
+          lastError: connector.credential.lastError,
+        })),
+        instruction:
+          'Tell the user exactly which step is outstanding. Do not describe a source as connected unless connected is true.',
+      },
+      activity: 'Checked the state of every source connection',
+    };
+  },
+};
+
 // ---------------------------------------------------------------------------
 
 export const AGENT_TOOLS: ToolDefinition[] = [
@@ -673,6 +877,8 @@ export const AGENT_TOOLS: ToolDefinition[] = [
   getReconStatus,
   makeChart,
   listSources,
+  getConnectionStatus,
+  getDataProvenance,
   planExtraction,
   getLoadHistory,
 ];
@@ -719,7 +925,7 @@ export async function confirmExtraction(
       .where(eq(t.loadRun.id, loadRunId));
     return {
       ok: false,
-      message: `${connector.label} is not connected. Add its credentials in Admin, then run this again — nothing was written.`,
+      message: `${connector.label} is not connected. Sign in to it in Admin, then run this again — nothing was written.`,
     };
   }
 
@@ -728,60 +934,31 @@ export async function confirmExtraction(
     .set({ status: 'RUNNING', confirmedAt: new Date() })
     .where(eq(t.loadRun.id, loadRunId));
 
-  try {
-    const batch = await connector.fetch(run.entity, {
-      start: run.windowStart!,
-      end: run.windowEnd!,
-    });
+  // The work itself lives in lib/etl/ingest.ts, shared with the Sync button in
+  // Admin. A load started from a conversation and one started from a button must
+  // produce the same run, the same provenance and the same reconciliation.
+  const { executeLoadRun } = await import('@/lib/etl/ingest');
+  const outcome = await executeLoadRun(db, user, run, 'AGENT_EXTRACTION_CONFIRMED');
 
-    // Raw landing first, so conform can be re-run without re-hitting the API.
-    for (let i = 0; i < batch.records.length; i += 200) {
-      await db.insert(t.rawPayload).values(
-        batch.records.slice(i, i + 200).map((record) => ({
-          loadRunId,
-          sourceSystem: batch.sourceSystem,
-          entity: record.entity,
-          payload: record.payload as object,
-        })),
-      );
-    }
-
-    await db
-      .update(t.loadRun)
-      .set({
-        status: 'SUCCEEDED',
-        rowsRead: batch.records.length,
-        finishedAt: new Date(),
-      })
-      .where(eq(t.loadRun.id, loadRunId));
-
-    await db.insert(t.auditEvent).values({
-      userId: user.id,
-      action: 'AGENT_EXTRACTION_CONFIRMED',
-      entity: 'load_run',
-      entityId: loadRunId,
-      detail: { source: run.sourceSystem, entity: run.entity, records: batch.records.length },
-    });
-
-    return {
-      ok: true,
-      message: `Pulled ${batch.records.length} record${batch.records.length === 1 ? '' : 's'} from ${connector.label} and landed them for conforming. Reconciliation runs next.`,
-    };
-  } catch (error) {
-    await db
-      .update(t.loadRun)
-      .set({
-        status: 'FAILED',
-        errorMessage: error instanceof Error ? error.message : String(error),
-        finishedAt: new Date(),
-      })
-      .where(eq(t.loadRun.id, loadRunId));
-
+  if (!outcome.ok) {
+    // An unmapped class or account is not a bug to be worked around — it is a
+    // question for Westport, and the message names exactly what to answer.
     return {
       ok: false,
-      message: `The pull failed and nothing was written: ${error instanceof Error ? error.message : 'unknown error'}`,
+      message: `The pull did not complete and the warehouse is unchanged: ${outcome.error}`,
     };
   }
+
+  const summary =
+    `Pulled ${outcome.recordsRead} record${outcome.recordsRead === 1 ? '' : 's'} from ` +
+    `${connector.label} and wrote ${outcome.rowsWritten.toLocaleString()} row` +
+    `${outcome.rowsWritten === 1 ? '' : 's'} into the warehouse. The dashboards now read ` +
+    `${connector.label} for this window.`;
+
+  return {
+    ok: true,
+    message: outcome.notes.length ? `${summary}\n\n${outcome.notes.join('\n')}` : summary,
+  };
 }
 
 export { sumPl };
