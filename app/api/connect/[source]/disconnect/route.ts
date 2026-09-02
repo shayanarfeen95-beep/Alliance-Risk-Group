@@ -3,7 +3,8 @@ import { getSessionUser } from '@/lib/auth/session';
 import { can } from '@/lib/auth/scope';
 import { getDb } from '@/lib/db/client';
 import * as t from '@/lib/db/schema';
-import { deleteCredential } from '@/lib/connectors/credentials';
+import { deleteCredential, loadCredential } from '@/lib/connectors/credentials';
+import { deleteConnectedAccount } from '@/lib/connectors/composio';
 import type { SourceSystemCode } from '@/lib/connectors/types';
 
 export const dynamic = 'force-dynamic';
@@ -34,6 +35,21 @@ export async function POST(request: Request, context: { params: Promise<{ source
   }
 
   const db = await getDb();
+
+  // Revoke at Composio too, so disconnecting here actually ends the grant rather
+  // than leaving an authorised connection nobody is watching. A failure to
+  // revoke must not block the local disconnect — the user asked for this source
+  // to stop, and it stops either way.
+  const existing = await loadCredential(sourceSystem, db);
+  let revocationNote: string | null = null;
+  if (existing?.authMethod === 'COMPOSIO' && existing.data.connectedAccountId) {
+    try {
+      await deleteConnectedAccount(existing.data.connectedAccountId);
+    } catch (error) {
+      revocationNote = error instanceof Error ? error.message : 'unknown error';
+    }
+  }
+
   await deleteCredential(sourceSystem, db);
 
   await db.insert(t.auditEvent).values({
@@ -41,8 +57,20 @@ export async function POST(request: Request, context: { params: Promise<{ source
     action: 'SOURCE_DISCONNECTED',
     entity: 'connector_credential',
     entityId: sourceSystem,
-    detail: { note: 'Credential removed. Previously loaded figures were left untouched.' },
+    detail: {
+      note: 'Credential removed. Previously loaded figures were left untouched.',
+      ...(revocationNote ? { composioRevocationFailed: revocationNote } : {}),
+    },
   });
 
-  return NextResponse.json({ ok: true });
+  return NextResponse.json({
+    ok: true,
+    ...(revocationNote
+      ? {
+          warning:
+            'Disconnected here, but Composio did not confirm the grant was revoked: ' +
+            `${revocationNote}. Revoke it in the Composio dashboard to be certain.`,
+        }
+      : {}),
+  });
 }

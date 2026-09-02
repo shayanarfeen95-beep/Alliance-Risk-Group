@@ -10,6 +10,13 @@ import {
   getProvider,
 } from '@/lib/connectors/oauth';
 import { saveCredential } from '@/lib/connectors/credentials';
+import {
+  COMPOSIO_TOOLKITS,
+  describeConnection,
+  isActive,
+  isComposioSource,
+  waitForActive,
+} from '@/lib/connectors/composio';
 import type { SourceSystemCode } from '@/lib/connectors/types';
 
 export const dynamic = 'force-dynamic';
@@ -40,12 +47,11 @@ export async function GET(request: Request, context: { params: Promise<{ source:
     );
   }
 
+  // Composio's callback carries no authorisation code — it has already done the
+  // exchange — so only the state is required at this point.
   const code = query.get('code');
   const state = query.get('state');
-  if (!code || !state) return fail(request, 'The callback was missing its code or state.');
-
-  const provider = getProvider(sourceSystem);
-  if (!provider) return fail(request, `${sourceSystem} does not use OAuth.`);
+  if (!state) return fail(request, 'The callback was missing its state.');
 
   const db = await getDb();
 
@@ -73,6 +79,95 @@ export async function GET(request: Request, context: { params: Promise<{ source:
   if (pending.userId !== user.id) {
     return fail(request, 'That connection was started by a different user. Start it again.');
   }
+
+  // --- Composio -----------------------------------------------------------
+  //
+  // The connected-account id comes off the pending state row, never off the
+  // query string. Composio does put one there, but trusting it would mean a
+  // crafted callback could bind ARG's dashboard to a connection the attacker
+  // owns — and the result would look exactly like a working connection.
+  if (pending.composioConnectedAccountId) {
+    if (!isComposioSource(sourceSystem)) {
+      return fail(request, `${sourceSystem} does not sign in through Composio.`);
+    }
+
+    const status = query.get('status');
+    if (status && status.toLowerCase() !== 'success') {
+      return fail(
+        request,
+        `${COMPOSIO_TOOLKITS[sourceSystem].label} did not complete the sign-in (${status}). Nothing was saved.`,
+      );
+    }
+
+    let account;
+    try {
+      account = await waitForActive(pending.composioConnectedAccountId);
+    } catch (error) {
+      return fail(
+        request,
+        `The connection could not be verified with Composio: ${error instanceof Error ? error.message : 'unknown error'}`,
+      );
+    }
+
+    if (!isActive(account)) {
+      return fail(
+        request,
+        `${COMPOSIO_TOOLKITS[sourceSystem].label} reported the connection as ${account.status.toLowerCase()} ` +
+          'rather than active, so nothing was saved. Try signing in again.',
+      );
+    }
+
+    const identity = await describeConnection(sourceSystem, account);
+
+    if (sourceSystem === 'QBO' && !identity.accountId) {
+      return fail(
+        request,
+        'QuickBooks authorised, but the company id could not be established, so there is no way ' +
+          'to tell which books this connection opens. Nothing was saved.',
+      );
+    }
+
+    await saveCredential(
+      {
+        sourceSystem,
+        authMethod: 'COMPOSIO',
+        // Nothing here is a secret. The token stays with Composio; this is the
+        // handle that lets us ask Composio to use it.
+        data: {
+          connectedAccountId: account.id,
+          toolkit: account.toolkitSlug ?? COMPOSIO_TOOLKITS[sourceSystem].slug,
+          ...(identity.accountId ? { realmId: identity.accountId } : {}),
+        },
+        isReference: true,
+        accountLabel: identity.accountLabel,
+        accountId: identity.accountId,
+        scopes: 'read-only, managed by Composio',
+        connectedByUserId: user.id,
+      },
+      db,
+    );
+
+    await db.insert(t.auditEvent).values({
+      userId: user.id,
+      action: 'SOURCE_CONNECTED',
+      entity: 'connector_credential',
+      entityId: sourceSystem,
+      detail: {
+        authMethod: 'COMPOSIO',
+        connectedAccountId: account.id,
+        account: identity.accountLabel,
+      },
+    });
+
+    const done = new URL(pending.redirectTo ?? '/admin', request.url);
+    done.searchParams.set('connected', COMPOSIO_TOOLKITS[sourceSystem].label);
+    return NextResponse.redirect(done);
+  }
+
+  // --- Direct OAuth -------------------------------------------------------
+  const provider = getProvider(sourceSystem);
+  if (!provider) return fail(request, `${sourceSystem} does not use OAuth.`);
+  if (!code) return fail(request, 'The callback was missing its authorisation code.');
 
   let tokens;
   try {

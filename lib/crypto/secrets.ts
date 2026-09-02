@@ -94,3 +94,36 @@ export function decryptSecret(encoded: string): string {
 export function fingerprint(value: string): string {
   return createHash('sha256').update(value).digest('hex').slice(0, 8);
 }
+
+// ---------------------------------------------------------------------------
+// Non-secret references
+// ---------------------------------------------------------------------------
+
+/**
+ * Not everything in the credential store is a secret.
+ *
+ * A Composio connection is an identifier — `ca_…` — that opens nothing on its
+ * own; the token it refers to never leaves Composio. Encrypting it would be
+ * theatre, and worse, it would make CREDENTIAL_KEY a prerequisite for connecting
+ * a source that has no secret to protect. That is precisely the kind of
+ * requirement that ends with somebody being asked for a private key they should
+ * never have needed.
+ *
+ * References are stored under their own `ref1.` prefix rather than sharing the
+ * encrypted `v1.` format, so the two can never be confused: a secret cannot be
+ * written as a reference by accident, and a reference is not mistaken for a
+ * credential that failed to decrypt.
+ */
+const REFERENCE_PREFIX = 'ref1.';
+
+export function encodeReference(plaintext: string): string {
+  return REFERENCE_PREFIX + Buffer.from(plaintext, 'utf8').toString('base64url');
+}
+
+export function isReference(encoded: string): boolean {
+  return encoded.startsWith(REFERENCE_PREFIX);
+}
+
+export function decodeReference(encoded: string): string {
+  return Buffer.from(encoded.slice(REFERENCE_PREFIX.length), 'base64url').toString('utf8');
+}

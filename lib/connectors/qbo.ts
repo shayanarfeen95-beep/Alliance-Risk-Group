@@ -20,6 +20,7 @@ import {
   type SourceConnector,
 } from './types';
 import { isConnected, loadCredential, saveCredential } from './credentials';
+import { proxy } from './composio';
 
 const TOKEN_URL = 'https://oauth.platform.intuit.com/oauth2/v1/tokens/bearer';
 
@@ -137,10 +138,31 @@ async function accessToken(): Promise<string> {
   return json.access_token;
 }
 
+/**
+ * One call to QuickBooks, however the connection was authorised.
+ *
+ * Both paths hit the same Intuit endpoints with the same parameters, so the
+ * report shapes downstream are identical and there is no second, weaker
+ * ingestion route to keep in step. What differs is only who holds the token:
+ * Composio injects it server-side, and this process never sees it.
+ */
 async function callApi(path: string, params: Record<string, string>): Promise<unknown> {
   const credential = await loadCredential('QBO');
   const realmId = credential?.data.realmId;
-  if (!realmId) throw new ConnectorNotConfiguredError('QBO');
+  if (!credential || !realmId) throw new ConnectorNotConfiguredError('QBO');
+
+  if (credential.authMethod === 'COMPOSIO') {
+    const connectedAccountId = credential.data.connectedAccountId;
+    if (!connectedAccountId) throw new ConnectorNotConfiguredError('QBO');
+
+    return proxy<unknown>({
+      connectedAccountId,
+      endpoint: `/v3/company/${realmId}/${path}`,
+      method: 'GET',
+      query: params,
+      headers: { accept: 'application/json' },
+    });
+  }
 
   const url = new URL(`${baseUrl()}/v3/company/${realmId}/${path}`);
   for (const [key, value] of Object.entries(params)) url.searchParams.set(key, value);

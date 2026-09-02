@@ -18,6 +18,7 @@ import {
   type SourceConnector,
 } from './types';
 import { isConnected, loadCredential } from './credentials';
+import { proxy } from './composio';
 
 const TOKEN_URL = 'https://oauth2.googleapis.com/token';
 const SCOPE = 'https://www.googleapis.com/auth/spreadsheets.readonly';
@@ -96,10 +97,35 @@ const RANGES: Record<string, string> = {
   headcount: process.env.SHEETS_RANGE_HEADCOUNT ?? 'Headcount!A1:Z200',
 };
 
+/**
+ * One range, however the connection was authorised.
+ *
+ * Signing in with Google replaces the service-account key file entirely: the
+ * person who owns the spreadsheet authorises it as themselves, and there is no
+ * separate step where a robot's email address has to be added as a viewer —
+ * which is the step everybody forgets and which fails silently at 3am.
+ */
 export async function readRange(spreadsheetId: string, range: string): Promise<string[][]> {
-  const url = new URL(
-    `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${encodeURIComponent(range)}`,
-  );
+  const credential = await loadCredential('SHEETS');
+  if (!credential) throw new ConnectorNotConfiguredError('SHEETS');
+
+  const path = `/v4/spreadsheets/${spreadsheetId}/values/${encodeURIComponent(range)}`;
+
+  if (credential.authMethod === 'COMPOSIO') {
+    const connectedAccountId = credential.data.connectedAccountId;
+    if (!connectedAccountId) throw new ConnectorNotConfiguredError('SHEETS');
+
+    const json = await proxy<{ values?: string[][] }>({
+      connectedAccountId,
+      endpoint: path,
+      method: 'GET',
+      query: { valueRenderOption: 'UNFORMATTED_VALUE' },
+      headers: { accept: 'application/json' },
+    });
+    return json.values ?? [];
+  }
+
+  const url = new URL(`https://sheets.googleapis.com${path}`);
   url.searchParams.set('valueRenderOption', 'UNFORMATTED_VALUE');
 
   const response = await requestWithRetry(
@@ -117,7 +143,17 @@ export const sheetsConnector: SourceConnector = {
 
   entities: () => ENTITIES,
 
-  isConfigured: () => isConnected('SHEETS'),
+  /**
+   * Signing in is not enough for Sheets: Google grants access to an account, not
+   * to a document. Until a spreadsheet has been named the source reports as not
+   * connected, because a connector that says "connected" and then has nothing to
+   * read is the failure this codebase keeps refusing to ship.
+   */
+  async isConfigured(): Promise<boolean> {
+    if (!(await isConnected('SHEETS'))) return false;
+    const credential = await loadCredential('SHEETS');
+    return Boolean(credential?.data.spreadsheetId);
+  },
 
   async fetch(entity: string, window: FetchWindow): Promise<RawBatch> {
     if (!(await sheetsConnector.isConfigured())) throw new ConnectorNotConfiguredError('SHEETS');

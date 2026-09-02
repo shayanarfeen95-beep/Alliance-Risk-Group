@@ -70,6 +70,7 @@ export default async function AdminPage({
   }));
 
   const connectors = await connectorStatuses();
+  const composioReady = connectors.some((connector) => connector.connectVia === 'composio');
 
   // The pack is anchored on the configured reporting month rather than today's
   // date: exporting an unclosed month by accident is the sort of thing that
@@ -119,6 +120,16 @@ export default async function AdminPage({
           Source connections
         </SectionTitle>
 
+        {/* One sentence on how connecting works, so the buttons below do not have
+            to be interpreted. Which sentence depends on what is actually
+            configured — a promise of one-click sign-in that then asks for a
+            client id is worse than no promise. */}
+        <p className="mb-3 max-w-2xl text-[11.5px] leading-relaxed text-[var(--text-muted)]">
+          {composioReady
+            ? 'Sign in with the account that owns the data. No developer app, private-app token or service-account key file — Composio holds the authorisation, and this system never receives a credential.'
+            : 'Set COMPOSIO_API_KEY in the environment to sign in to all three sources with one click. Without it, each source needs its own developer app or pasted credential.'}
+        </p>
+
         {/* The result of a connect attempt arrives as a query parameter, because
             the OAuth callback is a redirect and has nowhere else to put it. */}
         {connectError && (
@@ -153,6 +164,10 @@ export default async function AdminPage({
               credential={connector.credential}
               oauthAvailable={connector.oauthAvailable}
               oauthBlockedReason={connector.oauthBlockedReason}
+              connectVia={connector.connectVia}
+              signInLabel={connector.signInLabel}
+              supportsManual={connector.supportsManual}
+              needsSpreadsheet={connector.needsSpreadsheet}
               canManage={can(user, 'EDIT_MAPPINGS')}
             />
           ))}

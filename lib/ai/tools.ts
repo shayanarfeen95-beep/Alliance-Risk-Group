@@ -746,11 +746,18 @@ export async function confirmExtraction(
       );
     }
 
+    // Then conform, in the same run. Landing raw data and stopping was the gap
+    // that let a connected source and a seeded dashboard coexist without anything
+    // saying they were unrelated.
+    const { conformBatch } = await import('@/lib/etl/conform');
+    const conformed = await conformBatch(db, loadRunId, batch);
+
     await db
       .update(t.loadRun)
       .set({
         status: 'SUCCEEDED',
         rowsRead: batch.records.length,
+        rowsWritten: conformed.rowsWritten,
         finishedAt: new Date(),
       })
       .where(eq(t.loadRun.id, loadRunId));
@@ -760,12 +767,24 @@ export async function confirmExtraction(
       action: 'AGENT_EXTRACTION_CONFIRMED',
       entity: 'load_run',
       entityId: loadRunId,
-      detail: { source: run.sourceSystem, entity: run.entity, records: batch.records.length },
+      detail: {
+        source: run.sourceSystem,
+        entity: run.entity,
+        records: batch.records.length,
+        rowsWritten: conformed.rowsWritten,
+        notes: conformed.notes,
+      },
     });
+
+    const summary =
+      `Pulled ${batch.records.length} record${batch.records.length === 1 ? '' : 's'} from ` +
+      `${connector.label} and wrote ${conformed.rowsWritten.toLocaleString()} row` +
+      `${conformed.rowsWritten === 1 ? '' : 's'} into the warehouse. The dashboards now read ` +
+      `${connector.label} for this window.`;
 
     return {
       ok: true,
-      message: `Pulled ${batch.records.length} record${batch.records.length === 1 ? '' : 's'} from ${connector.label} and landed them for conforming. Reconciliation runs next.`,
+      message: conformed.notes.length ? `${summary}\n\n${conformed.notes.join('\n')}` : summary,
     };
   } catch (error) {
     await db
@@ -777,9 +796,11 @@ export async function confirmExtraction(
       })
       .where(eq(t.loadRun.id, loadRunId));
 
+    // An unmapped class or account is not a bug to be worked around — it is a
+    // question for Westport, and the message names exactly what to answer.
     return {
       ok: false,
-      message: `The pull failed and nothing was written: ${error instanceof Error ? error.message : 'unknown error'}`,
+      message: `The pull did not complete and the warehouse is unchanged: ${error instanceof Error ? error.message : 'unknown error'}`,
     };
   }
 }

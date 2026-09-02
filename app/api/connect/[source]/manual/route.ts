@@ -3,7 +3,8 @@ import { getSessionUser } from '@/lib/auth/session';
 import { can } from '@/lib/auth/scope';
 import { getDb } from '@/lib/db/client';
 import * as t from '@/lib/db/schema';
-import { saveCredential } from '@/lib/connectors/credentials';
+import { loadCredential, saveCredential } from '@/lib/connectors/credentials';
+import { readRange } from '@/lib/connectors/sheets';
 import { fetchHubspotAccount } from '@/lib/connectors/oauth';
 import { hasCredentialKey } from '@/lib/crypto/secrets';
 import type { SourceSystemCode } from '@/lib/connectors/types';
@@ -38,15 +39,6 @@ export async function POST(request: Request, context: { params: Promise<{ source
       { status: 403 },
     );
   }
-  if (!hasCredentialKey()) {
-    return NextResponse.json({
-      ok: false,
-      error:
-        'CREDENTIAL_KEY is not set, so the credential could not be stored safely. Generate one ' +
-        'with `openssl rand -base64 32` and set it in the environment.',
-    });
-  }
-
   let body: Record<string, string>;
   try {
     body = (await request.json()) as Record<string, string>;
@@ -55,6 +47,70 @@ export async function POST(request: Request, context: { params: Promise<{ source
   }
 
   const db = await getDb();
+  const existing = await loadCredential(sourceSystem, db);
+
+  // --- Naming the spreadsheet on an account already signed in ---------------
+  //
+  // Google grants access to an account, not to a document, so a signed-in Sheets
+  // connection still needs to be told which spreadsheet holds the budget. This
+  // is a document identifier, not a credential — pasting a link is the whole
+  // step, and nothing here asks for a key.
+  if (sourceSystem === 'SHEETS' && existing?.authMethod === 'COMPOSIO') {
+    const spreadsheetId = extractSpreadsheetId(body.spreadsheetId ?? '');
+    if (!spreadsheetId) {
+      return NextResponse.json({
+        ok: false,
+        error: 'Paste the spreadsheet link, or its id. Nothing was saved.',
+      });
+    }
+
+    const range = process.env.SHEETS_RANGE_MONTHLY_BUDGET ?? 'Monthly Budget!A1:Z200';
+    try {
+      await readRange(spreadsheetId, range);
+    } catch (error) {
+      return NextResponse.json({
+        ok: false,
+        error:
+          `That spreadsheet could not be read as ${existing.accountLabel ?? 'the signed-in account'}: ` +
+          `${error instanceof Error ? error.message : 'unknown error'}. Check the link, and that ` +
+          `the signed-in Google account can open it. Nothing was saved.`,
+      });
+    }
+
+    await saveCredential(
+      {
+        sourceSystem,
+        authMethod: 'COMPOSIO',
+        data: { ...existing.data, spreadsheetId },
+        isReference: true,
+        accountLabel: existing.accountLabel,
+        accountId: spreadsheetId,
+        scopes: existing.scopes,
+        connectedByUserId: user.id,
+      },
+      db,
+    );
+
+    await db.insert(t.auditEvent).values({
+      userId: user.id,
+      action: 'SOURCE_CONNECTED',
+      entity: 'connector_credential',
+      entityId: sourceSystem,
+      detail: { authMethod: 'COMPOSIO', spreadsheetId },
+    });
+
+    return NextResponse.json({ ok: true });
+  }
+
+  if (!hasCredentialKey()) {
+    return NextResponse.json({
+      ok: false,
+      error:
+        'CREDENTIAL_KEY is not set, so the credential could not be stored safely. Generate one ' +
+        'with `openssl rand -base64 32` and set it in the environment — or set COMPOSIO_API_KEY ' +
+        'and sign in instead, which stores no secret at all.',
+    });
+  }
 
   if (sourceSystem === 'HUBSPOT') {
     const token = (body.accessToken ?? '').trim();
@@ -190,4 +246,21 @@ async function verifySheetAccess(
 
   const body = (await response.json()) as { properties?: { title?: string } };
   return { ok: true, title: body.properties?.title ?? null };
+}
+
+/**
+ * Accepts what a person actually has to hand.
+ *
+ * Nobody keeps spreadsheet ids; they keep the URL in the address bar. Asking for
+ * the id and rejecting the link would be a small, avoidable piece of friction in
+ * the one step of this flow that still needs typing.
+ */
+function extractSpreadsheetId(input: string): string | null {
+  const value = input.trim();
+  if (!value) return null;
+
+  const fromUrl = value.match(/\/spreadsheets\/d\/([a-zA-Z0-9-_]+)/);
+  if (fromUrl?.[1]) return fromUrl[1];
+
+  return /^[a-zA-Z0-9-_]{20,}$/.test(value) ? value : null;
 }
