@@ -24,6 +24,11 @@
     "verify:connect": "tsx scripts/connect-e2e.mts",
     "verify:mode": "tsx scripts/mode-e2e.mts"
   },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "esbuild"
+    ]
+  },
   "dependencies": {
     "@electric-sql/pglite": "^0.5.4",
     "bcryptjs": "^3.0.2",
