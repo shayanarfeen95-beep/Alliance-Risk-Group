@@ -64,11 +64,35 @@ integration months after anyone last looked at it. See
 [`docs/RUNBOOK.md`](docs/RUNBOOK.md).
 
 **Connecting is not the same as loading.** A source supplies nothing until a pull
-runs: ask the assistant to pull a month, confirm it, and the extraction lands the
-raw payloads and then conforms them into the warehouse in one reversible
-`load_run`. Until that happens the dashboards show whatever was there before —
-ask the assistant *"are these figures from our own books?"* and it will tell you
-which months came from where.
+runs. **Admin → Data → Pull everything** fetches the last three months from every
+connected source and writes it into the warehouse: QuickBooks into the profit and
+loss, balance sheet and chart of accounts, HubSpot into deals, contacts and
+meetings, Sheets into budget and headcount. Closed months are left untouched and
+the reconciliation controls run immediately afterwards.
+
+You can also ask the assistant to pull a specific month and confirm it. Both go
+through the same code in `lib/etl/ingest.ts` and produce the same reversible
+`load_run` — there is no second, weaker ingestion path.
+
+## Demonstration data, and switching to live
+
+The warehouse ships seeded so every dashboard, control and export can be
+exercised before a source is connected. That is useful and dangerous in equal
+measure: a plausible number does not announce itself as fabricated.
+
+So the state is explicit, shown as a banner on every page, and switching is one
+control in **Admin → Data**:
+
+| Mode | What the dashboards read |
+|---|---|
+| `DEMONSTRATION` (default) | The seeded dataset, with a banner on every page saying so |
+| `LIVE` | Only rows a source loaded. A month nothing has loaded reads *unavailable*, never zero |
+
+Live is a filter, not a deletion — switching back is a click and nothing is
+destroyed by a misclick. It is applied in `loadFactBundle`, the single point
+where facts enter the system, so a view cannot forget it. Deleting the seeded
+rows for good is offered separately, because *hidden* and *gone* are different
+promises and the operator should choose which one they are making.
 
 ---
 

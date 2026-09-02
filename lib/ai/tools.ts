@@ -925,7 +925,7 @@ export async function confirmExtraction(
       .where(eq(t.loadRun.id, loadRunId));
     return {
       ok: false,
-      message: `${connector.label} is not connected. Add its credentials in Admin, then run this again — nothing was written.`,
+      message: `${connector.label} is not connected. Sign in to it in Admin, then run this again — nothing was written.`,
     };
   }
 
@@ -934,81 +934,31 @@ export async function confirmExtraction(
     .set({ status: 'RUNNING', confirmedAt: new Date() })
     .where(eq(t.loadRun.id, loadRunId));
 
-  try {
-    const batch = await connector.fetch(run.entity, {
-      start: run.windowStart!,
-      end: run.windowEnd!,
-    });
+  // The work itself lives in lib/etl/ingest.ts, shared with the Sync button in
+  // Admin. A load started from a conversation and one started from a button must
+  // produce the same run, the same provenance and the same reconciliation.
+  const { executeLoadRun } = await import('@/lib/etl/ingest');
+  const outcome = await executeLoadRun(db, user, run, 'AGENT_EXTRACTION_CONFIRMED');
 
-    // Raw landing first, so conform can be re-run without re-hitting the API.
-    for (let i = 0; i < batch.records.length; i += 200) {
-      await db.insert(t.rawPayload).values(
-        batch.records.slice(i, i + 200).map((record) => ({
-          loadRunId,
-          sourceSystem: batch.sourceSystem,
-          entity: record.entity,
-          payload: record.payload as object,
-        })),
-      );
-    }
-
-    // Then conform, in the same run. Landing raw data and stopping was the gap
-    // that let a connected source and a seeded dashboard coexist without anything
-    // saying they were unrelated.
-    const { conformBatch } = await import('@/lib/etl/conform');
-    const conformed = await conformBatch(db, loadRunId, batch);
-
-    await db
-      .update(t.loadRun)
-      .set({
-        status: 'SUCCEEDED',
-        rowsRead: batch.records.length,
-        rowsWritten: conformed.rowsWritten,
-        finishedAt: new Date(),
-      })
-      .where(eq(t.loadRun.id, loadRunId));
-
-    await db.insert(t.auditEvent).values({
-      userId: user.id,
-      action: 'AGENT_EXTRACTION_CONFIRMED',
-      entity: 'load_run',
-      entityId: loadRunId,
-      detail: {
-        source: run.sourceSystem,
-        entity: run.entity,
-        records: batch.records.length,
-        rowsWritten: conformed.rowsWritten,
-        notes: conformed.notes,
-      },
-    });
-
-    const summary =
-      `Pulled ${batch.records.length} record${batch.records.length === 1 ? '' : 's'} from ` +
-      `${connector.label} and wrote ${conformed.rowsWritten.toLocaleString()} row` +
-      `${conformed.rowsWritten === 1 ? '' : 's'} into the warehouse. The dashboards now read ` +
-      `${connector.label} for this window.`;
-
-    return {
-      ok: true,
-      message: conformed.notes.length ? `${summary}\n\n${conformed.notes.join('\n')}` : summary,
-    };
-  } catch (error) {
-    await db
-      .update(t.loadRun)
-      .set({
-        status: 'FAILED',
-        errorMessage: error instanceof Error ? error.message : String(error),
-        finishedAt: new Date(),
-      })
-      .where(eq(t.loadRun.id, loadRunId));
-
+  if (!outcome.ok) {
     // An unmapped class or account is not a bug to be worked around — it is a
     // question for Westport, and the message names exactly what to answer.
     return {
       ok: false,
-      message: `The pull did not complete and the warehouse is unchanged: ${error instanceof Error ? error.message : 'unknown error'}`,
+      message: `The pull did not complete and the warehouse is unchanged: ${outcome.error}`,
     };
   }
+
+  const summary =
+    `Pulled ${outcome.recordsRead} record${outcome.recordsRead === 1 ? '' : 's'} from ` +
+    `${connector.label} and wrote ${outcome.rowsWritten.toLocaleString()} row` +
+    `${outcome.rowsWritten === 1 ? '' : 's'} into the warehouse. The dashboards now read ` +
+    `${connector.label} for this window.`;
+
+  return {
+    ok: true,
+    message: outcome.notes.length ? `${summary}\n\n${outcome.notes.join('\n')}` : summary,
+  };
 }
 
 export { sumPl };

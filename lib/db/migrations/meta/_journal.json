@@ -43,6 +43,13 @@
       "when": 1786531110000,
       "tag": "0005_composio_connections",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1786531120000,
+      "tag": "0006_data_mode",
+      "breakpoints": true
     }
   ]
 }

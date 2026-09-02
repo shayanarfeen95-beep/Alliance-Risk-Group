@@ -11,7 +11,8 @@
  * the caller was not entitled to, because it was never loaded.
  */
 import Decimal from 'decimal.js';
-import { and, gte, inArray, lte, eq, sql } from 'drizzle-orm';
+import { and, gte, inArray, lte, eq, notInArray, sql } from 'drizzle-orm';
+import { getDataMode, seedLoadRunIds } from '@/lib/data-mode';
 import { d } from '@/lib/money';
 import * as t from '@/lib/db/schema';
 import type { Database } from '@/lib/db/client';
@@ -198,6 +199,19 @@ export async function loadFactBundle(
 
   const inWindow = (column: never) => and(gte(column, from), lte(column, to));
 
+  /**
+   * In LIVE mode, seeded rows are excluded from every read.
+   *
+   * Applied here rather than in each dashboard because this is the one place
+   * facts enter the system: a view that forgot the filter would show fabricated
+   * figures on a screen labelled live, and nothing would catch it. Every seeded
+   * row carries the id of the SEED load run, including the tables with no
+   * source_system column of their own, so one predicate covers all of them.
+   */
+  const seedRuns = (await getDataMode(db)) === 'LIVE' ? await seedLoadRunIds(db) : [];
+  const excludeSeed = (column: never) =>
+    seedRuns.length ? notInArray(column, seedRuns) : undefined;
+
   const [
     periodRows,
     plRows,
@@ -213,23 +227,52 @@ export async function loadFactBundle(
     db
       .select()
       .from(t.factPlActual)
-      .where(and(inWindow(t.factPlActual.periodMonth as never), inArray(t.factPlActual.divisionCode, scopedCodes))),
+      .where(
+        and(
+          inWindow(t.factPlActual.periodMonth as never),
+          inArray(t.factPlActual.divisionCode, scopedCodes),
+          excludeSeed(t.factPlActual.loadRunId as never),
+        ),
+      ),
     db
       .select()
       .from(t.factBsActual)
-      .where(and(inWindow(t.factBsActual.periodMonth as never), inArray(t.factBsActual.divisionCode, scopedCodes))),
+      .where(
+        and(
+          inWindow(t.factBsActual.periodMonth as never),
+          inArray(t.factBsActual.divisionCode, scopedCodes),
+          excludeSeed(t.factBsActual.loadRunId as never),
+        ),
+      ),
     db
       .select()
       .from(t.factAging)
-      .where(and(inWindow(t.factAging.periodMonth as never), inArray(t.factAging.divisionCode, scopedCodes))),
+      .where(
+        and(
+          inWindow(t.factAging.periodMonth as never),
+          inArray(t.factAging.divisionCode, scopedCodes),
+          excludeSeed(t.factAging.loadRunId as never),
+        ),
+      ),
     db
       .select()
       .from(t.factBudget)
-      .where(inArray(t.factBudget.divisionCode, scopedCodes)),
+      .where(
+        and(
+          inArray(t.factBudget.divisionCode, scopedCodes),
+          excludeSeed(t.factBudget.loadRunId as never),
+        ),
+      ),
     db
       .select()
       .from(t.factHeadcount)
-      .where(and(inWindow(t.factHeadcount.periodMonth as never), inArray(t.factHeadcount.divisionCode, scopedCodes))),
+      .where(
+        and(
+          inWindow(t.factHeadcount.periodMonth as never),
+          inArray(t.factHeadcount.divisionCode, scopedCodes),
+          excludeSeed(t.factHeadcount.loadRunId as never),
+        ),
+      ),
     db
       .select({
         periodMonth: t.factGlBalance.periodMonth,
@@ -245,13 +288,19 @@ export async function loadFactBundle(
         and(
           inWindow(t.factGlBalance.periodMonth as never),
           inArray(t.factGlBalance.divisionCode, scopedCodes),
+          excludeSeed(t.factGlBalance.loadRunId as never),
         ),
       ),
     db.select().from(t.appConfig),
     db
       .select({ finishedAt: t.loadRun.finishedAt })
       .from(t.loadRun)
-      .where(eq(t.loadRun.status, 'SUCCEEDED'))
+      .where(
+        and(
+          eq(t.loadRun.status, 'SUCCEEDED'),
+          excludeSeed(t.loadRun.id as never),
+        ),
+      )
       .orderBy(sql`${t.loadRun.finishedAt} desc nulls last`)
       .limit(1),
   ]);
@@ -262,7 +311,7 @@ export async function loadFactBundle(
   const hubspotTo = monthBounds(period.month).endExclusive;
 
   const [dealRows, proposalRows, contactRows, meetingRows] = await Promise.all([
-    db.select().from(t.factDeal),
+    db.select().from(t.factDeal).where(excludeSeed(t.factDeal.loadRunId as never)),
     db
       .select({
         dealId: t.factDealStageHistory.dealId,
@@ -277,13 +326,20 @@ export async function loadFactBundle(
           eq(t.factDealStageHistory.stage, 'proposalsent'),
           gte(t.factDealStageHistory.enteredAt, hubspotFrom),
           lte(t.factDealStageHistory.enteredAt, hubspotTo),
+          excludeSeed(t.factDealStageHistory.loadRunId as never),
         ),
       ),
-    db.select().from(t.factContact),
+    db.select().from(t.factContact).where(excludeSeed(t.factContact.loadRunId as never)),
     db
       .select()
       .from(t.factMeeting)
-      .where(and(gte(t.factMeeting.meetingDate, hubspotFrom), lte(t.factMeeting.meetingDate, hubspotTo))),
+      .where(
+        and(
+          gte(t.factMeeting.meetingDate, hubspotFrom),
+          lte(t.factMeeting.meetingDate, hubspotTo),
+          excludeSeed(t.factMeeting.loadRunId as never),
+        ),
+      ),
   ]);
 
   // --- Shape into lookup maps ---------------------------------------------

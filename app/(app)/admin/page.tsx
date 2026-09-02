@@ -2,6 +2,7 @@ import type { Metadata } from 'next';
 import { desc, eq, sql } from 'drizzle-orm';
 import { CircleAlert, CircleCheck, CircleHelp, Download } from 'lucide-react';
 import { ConnectorCard } from '@/components/admin/connector-card';
+import { DataControls } from '@/components/admin/data-controls';
 import { UserManager } from '@/components/admin/user-manager';
 import { can } from '@/lib/auth/scope';
 import { getDb } from '@/lib/db/client';
@@ -9,6 +10,8 @@ import * as t from '@/lib/db/schema';
 import { getSessionUser } from '@/lib/auth/session';
 import { redirect } from 'next/navigation';
 import { connectorStatuses } from '@/lib/connectors';
+import { getDataMode, seedFootprint, seedLoadRunIds } from '@/lib/data-mode';
+import { syncableSources } from '@/lib/etl/ingest';
 import { Card, CardHeader, Chip, DataTable, SectionTitle, Td, Th } from '@/components/ui/primitives';
 
 export const metadata: Metadata = { title: 'Admin' };
@@ -72,6 +75,26 @@ export default async function AdminPage({
   const connectors = await connectorStatuses();
   const composioReady = connectors.some((connector) => connector.connectVia === 'composio');
 
+  const [dataMode, footprint, sources, seedRuns] = await Promise.all([
+    getDataMode(db),
+    seedFootprint(db),
+    syncableSources(),
+    seedLoadRunIds(db),
+  ]);
+
+  // Rows a source actually loaded, which is the figure that decides whether live
+  // mode has anything to show. Counted across every run rather than the ten most
+  // recent, or a busy week of syncs would make live mode look empty.
+  const [loadedRows] = await db
+    .select({ total: sql<number>`coalesce(sum(rows_written), 0)::int` })
+    .from(t.loadRun)
+    .where(
+      seedRuns.length
+        ? sql`status = 'SUCCEEDED' and id <> all(${sql.raw(`ARRAY[${seedRuns.map((id) => `'${id}'`).join(',')}]::uuid[]`)})`
+        : sql`status = 'SUCCEEDED'`,
+    );
+  const loadedRowCount = loadedRows?.total ?? 0;
+
   // The pack is anchored on the configured reporting month rather than today's
   // date: exporting an unclosed month by accident is the sort of thing that
   // makes it into a board deck.
@@ -112,6 +135,20 @@ export default async function AdminPage({
             </a>
           </div>
         </Card>
+      </section>
+
+      {/* --- Data ---------------------------------------------------------- */}
+      <section>
+        <SectionTitle hint="Whose numbers these are, and when they last came across">
+          Data
+        </SectionTitle>
+        <DataControls
+          mode={dataMode}
+          connectedSources={sources}
+          seedFootprint={footprint}
+          loadedRowCount={loadedRowCount}
+          canManage={can(user, 'RUN_INGESTION')}
+        />
       </section>
 
       {/* --- Connectors --------------------------------------------------- */}
