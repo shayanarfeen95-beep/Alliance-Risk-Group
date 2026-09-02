@@ -20,7 +20,8 @@
     "test:watch": "vitest",
     "verify:visual": "tsx scripts/visual-check.ts",
     "verify:tieout": "tsx scripts/verify/tieout.mts",
-    "verify:agent": "tsx scripts/agent-e2e.mts"
+    "verify:agent": "tsx scripts/agent-e2e.mts",
+    "verify:connect": "tsx scripts/connect-e2e.mts"
   },
   "dependencies": {
     "@electric-sql/pglite": "^0.5.4",

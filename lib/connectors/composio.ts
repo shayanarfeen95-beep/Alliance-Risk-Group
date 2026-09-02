@@ -202,20 +202,26 @@ export async function initiateConnection(input: {
 }): Promise<ConnectionRequest> {
   const authConfigId = await ensureAuthConfig(input.source);
 
-  const created = await call<Record<string, unknown>>('/connected_accounts', {
+  /**
+   * `/connected_accounts/link`, not `/connected_accounts`.
+   *
+   * Composio-managed OAuth stopped being creatable on the plain collection
+   * endpoint, which now refuses with "use POST /connected_accounts/link
+   * instead". The link endpoint returns a hosted consent page on
+   * connect.composio.dev that walks the user through the provider's own sign-in
+   * and then returns them here — which is exactly the flow this is for.
+   */
+  const created = await call<Record<string, unknown>>('/connected_accounts/link', {
     method: 'POST',
     body: JSON.stringify({
-      auth_config: { id: authConfigId },
-      connection: {
-        user_id: input.userId,
-        callback_url: input.callbackUrl,
-        state: { authScheme: 'OAUTH2', val: { status: 'INITIATED' } },
-      },
+      auth_config_id: authConfigId,
+      user_id: input.userId,
+      callback_url: input.callbackUrl,
     }),
   });
 
   const connectedAccountId =
-    pick<string>(created, 'id', 'nanoid', 'connected_account_id', 'connectedAccountId') ??
+    pick<string>(created, 'connected_account_id', 'connectedAccountId', 'id', 'nanoid') ??
     pick<string>(
       created.connectedAccount as Record<string, unknown> | undefined,
       'id',
