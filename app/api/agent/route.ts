@@ -31,7 +31,9 @@ export async function POST(request: Request) {
     return NextResponse.json({
       ok: false,
       error:
-        'The assistant is not configured — ANTHROPIC_API_KEY is not set in this environment. Every dashboard and export still works; only the conversational layer is unavailable.',
+        'The assistant is not configured — OPENROUTER_API_KEY is not set in this environment. A ' +
+        'free key is enough. Every dashboard and export still works; only the conversational ' +
+        'layer is unavailable.',
     });
   }
 

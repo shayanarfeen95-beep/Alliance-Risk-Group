@@ -232,40 +232,127 @@ const comparePeriods: ToolDefinition = {
 
     if (against === 'budget' || against === 'tenx') {
       const scenario = against === 'tenx' ? 'TENX' : 'MONTHLY_BUDGET';
-      const lineItem = ['revenue', 'cogs', 'opex'].includes(metric) ? metric : 'revenue';
-      const attainment = resolveKpi(session, 'budget_attainment', division, {
-        month,
-        options: { scenario, lineItem },
-      });
-      if (attainment.unavailable) {
+
+      /**
+       * Which budget lines this metric is made of.
+       *
+       * The budget carries three lines — revenue, COGS and OpEx. Gross and net
+       * profit are derived from them by the same identity the rest of the system
+       * uses, never imported, so a budgeted gross profit always equals budgeted
+       * revenue minus budgeted COGS.
+       *
+       * Anything not on this list has no budget, and that is the whole answer.
+       * This previously fell back to comparing REVENUE while labelling the
+       * result with the requested metric's name. Asking for LITS gross profit
+       * against budget in March 2026 returned revenue of $203,363 against the
+       * revenue plan of $124,620 — titled "Gross Profit", at 163% attainment.
+       * The real figures are gross profit of $123,919 against a gross-profit
+       * plan of $44,425. Both the actual and the plan were the wrong line, and
+       * nothing in the response said so. A wrong figure under a confident label
+       * is the exact failure this system exists to prevent, and a silent
+       * substitution is how it got there.
+       */
+      const COMPOSITION: Record<string, Array<{ lineItem: 'revenue' | 'cogs' | 'opex'; sign: 1 | -1 }>> = {
+        revenue: [{ lineItem: 'revenue', sign: 1 }],
+        cogs: [{ lineItem: 'cogs', sign: 1 }],
+        opex: [{ lineItem: 'opex', sign: 1 }],
+        gross_profit: [
+          { lineItem: 'revenue', sign: 1 },
+          { lineItem: 'cogs', sign: -1 },
+        ],
+        net_profit: [
+          { lineItem: 'revenue', sign: 1 },
+          { lineItem: 'cogs', sign: -1 },
+          { lineItem: 'opex', sign: -1 },
+        ],
+      };
+
+      const composition = COMPOSITION[metric];
+      if (!composition) {
         return {
           result: {
             available: false,
-            reason: attainment.unavailable.reason,
-            explanation: attainment.unavailable.detail,
+            reason: 'NO_BUDGET_FOR_METRIC',
+            explanation:
+              `The budget carries revenue, COGS and OpEx. ${definition.name} is not budgeted and ` +
+              `cannot be derived from those three, so there is no plan figure to compare against. ` +
+              `Tell the user that plainly. Comparing ${definition.name} to a different line's ` +
+              `budget would be a wrong number under a confident label.`,
+            budgetedMetrics: Object.keys(COMPOSITION),
           },
         };
       }
-      const actual = attainment.components?.actual?.toNumber() ?? null;
-      const budget = attainment.components?.budget?.toNumber() ?? null;
-      const variance = attainment.components?.varianceDollars?.toNumber() ?? null;
-      const favourable =
-        variance === null ? null : definition.higherIsBetter ? variance > 0 : variance < 0;
+
+      let actualTotal: number | null = 0;
+      let budgetTotal: number | null = 0;
+
+      for (const part of composition) {
+        const attainment = resolveKpi(session, 'budget_attainment', division, {
+          month,
+          options: { scenario, lineItem: part.lineItem },
+        });
+        if (attainment.unavailable) {
+          return {
+            result: {
+              available: false,
+              reason: attainment.unavailable.reason,
+              explanation: attainment.unavailable.detail,
+            },
+          };
+        }
+        const partActual = attainment.components?.actual?.toNumber();
+        const partBudget = attainment.components?.budget?.toNumber();
+        if (partActual === undefined || partBudget === undefined) {
+          actualTotal = null;
+          budgetTotal = null;
+          break;
+        }
+        actualTotal = (actualTotal ?? 0) + part.sign * partActual;
+        budgetTotal = (budgetTotal ?? 0) + part.sign * partBudget;
+      }
+
+      if (actualTotal === null || budgetTotal === null) {
+        return {
+          result: {
+            available: false,
+            reason: 'NO_DATA',
+            explanation: `The ${scenario} figures for ${definition.name} could not be resolved.`,
+          },
+        };
+      }
+
+      const actual = actualTotal;
+      const budget = budgetTotal;
+      const variance = actual - budget;
+      const favourable = variance === 0 ? null : definition.higherIsBetter ? variance > 0 : variance < 0;
 
       return {
         result: {
           metric: definition.name,
           division,
           period: formatMonth(month),
+          // Named so they cannot be mistaken for one another. These are the
+          // figures for THIS metric, not for any line it was derived from.
+          actualLabel: `${definition.name} actual`,
           actual,
+          planLabel: `${definition.name} plan`,
           plan: budget,
-          attainmentPercent: attainment.value!.toNumber(),
+          attainmentPercent: budget === 0 ? null : actual / budget,
           varianceDollars: variance,
+          derivedFrom:
+            composition.length > 1
+              ? composition
+                  .map((part) => `${part.sign === 1 ? '+' : '−'}${part.lineItem}`)
+                  .join(' ')
+              : undefined,
           assessment:
-            favourable === null ? 'unknown' : favourable ? 'favourable' : 'unfavourable',
+            favourable === null ? 'unchanged' : favourable ? 'favourable' : 'unfavourable',
           directionNote: definition.higherIsBetter
             ? 'Higher is better for this line, so above plan is favourable.'
             : 'Lower is better for this line — above plan means overspending, which is unfavourable.',
+          instruction:
+            'Quote actual and plan as the figures for this metric. They are not revenue unless ' +
+            'the metric is revenue.',
         },
         activity: `Compared ${definition.name} against ${scenario}`,
       };

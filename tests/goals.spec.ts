@@ -342,8 +342,8 @@ describe('the commentary verifier rejects invented figures', () => {
 
 describe('commentary falls back rather than failing', () => {
   it('ships the deterministic draft when no model is configured', async () => {
-    const key = process.env.ANTHROPIC_API_KEY;
-    delete process.env.ANTHROPIC_API_KEY;
+    const key = process.env.OPENROUTER_API_KEY;
+    delete process.env.OPENROUTER_API_KEY;
     try {
       const commentary = await generateCommentary(session, cfoFindings);
       expect(commentary.modelWritten).toBe(false);
@@ -351,7 +351,7 @@ describe('commentary falls back rather than failing', () => {
       expect(commentary.periodState).toBe('CLOSED');
       expect(verifyDraft(commentary.body, commentary.facts)).toEqual({ ok: true });
     } finally {
-      if (key !== undefined) process.env.ANTHROPIC_API_KEY = key;
+      if (key !== undefined) process.env.OPENROUTER_API_KEY = key;
     }
   });
 

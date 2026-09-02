@@ -19,10 +19,10 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "verify:visual": "tsx scripts/visual-check.ts",
-    "verify:tieout": "tsx scripts/verify/tieout.mts"
+    "verify:tieout": "tsx scripts/verify/tieout.mts",
+    "verify:agent": "tsx scripts/agent-e2e.mts"
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.116.0",
     "@electric-sql/pglite": "^0.5.4",
     "bcryptjs": "^3.0.2",
     "date-fns": "^4.4.0",

@@ -1,23 +1,32 @@
 import 'server-only';
-import Anthropic from '@anthropic-ai/sdk';
 import { getDb } from '@/lib/db/client';
 import * as t from '@/lib/db/schema';
 import type { SessionUser } from '@/lib/auth/session';
 import type { SemanticSession } from '@/lib/semantic/resolve';
 import { AGENT_TOOLS, toolByName, type ToolContext } from './tools';
 import { buildSystemPrompt, type PageContext } from './prompt';
+import {
+  activeModel,
+  isModelConfigured,
+  ModelNotConfiguredError,
+  streamTurn,
+  type AgentToolResult,
+  type ConversationMessage,
+} from './provider';
 import type { ChartCardProps } from '@/components/charts/chart-card';
 
 /**
  * The agent loop.
  *
- * A manual tool-use loop rather than the SDK's tool runner: every tool call is
+ * A manual tool-use loop rather than a framework's runner: every tool call is
  * authorised and logged against the caller's entitlements before it runs, and
  * the loop needs the per-request semantic session in scope. Owning the loop
  * keeps that check in one place.
+ *
+ * The model is reached through lib/ai/provider.ts, so nothing here knows which
+ * model answered — only that a figure it states came from a tool call made in
+ * this loop.
  */
-
-const MODEL = process.env.ANTHROPIC_MODEL_INTERACTIVE ?? 'claude-sonnet-5';
 
 /**
  * Enough room to look something up, notice it does not answer the question, and
@@ -68,23 +77,16 @@ export interface AgentTurnResult {
   pendingAction?: { id: string; label: string; detail: string };
 }
 
-export class AgentNotConfiguredError extends Error {
-  constructor() {
-    super(
-      'The assistant is not configured: ANTHROPIC_API_KEY is not set. Every dashboard still works — only the conversational layer is unavailable.',
-    );
-    this.name = 'AgentNotConfiguredError';
-  }
-}
+export { ModelNotConfiguredError as AgentNotConfiguredError } from './provider';
 
 export function isAgentConfigured(): boolean {
-  return Boolean(process.env.ANTHROPIC_API_KEY);
+  return isModelConfigured();
 }
 
 export async function runAgentTurn(input: AgentTurnInput): Promise<AgentTurnResult> {
-  if (!isAgentConfigured()) throw new AgentNotConfiguredError();
+  if (!isModelConfigured()) throw new ModelNotConfiguredError();
 
-  const client = new Anthropic();
+  const model = activeModel();
   const db = await getDb();
   const started = Date.now();
 
@@ -98,10 +100,10 @@ export async function runAgentTurn(input: AgentTurnInput): Promise<AgentTurnResu
   const tools = AGENT_TOOLS.map((tool) => ({
     name: tool.name,
     description: tool.description,
-    input_schema: tool.input_schema as Anthropic.Tool.InputSchema,
+    input_schema: tool.input_schema,
   }));
 
-  const messages: Anthropic.MessageParam[] = input.messages.map((message) => ({
+  const messages: ConversationMessage[] = input.messages.map((message) => ({
     role: message.role,
     content: message.content,
   }));
@@ -121,48 +123,23 @@ export async function runAgentTurn(input: AgentTurnInput): Promise<AgentTurnResu
   let spoken = '';
 
   for (let iteration = 0; iteration < MAX_ITERATIONS; iteration++) {
-    const stream = client.messages.stream(
-      {
-        model: MODEL,
-        max_tokens: 8000,
-        system: buildSystemPrompt(input.user, input.session, input.pageContext),
-        tools,
-        messages,
+    const turn = await streamTurn({
+      system: buildSystemPrompt(input.user, input.session, input.pageContext),
+      tools,
+      messages,
+      signal: input.signal,
+      onText: (delta) => {
+        spoken += delta;
+        emit({ type: 'text', delta });
       },
-      input.signal ? { signal: input.signal } : undefined,
-    );
-
-    stream.on('text', (delta) => {
-      spoken += delta;
-      emit({ type: 'text', delta });
     });
 
-    const response = await stream.finalMessage();
-
-    // Safety classifiers can decline a request outright. That arrives as a
-    // successful response with an empty or partial body, so check the stop
-    // reason before reading content.
-    if (response.stop_reason === 'refusal') {
-      const detail = response.stop_details;
-      await logTurn(db, input, 'assistant', 'Declined by safety classifier', true, Date.now() - started);
-      void detail;
-      return {
-        content:
-          'I was unable to answer that. If it was a routine question about ARG’s figures, rephrasing it usually helps; otherwise the dashboards have the same numbers.',
-        citations: [],
-        activity,
-        isRefusal: true,
-      };
-    }
-
-    const toolUses = response.content.filter(
-      (block): block is Anthropic.ToolUseBlock => block.type === 'tool_use',
-    );
+    const toolUses = turn.toolCalls;
 
     if (toolUses.length === 0) {
       const text = spoken.trim();
 
-      await logTurn(db, input, 'assistant', text, false, Date.now() - started, citations);
+      await logTurn(db, input, 'assistant', text, false, Date.now() - started, citations, model);
 
       if (citations.length) emit({ type: 'citations', citations });
 
@@ -182,29 +159,26 @@ export async function runAgentTurn(input: AgentTurnInput): Promise<AgentTurnResu
       emit({ type: 'text', delta: '\n\n' });
     }
 
-    messages.push({ role: 'assistant', content: response.content });
+    messages.push({ role: 'assistant_tool_use', text: turn.text, toolCalls: toolUses });
 
-    // All tool results go back in a single user message — splitting them
-    // trains the model out of parallel calls.
-    const toolResults: Anthropic.ToolResultBlockParam[] = [];
+    // Results are collected for the whole round and appended together, so a
+    // model that called three tools at once gets three answers at once rather
+    // than being trained out of calling them in parallel.
+    const toolResults: AgentToolResult[] = [];
 
     for (const toolUse of toolUses) {
       const tool = toolByName(toolUse.name);
       if (!tool) {
         toolResults.push({
-          type: 'tool_result',
-          tool_use_id: toolUse.id,
+          id: toolUse.id,
           content: `No such tool: ${toolUse.name}`,
-          is_error: true,
+          isError: true,
         });
         continue;
       }
 
       try {
-        const outcome = await tool.run(
-          (toolUse.input ?? {}) as Record<string, unknown>,
-          context,
-        );
+        const outcome = await tool.run(toolUse.input ?? {}, context);
 
         if (outcome.activity) {
           activity.push({ tool: tool.name, summary: outcome.activity });
@@ -227,25 +201,20 @@ export async function runAgentTurn(input: AgentTurnInput): Promise<AgentTurnResu
           toolName: tool.name,
           toolInput: (toolUse.input ?? {}) as object,
           toolOutput: outcome.result as object,
-          model: MODEL,
+          model,
         });
 
-        toolResults.push({
-          type: 'tool_result',
-          tool_use_id: toolUse.id,
-          content: JSON.stringify(outcome.result),
-        });
+        toolResults.push({ id: toolUse.id, content: JSON.stringify(outcome.result) });
       } catch (error) {
         toolResults.push({
-          type: 'tool_result',
-          tool_use_id: toolUse.id,
+          id: toolUse.id,
           content: `The tool failed: ${error instanceof Error ? error.message : 'unknown error'}. Do not guess the figure — tell the user it could not be retrieved.`,
-          is_error: true,
+          isError: true,
         });
       }
     }
 
-    messages.push({ role: 'user', content: toolResults });
+    messages.push({ role: 'tool_results', results: toolResults });
   }
 
   return {
@@ -267,6 +236,7 @@ async function logTurn(
   wasRefusal: boolean,
   latencyMs: number,
   citations: AgentCitation[] = [],
+  model: string = activeModel(),
 ): Promise<void> {
   // §11 Requirement 6: every question and answer is logged. Westport reviews
   // this during the audit pass, and the refusals are the most useful rows.
@@ -277,7 +247,7 @@ async function logTurn(
     content,
     wasRefusal,
     citations: citations.length ? (citations as unknown as object) : null,
-    model: MODEL,
+    model,
     latencyMs,
   });
 }

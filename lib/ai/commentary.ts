@@ -1,10 +1,10 @@
-import Anthropic from '@anthropic-ai/sdk';
 import Decimal from 'decimal.js';
 import { formatValue } from '@/lib/money';
 import { resolveKpi, CONSOLIDATED_CODE, type SemanticSession } from '@/lib/semantic/resolve';
 import { key } from '@/lib/semantic/facts';
 import type { MonthKey } from '@/lib/semantic/periods';
 import type { Finding } from './goals';
+import { complete, isModelConfigured } from './provider';
 
 /**
  * The monthly close narrative.
@@ -23,16 +23,14 @@ import type { Finding } from './goals';
  *      the deterministic one. §11 Requirement 3 does not have a "usually" in it.
  *
  * That means the worst case here is plainer writing, never a wrong number. When
- * ANTHROPIC_API_KEY is absent the deterministic draft is what ships, and it is
+ * no model is configured the deterministic draft is what ships, and it is
  * written to be publishable on its own — Westport edits and signs either way.
  *
  * This module deliberately carries no `server-only` marker: the seed loader and
- * the overnight refresh both draft commentary outside a request, and the
- * Anthropic client is constructed inside the function rather than at import, so
- * nothing here runs on a key that is not present.
+ * the overnight refresh both draft commentary outside a request. The provider
+ * reads its key inside the call rather than at import, so nothing here runs on a
+ * key that is not present.
  */
-
-const MODEL = process.env.ANTHROPIC_MODEL_COMMENTARY ?? 'claude-opus-5';
 
 export interface CommentaryFact {
   label: string;
@@ -358,38 +356,20 @@ export async function generateCommentary(
     periodState: session.periodIsClosed ? 'CLOSED' : 'OPEN',
   };
 
-  if (!process.env.ANTHROPIC_API_KEY) return fallback;
+  if (!isModelConfigured()) return fallback;
 
   try {
-    const client = new Anthropic();
-    const response = await client.messages.create({
-      model: MODEL,
-      max_tokens: 2000,
-      thinking: { type: 'adaptive' },
+    const body = await complete({
       system: SYSTEM_PROMPT,
-      messages: [
-        {
-          role: 'user',
-          content:
-            `Reporting month: ${session.period.month} (${session.periodIsClosed ? 'closed' : 'open — preliminary'}).\n` +
-            `Accounting basis: ${session.accountingBasis}.\n\n` +
-            `Fact pack:\n` +
-            facts
-              .map((fact) => `- ${fact.label}: ${fact.value}${fact.note ? ` (${fact.note})` : ''}`)
-              .join('\n'),
-        },
-      ],
+      user:
+        `Reporting month: ${session.period.month} (${session.periodIsClosed ? 'closed' : 'open — preliminary'}).\n` +
+        `Accounting basis: ${session.accountingBasis}.\n\n` +
+        `Fact pack:\n` +
+        facts
+          .map((fact) => `- ${fact.label}: ${fact.value}${fact.note ? ` (${fact.note})` : ''}`)
+          .join('\n'),
+      maxTokens: 2000,
     });
-
-    if (response.stop_reason === 'refusal') {
-      return { ...fallback, rejectionReason: 'The model declined to draft this month’s commentary.' };
-    }
-
-    const body = response.content
-      .filter((block): block is Anthropic.TextBlock => block.type === 'text')
-      .map((block) => block.text)
-      .join('\n')
-      .trim();
 
     if (!body) return fallback;
 
