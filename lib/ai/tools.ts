@@ -661,6 +661,123 @@ const getLoadHistory: ToolDefinition = {
   },
 };
 
+
+/**
+ * Where the figures on screen actually came from.
+ *
+ * The question this answers — "am I looking at ARG's books or at seeded data?" —
+ * is the one a reader most needs answered and the one an application is most
+ * likely to leave ambiguous. Every fact table carries its source system, so the
+ * answer is read from the rows themselves rather than inferred from whether a
+ * connector happens to hold a credential.
+ */
+const getDataProvenance: ToolDefinition = {
+  name: 'get_data_provenance',
+  description:
+    'Report where the figures currently in the warehouse came from: which source system wrote each fact table, when, and whether any of it is still seeded demonstration data rather than the live books. Call this whenever the user asks whether the numbers are real, live, seeded or up to date.',
+  input_schema: { type: 'object', properties: {} },
+  async run(_input, context) {
+    const [plSources, dealCount, budgetSources, lastLoads, connectors] = await Promise.all([
+      context.db
+        .select({
+          sourceSystem: t.factPlActual.sourceSystem,
+          months: sql<number>`count(distinct ${t.factPlActual.periodMonth})::int`,
+          earliest: sql<string>`min(${t.factPlActual.periodMonth})::text`,
+          latest: sql<string>`max(${t.factPlActual.periodMonth})::text`,
+        })
+        .from(t.factPlActual)
+        .groupBy(t.factPlActual.sourceSystem),
+      context.db.select({ count: sql<number>`count(*)::int` }).from(t.factDeal),
+      context.db
+        .select({
+          sourceSystem: t.factBudget.sourceSystem,
+          rows: sql<number>`count(*)::int`,
+        })
+        .from(t.factBudget)
+        .groupBy(t.factBudget.sourceSystem),
+      context.db
+        .select()
+        .from(t.loadRun)
+        .where(eq(t.loadRun.status, 'SUCCEEDED'))
+        .orderBy(desc(t.loadRun.finishedAt))
+        .limit(5),
+      connectorStatuses(),
+    ]);
+
+    const seeded = plSources.filter((row) => row.sourceSystem === 'SEED');
+    const live = plSources.filter((row) => row.sourceSystem !== 'SEED');
+
+    return {
+      result: {
+        profitAndLoss: plSources.map((row) => ({
+          sourceSystem: row.sourceSystem,
+          months: row.months,
+          window: `${row.earliest?.slice(0, 7)} → ${row.latest?.slice(0, 7)}`,
+        })),
+        budgetRows: budgetSources,
+        dealCount: dealCount[0]?.count ?? 0,
+        sourcesConnected: connectors.map((connector) => ({
+          source: connector.sourceSystem,
+          connected: connector.isConfigured,
+          account: connector.credential.accountLabel,
+        })),
+        recentLoads: lastLoads.map((run) => ({
+          source: run.sourceSystem,
+          entity: run.entity,
+          rowsWritten: run.rowsWritten,
+          finishedAt: run.finishedAt?.toISOString() ?? null,
+        })),
+        verdict: live.length === 0
+          ? 'Every profit-and-loss row in the warehouse is seeded demonstration data. No month has been loaded from a source system.'
+          : seeded.length === 0
+            ? 'Every profit-and-loss row was loaded from a source system. Nothing seeded remains.'
+            : 'The warehouse holds a mix: some months are seeded and some were loaded from a source system. Name which are which from the windows above.',
+        instruction:
+          'Answer this plainly and without softening it. A reader who believes seeded figures are their own books will act on them.',
+      },
+      activity: 'Checked where the figures in the warehouse came from',
+    };
+  },
+};
+
+/**
+ * The connection state, and what to do about it.
+ *
+ * Distinct from list_sources, which describes what each source can supply. This
+ * one answers "why can I not see my own numbers yet", which is a different
+ * question and the one people actually ask.
+ */
+const getConnectionStatus: ToolDefinition = {
+  name: 'get_connection_status',
+  description:
+    'Report whether each source system is signed in, which account it is signed in to, and what remains to be done before it can supply data. Call this when the user asks about connecting QuickBooks, HubSpot or Google Sheets, or reports that a connection is not working.',
+  input_schema: { type: 'object', properties: {} },
+  async run() {
+    const connectors = await connectorStatuses();
+
+    return {
+      result: {
+        sources: connectors.map((connector) => ({
+          source: connector.sourceSystem,
+          label: connector.label,
+          connected: connector.isConfigured,
+          account: connector.credential.accountLabel,
+          signInAvailable: connector.oauthAvailable,
+          signInLabel: connector.signInLabel,
+          howToConnect: connector.oauthAvailable
+            ? `Open Admin and choose "${connector.signInLabel}". Nothing else is needed — no token, no key file.`
+            : connector.oauthBlockedReason,
+          needsSpreadsheet: connector.needsSpreadsheet,
+          lastError: connector.credential.lastError,
+        })),
+        instruction:
+          'Tell the user exactly which step is outstanding. Do not describe a source as connected unless connected is true.',
+      },
+      activity: 'Checked the state of every source connection',
+    };
+  },
+};
+
 // ---------------------------------------------------------------------------
 
 export const AGENT_TOOLS: ToolDefinition[] = [
@@ -673,6 +790,8 @@ export const AGENT_TOOLS: ToolDefinition[] = [
   getReconStatus,
   makeChart,
   listSources,
+  getConnectionStatus,
+  getDataProvenance,
   planExtraction,
   getLoadHistory,
 ];

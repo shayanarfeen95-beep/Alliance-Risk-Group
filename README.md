@@ -25,7 +25,7 @@ Three env vars, in increasing order of seriousness:
 |---|---|
 | A live demo, no database | `DEMO_MODE=1` (already in `vercel.json`) |
 | A real deployment | `DATABASE_URL` — a Neon pooled connection string |
-| Connectable sources | `CREDENTIAL_KEY`, plus each provider's client id/secret |
+| Connectable sources | `COMPOSIO_API_KEY` — and nothing else |
 
 `DATABASE_URL` takes precedence over `DEMO_MODE`, so the same deployment starts
 as a self-seeding demo and becomes real the moment a database is attached —
@@ -39,13 +39,36 @@ cannot hold them, so it would not be the same system.
 
 ## Connecting QuickBooks, HubSpot and Sheets
 
-From **Admin → Source connections**: OAuth for QuickBooks and HubSpot, a pasted
-private-app token for HubSpot if you prefer, a service account for Sheets.
-Credentials are AES-256-GCM encrypted before they reach the database, verified
-against the provider before they are stored, and QuickBooks' rotating refresh
-token is written back on every refresh — the omission that kills a QBO
+Set `COMPOSIO_API_KEY`, then go to **Admin → Source connections** and press *Sign
+in with QuickBooks*. That is the whole procedure. There is no Intuit developer
+app to register, no HubSpot private app to create, no Google service-account key
+file to download and share a spreadsheet with.
+
+Composio holds the OAuth applications and the tokens. What this system stores is
+a connection identifier that opens nothing on its own, and every request to
+QuickBooks and HubSpot goes through Composio's proxy, which attaches the
+credential server-side. No provider token exists in this process to be logged,
+cached or leaked — and `CREDENTIAL_KEY` is not needed, because there is no secret
+here to encrypt.
+
+Google grants access to an *account*, not to a document, so a signed-in Sheets
+connection asks once for the spreadsheet's link. That is a document identifier,
+not a credential, and it is verified by actually reading the sheet before it is
+saved.
+
+Without `COMPOSIO_API_KEY` the older path still works — your own OAuth
+applications, a pasted HubSpot private-app token, a Google service account, and
+`CREDENTIAL_KEY` to encrypt them at rest. QuickBooks' rotating refresh token is
+written back on every refresh there, which is the omission that kills a QBO
 integration months after anyone last looked at it. See
 [`docs/RUNBOOK.md`](docs/RUNBOOK.md).
+
+**Connecting is not the same as loading.** A source supplies nothing until a pull
+runs: ask the assistant to pull a month, confirm it, and the extraction lands the
+raw payloads and then conforms them into the warehouse in one reversible
+`load_run`. Until that happens the dashboards show whatever was there before —
+ask the assistant *"are these figures from our own books?"* and it will tell you
+which months came from where.
 
 ---
 

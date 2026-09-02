@@ -139,13 +139,6 @@ export function ConnectorCard(props: ConnectorCardProps) {
         </p>
       )}
 
-      {!c.connected && props.connectVia === 'composio' && (
-        <p className="mt-3 text-[11px] leading-relaxed text-[var(--text-muted)]">
-          Sign in with the account that owns the data. No developer app, token or key file — the
-          authorisation is held by Composio and this system never sees a credential.
-        </p>
-      )}
-
       {!c.connected && props.oauthBlockedReason && (
         <p className="mt-3 text-[11px] leading-relaxed text-[var(--text-muted)]">
           {props.oauthBlockedReason}

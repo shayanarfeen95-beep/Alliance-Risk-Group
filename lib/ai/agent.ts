@@ -17,8 +17,15 @@ import type { ChartCardProps } from '@/components/charts/chart-card';
  * keeps that check in one place.
  */
 
-const MODEL = process.env.ANTHROPIC_MODEL_INTERACTIVE ?? 'claude-opus-5';
-const MAX_ITERATIONS = 8;
+const MODEL = process.env.ANTHROPIC_MODEL_INTERACTIVE ?? 'claude-sonnet-5';
+
+/**
+ * Enough room to look something up, notice it does not answer the question, and
+ * look up the right thing. Eight cut real chains of reasoning short — a variance
+ * question legitimately costs a period check, a statement, the drivers, a
+ * comparison and a chart before there is anything worth saying.
+ */
+const MAX_ITERATIONS = 14;
 
 export interface AgentTurnInput {
   user: SessionUser;
@@ -26,7 +33,22 @@ export interface AgentTurnInput {
   pageContext: PageContext;
   messages: Array<{ role: 'user' | 'assistant'; content: string }>;
   conversationId: string | null;
+  /**
+   * Called as the turn happens, so the panel can show the answer being written
+   * and the lookups being made rather than a spinner. A financial question can
+   * legitimately take half a minute of tool calls; half a minute of "Working…"
+   * reads as a broken application.
+   */
+  onEvent?: (event: AgentStreamEvent) => void;
+  signal?: AbortSignal;
 }
+
+export type AgentStreamEvent =
+  | { type: 'text'; delta: string }
+  | { type: 'activity'; tool: string; summary: string }
+  | { type: 'citations'; citations: AgentCitation[] }
+  | { type: 'view'; view: ChartCardProps }
+  | { type: 'pendingAction'; pendingAction: { id: string; label: string; detail: string } };
 
 export interface AgentCitation {
   label: string;
@@ -86,17 +108,36 @@ export async function runAgentTurn(input: AgentTurnInput): Promise<AgentTurnResu
 
   const activity: AgentTurnResult['activity'] = [];
   const citations: AgentCitation[] = [];
+  const emit = input.onEvent ?? (() => {});
   let view: ChartCardProps | undefined;
   let pendingAction: AgentTurnResult['pendingAction'];
 
+  /**
+   * Text the model produced across the whole turn, including what it said before
+   * reaching for a tool. It is streamed as it arrives, so the transcript and the
+   * stream must agree — showing a preamble and then replacing it with something
+   * shorter is how a working answer comes to look like a glitch.
+   */
+  let spoken = '';
+
   for (let iteration = 0; iteration < MAX_ITERATIONS; iteration++) {
-    const response = await client.messages.create({
-      model: MODEL,
-      max_tokens: 8000,
-      system: buildSystemPrompt(input.user, input.session, input.pageContext),
-      tools,
-      messages,
+    const stream = client.messages.stream(
+      {
+        model: MODEL,
+        max_tokens: 8000,
+        system: buildSystemPrompt(input.user, input.session, input.pageContext),
+        tools,
+        messages,
+      },
+      input.signal ? { signal: input.signal } : undefined,
+    );
+
+    stream.on('text', (delta) => {
+      spoken += delta;
+      emit({ type: 'text', delta });
     });
+
+    const response = await stream.finalMessage();
 
     // Safety classifiers can decline a request outright. That arrives as a
     // successful response with an empty or partial body, so check the stop
@@ -104,13 +145,13 @@ export async function runAgentTurn(input: AgentTurnInput): Promise<AgentTurnResu
     if (response.stop_reason === 'refusal') {
       const detail = response.stop_details;
       await logTurn(db, input, 'assistant', 'Declined by safety classifier', true, Date.now() - started);
+      void detail;
       return {
         content:
           'I was unable to answer that. If it was a routine question about ARG’s figures, rephrasing it usually helps; otherwise the dashboards have the same numbers.',
         citations: [],
         activity,
         isRefusal: true,
-        ...(detail ? {} : {}),
       };
     }
 
@@ -119,13 +160,11 @@ export async function runAgentTurn(input: AgentTurnInput): Promise<AgentTurnResu
     );
 
     if (toolUses.length === 0) {
-      const text = response.content
-        .filter((block): block is Anthropic.TextBlock => block.type === 'text')
-        .map((block) => block.text)
-        .join('\n')
-        .trim();
+      const text = spoken.trim();
 
       await logTurn(db, input, 'assistant', text, false, Date.now() - started, citations);
+
+      if (citations.length) emit({ type: 'citations', citations });
 
       return {
         content: text || 'I could not produce an answer for that.',
@@ -134,6 +173,13 @@ export async function runAgentTurn(input: AgentTurnInput): Promise<AgentTurnResu
         view,
         pendingAction,
       };
+    }
+
+    // A preamble before a tool call is a separate paragraph from whatever comes
+    // after it. Without the break they run together mid-sentence.
+    if (spoken && !spoken.endsWith('\n\n')) {
+      spoken += '\n\n';
+      emit({ type: 'text', delta: '\n\n' });
     }
 
     messages.push({ role: 'assistant', content: response.content });
@@ -160,9 +206,18 @@ export async function runAgentTurn(input: AgentTurnInput): Promise<AgentTurnResu
           context,
         );
 
-        if (outcome.activity) activity.push({ tool: tool.name, summary: outcome.activity });
-        if (outcome.view) view = outcome.view;
-        if (outcome.pendingAction) pendingAction = outcome.pendingAction;
+        if (outcome.activity) {
+          activity.push({ tool: tool.name, summary: outcome.activity });
+          emit({ type: 'activity', tool: tool.name, summary: outcome.activity });
+        }
+        if (outcome.view) {
+          view = outcome.view;
+          emit({ type: 'view', view: outcome.view });
+        }
+        if (outcome.pendingAction) {
+          pendingAction = outcome.pendingAction;
+          emit({ type: 'pendingAction', pendingAction: outcome.pendingAction });
+        }
         if (outcome.citations) citations.push(...outcome.citations);
 
         await db.insert(t.aiQueryLog).values({
@@ -195,6 +250,7 @@ export async function runAgentTurn(input: AgentTurnInput): Promise<AgentTurnResu
 
   return {
     content:
+      spoken.trim() ||
       'I worked through several steps but did not reach a settled answer. Narrowing the question to one metric, division and month usually gets there.',
     citations,
     activity,
