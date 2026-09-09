@@ -14,16 +14,15 @@ export default async function LoginPage({
   const query = await searchParams;
   const next = safeNext(typeof query.next === 'string' ? query.next : null);
 
-  if (await getSessionUser()) redirect(next ?? '/executive');
-
-  // A provisioned-but-empty database has no account to sign in with. Send the
-  // first visitor to setup rather than to a form that cannot succeed.
-  //
-  // A database that cannot be reached is a different thing again, and it used to
-  // surface as a bare 500 with a digest — nothing anybody could act on. It now
-  // says which variable to look at.
+  // Keep every database-dependent check inside the same guarded block. The
+  // session lookup also opens the database, so guarding only the setup check
+  // still allowed a broken production connection to escape as a generic 500.
   let unreachable = false;
   try {
+    if (await getSessionUser()) redirect(next ?? '/executive');
+
+    // A provisioned-but-empty database has no account to sign in with. Send the
+    // first visitor to setup rather than to a form that cannot succeed.
     const { isUninitialised } = await import('@/lib/db/bootstrap');
     const { getDb } = await import('@/lib/db/client');
     if (await isUninitialised(await getDb())) redirect('/setup');
