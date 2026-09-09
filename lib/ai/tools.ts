@@ -791,7 +791,6 @@ const getDataProvenance: ToolDefinition = {
       connectorStatuses(),
     ]);
 
-    const seeded = plSources.filter((row) => row.sourceSystem === 'SEED');
     const live = plSources.filter((row) => row.sourceSystem !== 'SEED');
 
     return {
@@ -815,10 +814,8 @@ const getDataProvenance: ToolDefinition = {
           finishedAt: run.finishedAt?.toISOString() ?? null,
         })),
         verdict: live.length === 0
-          ? 'Every profit-and-loss row in the warehouse is seeded demonstration data. No month has been loaded from a source system.'
-          : seeded.length === 0
-            ? 'Every profit-and-loss row was loaded from a source system. Nothing seeded remains.'
-            : 'The warehouse holds a mix: some months are seeded and some were loaded from a source system. Name which are which from the windows above.',
+          ? 'No month has been loaded from any source system yet, so the dashboards have nothing to show. Nothing is fabricated in its place.'
+          : 'Every profit-and-loss row was loaded from a source system. Name the months and the source from the windows above.',
         instruction:
           'Answer this plainly and without softening it. A reader who believes seeded figures are their own books will act on them.',
       },

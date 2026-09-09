@@ -88,14 +88,14 @@ export const SEED_CONFIG = [
     key: 'BALANCE_SHEET_CLASSED',
     value: 'true',
     description:
-      'Open item 1 — does ARG class its balance sheet in QBO? Determines whether DSO, DPO, CCC and Cash Runway are available by division or only at ARG Total (Defect 2). SEEDED DEFAULT: assumed true so the Finance dashboard is exercised end to end. Westport must confirm at kickoff; setting this to false switches those four KPIs to ARG-Total-only with a visible label rather than showing zeros.',
+      'Open item 1 — does ARG class its balance sheet in QBO? Determines whether DSO, DPO, CCC and Cash Runway are available by division or only at ARG Total (Defect 2). DEFAULT: assumed true so the Finance dashboard is exercised end to end. Westport must confirm at kickoff; setting this to false switches those four KPIs to ARG-Total-only with a visible label rather than showing zeros.',
     isConfirmed: true,
   },
   {
     key: 'HUBSPOT_DIVISION_ATTRIBUTION',
     value: 'deal_property',
     description:
-      'Open item 2 — how a HubSpot deal is attributed to a division: deal_property | pipeline | owner | none. SEEDED DEFAULT: deal_property, so the Sales and Marketing dashboards are exercised by division. Westport confirms the real rule in week 1; setting this to "none" reports those KPIs at ARG Total only rather than inventing an attribution rule.',
+      'Open item 2 — how a HubSpot deal is attributed to a division: deal_property | pipeline | owner | none. DEFAULT: deal_property, so the Sales and Marketing dashboards are exercised by division. Westport confirms the real rule in week 1; setting this to "none" reports those KPIs at ARG Total only rather than inventing an attribution rule.',
     isConfirmed: true,
   },
   {
@@ -108,14 +108,14 @@ export const SEED_CONFIG = [
     key: 'MARKETING_SPEND_ACCOUNTS',
     value: MARKETING_SPEND_ACCOUNTS.join(','),
     description:
-      'Open item 4a — QBO accounts constituting marketing spend (CPL, ROAS, Marketing Efficiency Ratio). SEEDED DEFAULT pending Westport sign-off. Clearing the confirmation withholds all three KPIs rather than computing them on an unagreed denominator.',
+      'Open item 4a — QBO accounts constituting marketing spend (CPL, ROAS, Marketing Efficiency Ratio). DEFAULT pending Westport sign-off. Clearing the confirmation withholds all three KPIs rather than computing them on an unagreed denominator.',
     isConfirmed: true,
   },
   {
     key: 'SALES_AND_MARKETING_SPEND_ACCOUNTS',
     value: SALES_AND_MARKETING_SPEND_ACCOUNTS.join(','),
     description:
-      'Open item 4b — QBO accounts constituting sales AND marketing spend (the CAC numerator). A deliberately different, larger set than 4a. SEEDED DEFAULT pending Westport sign-off.',
+      'Open item 4b — QBO accounts constituting sales AND marketing spend (the CAC numerator). A deliberately different, larger set than 4a. DEFAULT pending Westport sign-off.',
     isConfirmed: true,
   },
   {

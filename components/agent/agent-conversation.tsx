@@ -84,7 +84,7 @@ const SUGGESTION_GROUPS: Array<{ label: string; items: string[] }> = [
   {
     label: 'Check the plumbing',
     items: [
-      'Are these figures from our own books, or seeded demonstration data?',
+      'Which months have been loaded from QuickBooks, and which are still missing?',
       'What still needs doing before QuickBooks can supply data?',
       'Pull the latest month from QuickBooks',
     ],

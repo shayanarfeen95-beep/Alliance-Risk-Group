@@ -10,7 +10,7 @@ import * as t from '@/lib/db/schema';
 import { getSessionUser } from '@/lib/auth/session';
 import { redirect } from 'next/navigation';
 import { connectorStatuses } from '@/lib/connectors';
-import { getDataMode, seedFootprint, seedLoadRunIds } from '@/lib/data-mode';
+import { seedLoadRunIds } from '@/lib/data-mode';
 import { syncableSources } from '@/lib/etl/ingest';
 import { Card, CardHeader, Chip, DataTable, SectionTitle, Td, Th } from '@/components/ui/primitives';
 
@@ -75,12 +75,7 @@ export default async function AdminPage({
   const connectors = await connectorStatuses();
   const composioReady = connectors.some((connector) => connector.connectVia === 'composio');
 
-  const [dataMode, footprint, sources, seedRuns] = await Promise.all([
-    getDataMode(db),
-    seedFootprint(db),
-    syncableSources(),
-    seedLoadRunIds(db),
-  ]);
+  const [sources, seedRuns] = await Promise.all([syncableSources(), seedLoadRunIds(db)]);
 
   // Rows a source actually loaded, which is the figure that decides whether live
   // mode has anything to show. Counted across every run rather than the ten most
@@ -143,9 +138,7 @@ export default async function AdminPage({
           Data
         </SectionTitle>
         <DataControls
-          mode={dataMode}
           connectedSources={sources}
-          seedFootprint={footprint}
           loadedRowCount={loadedRowCount}
           canManage={can(user, 'RUN_INGESTION')}
         />

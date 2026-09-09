@@ -14,10 +14,8 @@ import {
   CircleAlert,
   CircleCheck,
   Database,
-  FlaskConical,
   Loader2,
   RefreshCw,
-  Trash2,
 } from 'lucide-react';
 
 interface SyncOutcome {
@@ -40,28 +38,18 @@ interface SyncResponse {
 }
 
 export interface DataControlsProps {
-  mode: 'DEMONSTRATION' | 'LIVE';
   connectedSources: Array<{ source: string; label: string; connected: boolean; entities: number }>;
-  seedFootprint: { plRows: number; glRows: number; dealRows: number; budgetRows: number };
   loadedRowCount: number;
   canManage: boolean;
 }
 
 export function DataControls(props: DataControlsProps) {
   const router = useRouter();
-  const [busy, setBusy] = useState<null | 'sync' | 'mode' | 'purge'>(null);
+  const [busy, setBusy] = useState<null | 'sync'>(null);
   const [result, setResult] = useState<SyncResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [confirmingPurge, setConfirmingPurge] = useState(false);
 
   const connected = props.connectedSources.filter((source) => source.connected);
-  const live = props.mode === 'LIVE';
-
-  const seedRows =
-    props.seedFootprint.plRows +
-    props.seedFootprint.glRows +
-    props.seedFootprint.dealRows +
-    props.seedFootprint.budgetRows;
 
   async function sync(sources?: string[]) {
     setBusy('sync');
@@ -86,101 +74,34 @@ export function DataControls(props: DataControlsProps) {
     }
   }
 
-  async function switchMode(mode: 'DEMONSTRATION' | 'LIVE') {
-    setBusy('mode');
-    setError(null);
-    try {
-      const response = await fetch('/api/data-mode', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ mode }),
-      });
-      const payload = (await response.json()) as { ok: boolean; error?: string };
-      if (!payload.ok) setError(payload.error ?? 'The mode could not be changed.');
-      else router.refresh();
-    } finally {
-      setBusy(null);
-    }
-  }
-
-  async function purge() {
-    setBusy('purge');
-    setError(null);
-    try {
-      const response = await fetch('/api/data-mode', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ purgeSeed: true }),
-      });
-      const payload = (await response.json()) as { ok: boolean; error?: string };
-      if (!payload.ok) setError(payload.error ?? 'The seeded data could not be removed.');
-      else {
-        setConfirmingPurge(false);
-        router.refresh();
-      }
-    } finally {
-      setBusy(null);
-    }
-  }
-
   return (
     <div className="space-y-4">
-      {/* --- Which figures are being shown ---------------------------------- */}
+      {/* --- What the dashboards are reading ---------------------------------- */}
       <div
-        className="flex flex-wrap items-start justify-between gap-4 rounded-[var(--radius)] border p-4"
-        style={{
-          borderColor: live ? 'var(--status-good)' : 'var(--status-warning)',
-          background: live ? 'var(--status-good-wash)' : 'var(--status-warning-wash)',
-        }}
+        className="flex flex-wrap items-start gap-3 rounded-[var(--radius)] border p-4"
+        style={{ borderColor: 'var(--border)', background: 'var(--surface-1)' }}
       >
+        <Database size={14} className="mt-0.5 shrink-0" aria-hidden />
         <div className="min-w-0 max-w-2xl">
-          <p className="flex items-center gap-2 text-[13px] font-semibold">
-            {live ? <Database size={14} aria-hidden /> : <FlaskConical size={14} aria-hidden />}
-            {live ? 'Live data' : 'Demonstration data'}
-          </p>
+          <p className="text-[13px] font-semibold">Live data</p>
           <p className="mt-1 text-[11.5px] leading-relaxed text-[var(--text-secondary)]">
-            {live ? (
-              <>
-                The dashboards show only what QuickBooks, HubSpot and Google Sheets have loaded —{' '}
-                {props.loadedRowCount.toLocaleString()} row
-                {props.loadedRowCount === 1 ? '' : 's'} so far.
-                {seedRows > 0 && ' Seeded rows are excluded from every view.'} A month nothing has
-                loaded reads as unavailable rather than as a figure.
-              </>
-            ) : (
-              <>
-                The dashboards are showing the seeded dataset, which is fabricated to exercise every
-                view before a source is connected. Switch to live and only data loaded from your own
-                systems is shown.
-              </>
-            )}
+            Every figure on every dashboard was loaded from QuickBooks, HubSpot or Google Sheets —{' '}
+            {props.loadedRowCount.toLocaleString()} row
+            {props.loadedRowCount === 1 ? '' : 's'} so far. There is no demonstration dataset and no
+            way to switch to one: a month nothing has loaded reads as unavailable rather than as a
+            figure.
           </p>
-          {live && props.loadedRowCount === 0 && (
+          {props.loadedRowCount === 0 && (
             <p
               className="mt-2 flex items-start gap-1.5 text-[11.5px] leading-relaxed"
-              style={{ color: 'var(--status-critical)' }}
+              style={{ color: 'var(--status-warning)' }}
             >
               <CircleAlert size={13} className="mt-px shrink-0" aria-hidden />
-              Live is on and nothing has been loaded yet, so every dashboard will read as
-              unavailable. Sign a source in and press Pull.
+              Nothing has been loaded yet, so the dashboards will read as unavailable throughout.
+              Sign a source in below, then press Pull.
             </p>
           )}
         </div>
-
-        {/* Offering "show demonstration data" with none stored is a button that
-            empties the dashboards and explains nothing. */}
-        {props.canManage && (seedRows > 0 || !live) && (
-          <button
-            type="button"
-            onClick={() => switchMode(live ? 'DEMONSTRATION' : 'LIVE')}
-            disabled={busy !== null}
-            className="flex shrink-0 items-center gap-1.5 rounded-[5px] px-3 py-1.5 text-[11.5px] font-medium disabled:opacity-50"
-            style={{ background: 'var(--text-primary)', color: 'var(--text-inverse)' }}
-          >
-            {busy === 'mode' && <Loader2 size={12} className="animate-spin" aria-hidden />}
-            {live ? 'Show demonstration data' : 'Switch to live data'}
-          </button>
-        )}
       </div>
 
       {/* --- Pulling --------------------------------------------------------- */}
@@ -283,54 +204,6 @@ export function DataControls(props: DataControlsProps) {
         )}
       </div>
 
-      {/* --- Removing the seed for good -------------------------------------- */}
-      {props.canManage && seedRows > 0 && (
-        <div className="rounded-[var(--radius)] border p-4" style={{ borderColor: 'var(--border)' }}>
-          <div className="flex flex-wrap items-start justify-between gap-4">
-            <div className="max-w-2xl">
-              <p className="text-[13px] font-semibold">Delete the seeded dataset</p>
-              <p className="mt-1 text-[11.5px] leading-relaxed text-[var(--text-muted)]">
-                {seedRows.toLocaleString()} seeded rows are still stored — hidden in live mode, but
-                present. Deleting them cannot be undone, and it is the difference between the
-                demonstration data being <em>hidden</em> and being <em>gone</em>. Nothing loaded
-                from a source is touched.
-              </p>
-            </div>
-
-            {confirmingPurge ? (
-              <div className="flex shrink-0 gap-2">
-                <button
-                  type="button"
-                  onClick={purge}
-                  disabled={busy !== null}
-                  className="flex items-center gap-1.5 rounded-[5px] px-3 py-1.5 text-[11.5px] font-medium text-white disabled:opacity-50"
-                  style={{ background: 'var(--status-critical)' }}
-                >
-                  {busy === 'purge' && <Loader2 size={12} className="animate-spin" aria-hidden />}
-                  Delete permanently
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setConfirmingPurge(false)}
-                  className="rounded-[5px] px-2.5 py-1.5 text-[11.5px] text-[var(--text-muted)]"
-                >
-                  Cancel
-                </button>
-              </div>
-            ) : (
-              <button
-                type="button"
-                onClick={() => setConfirmingPurge(true)}
-                className="flex shrink-0 items-center gap-1.5 rounded-[5px] border px-3 py-1.5 text-[11.5px] font-medium transition-colors hover:bg-[var(--surface-2)]"
-                style={{ borderColor: 'var(--border)' }}
-              >
-                <Trash2 size={12} aria-hidden />
-                Delete seeded data
-              </button>
-            )}
-          </div>
-        </div>
-      )}
     </div>
   );
 }
