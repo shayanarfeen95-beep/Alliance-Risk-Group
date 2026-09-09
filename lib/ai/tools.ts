@@ -934,8 +934,21 @@ export async function confirmExtraction(
   // The work itself lives in lib/etl/ingest.ts, shared with the Sync button in
   // Admin. A load started from a conversation and one started from a button must
   // produce the same run, the same provenance and the same reconciliation.
-  const { executeLoadRun } = await import('@/lib/etl/ingest');
-  const outcome = await executeLoadRun(db, user, run, 'AGENT_EXTRACTION_CONFIRMED');
+  const { executeLoadRun, resumeLoadRun } = await import('@/lib/etl/ingest');
+
+  // A pull is sliced now: the connector stops on a budget and hands back a
+  // cursor rather than fetching a whole portal in one call. Keep resuming until
+  // the source says there is no more, or until this request runs out of room.
+  const deadline = Date.now() + 200_000;
+  let outcome = await executeLoadRun(db, user, run, 'AGENT_EXTRACTION_CONFIRMED');
+  let recordsRead = outcome.recordsRead;
+  let rowsWritten = outcome.rowsWritten;
+
+  while (outcome.ok && !outcome.done && Date.now() < deadline) {
+    outcome = await resumeLoadRun(db, user, loadRunId);
+    recordsRead += outcome.recordsRead;
+    rowsWritten += outcome.rowsWritten;
+  }
 
   if (!outcome.ok) {
     // An unmapped class or account is not a bug to be worked around — it is a
@@ -946,11 +959,21 @@ export async function confirmExtraction(
     };
   }
 
-  const summary =
-    `Pulled ${outcome.recordsRead} record${outcome.recordsRead === 1 ? '' : 's'} from ` +
-    `${connector.label} and wrote ${outcome.rowsWritten.toLocaleString()} row` +
-    `${outcome.rowsWritten === 1 ? '' : 's'} into the warehouse. The dashboards now read ` +
-    `${connector.label} for this window.`;
+  // What was read is written and committed either way. The difference is whether
+  // the source has more — and saying "the dashboards now read HubSpot" over a
+  // pull that stopped two thirds of the way through is exactly the kind of
+  // confident wrong answer this codebase exists to refuse.
+  const summary = outcome.done
+    ? `Pulled ${recordsRead.toLocaleString()} record${recordsRead === 1 ? '' : 's'} from ` +
+      `${connector.label} and wrote ${rowsWritten.toLocaleString()} row` +
+      `${rowsWritten === 1 ? '' : 's'} into the warehouse. The dashboards now read ` +
+      `${connector.label} for this window.`
+    : `Pulled ${recordsRead.toLocaleString()} record${recordsRead === 1 ? '' : 's'} from ` +
+      `${connector.label} so far and wrote ${rowsWritten.toLocaleString()} row` +
+      `${rowsWritten === 1 ? '' : 's'}, all committed — but ${connector.label} has more than one ` +
+      `pull can take in a single request, so this window is NOT fully loaded yet. The run is ` +
+      `still open and resumes where it stopped: press Pull in Admin, or ask me again, to finish ` +
+      `it. Treat ${connector.label} figures for this window as incomplete until then.`;
 
   return {
     ok: true,
