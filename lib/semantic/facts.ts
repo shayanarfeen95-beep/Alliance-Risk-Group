@@ -115,6 +115,15 @@ export interface FactBundle {
   gl: Map<string, GlDetail[]>;
   deals: DealRecord[];
   proposalEntries: Array<{ dealId: string; divisionCode: string | null; enteredAt: Date }>;
+  /**
+   * Every stage a deal has entered, not only the proposal one.
+   *
+   * The HubSpot Leadership view draws a funnel and a board, both of which need
+   * the whole history; `proposalEntries` stays because New Proposals Sent is
+   * defined on that single stage and reads better against a list that contains
+   * only it.
+   */
+  stageEntries: Array<{ dealId: string; stage: string; divisionCode: string | null; enteredAt: Date }>;
   contacts: ContactRecord[];
   meetings: MeetingRecord[];
   config: Map<string, ConfigValue>;
@@ -199,6 +208,7 @@ export async function loadFactBundle(
       gl: new Map(),
       deals: [],
       proposalEntries: [],
+      stageEntries: [],
       contacts: [],
       meetings: [],
       config: new Map(),
@@ -331,7 +341,7 @@ export async function loadFactBundle(
   const hubspotFrom = monthBounds(addMonths(period.month, -23)).start;
   const hubspotTo = monthBounds(period.month).endExclusive;
 
-  const [dealRows, proposalRows, contactRows, meetingRows] = await Promise.all([
+  const [dealRows, proposalRows, stageRows, contactRows, meetingRows] = await Promise.all([
     db.select().from(t.factDeal).where(excludeSeed(t.factDeal.loadRunId as never)),
     db
       .select({
@@ -345,6 +355,22 @@ export async function loadFactBundle(
         and(
           // §6: New Proposals Sent counts deals ENTERING the Proposal stage.
           eq(t.factDealStageHistory.stage, 'proposalsent'),
+          gte(t.factDealStageHistory.enteredAt, hubspotFrom),
+          lte(t.factDealStageHistory.enteredAt, hubspotTo),
+          excludeSeed(t.factDealStageHistory.loadRunId as never),
+        ),
+      ),
+    db
+      .select({
+        dealId: t.factDealStageHistory.dealId,
+        stage: t.factDealStageHistory.stage,
+        enteredAt: t.factDealStageHistory.enteredAt,
+        divisionCode: t.factDeal.divisionCode,
+      })
+      .from(t.factDealStageHistory)
+      .innerJoin(t.factDeal, eq(t.factDeal.dealId, t.factDealStageHistory.dealId))
+      .where(
+        and(
           gte(t.factDealStageHistory.enteredAt, hubspotFrom),
           lte(t.factDealStageHistory.enteredAt, hubspotTo),
           excludeSeed(t.factDealStageHistory.loadRunId as never),
@@ -492,6 +518,7 @@ export async function loadFactBundle(
       ownerName: row.ownerName,
     })),
     proposalEntries: proposalRows.filter((row) => inScope(row.divisionCode)),
+    stageEntries: stageRows.filter((row) => inScope(row.divisionCode)),
     contacts: contactRows.filter((row) => inScope(row.divisionCode)).map((row) => ({
       contactId: row.contactId,
       divisionCode: row.divisionCode,

@@ -12,6 +12,7 @@ import {
   Sun,
   TrendingUp,
   Wallet,
+  Filter,
 } from 'lucide-react';
 import { useEffect, useState } from 'react';
 
@@ -31,6 +32,7 @@ const NAV_GROUPS: Array<{ label: string; items: Array<{ href: string; label: str
       { href: '/executive', label: 'Executive', icon: LayoutDashboard },
       { href: '/finance', label: 'Finance', icon: Wallet },
       { href: '/sales', label: 'Sales', icon: TrendingUp },
+      { href: '/hubspot', label: 'HubSpot Leadership', icon: Filter },
       { href: '/marketing', label: 'Marketing', icon: Megaphone },
     ],
   },

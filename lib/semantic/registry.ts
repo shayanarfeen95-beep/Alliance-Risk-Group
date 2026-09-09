@@ -160,6 +160,8 @@ function dealsClosedIn(bundle: FactBundle, month: MonthKey, divisions: string[],
 
 interface BaseSpec {
   id: string;
+  /** The row this line is called in the pre-existing Excel model. */
+  workbookLabel?: string;
   name: string;
   definition: string;
   formula: string;
@@ -171,6 +173,7 @@ interface BaseSpec {
 const BASE_MEASURES: BaseSpec[] = [
   {
     id: 'revenue',
+    workbookLabel: 'Total Revenue / Total Income',
     name: 'Revenue',
     definition: 'Total income for the month, from QuickBooks.',
     formula: 'QBO total income',
@@ -179,6 +182,7 @@ const BASE_MEASURES: BaseSpec[] = [
   },
   {
     id: 'payroll_direct',
+    workbookLabel: 'Total Payroll - Direct',
     name: 'Payroll — Direct (memo)',
     definition:
       'Direct labour payroll. A MEMO line: it is already a component of COGS and must never be subtracted separately.',
@@ -190,6 +194,7 @@ const BASE_MEASURES: BaseSpec[] = [
   },
   {
     id: 'cogs',
+    workbookLabel: 'Total COGS',
     name: 'COGS',
     definition: 'Total cost of goods sold, inclusive of direct payroll.',
     formula: 'QBO total cost of goods sold (inclusive of payroll_direct)',
@@ -198,6 +203,7 @@ const BASE_MEASURES: BaseSpec[] = [
   },
   {
     id: 'gross_profit',
+    workbookLabel: 'Gross Profit',
     name: 'Gross Profit',
     definition: 'Revenue less COGS. Direct payroll is not subtracted — it is already inside COGS.',
     formula: 'revenue − cogs',
@@ -208,6 +214,7 @@ const BASE_MEASURES: BaseSpec[] = [
   },
   {
     id: 'payroll_expense',
+    workbookLabel: 'Total Payroll Expense',
     name: 'Payroll Expense (memo)',
     definition:
       'Administrative payroll. A MEMO line: already a component of operating expense and never subtracted separately.',
@@ -218,6 +225,7 @@ const BASE_MEASURES: BaseSpec[] = [
   },
   {
     id: 'opex',
+    workbookLabel: 'Total OpEx',
     name: 'Operating Expense',
     definition: 'Total operating expense, inclusive of administrative payroll.',
     formula: 'QBO total operating expense (inclusive of payroll_expense)',
@@ -226,6 +234,7 @@ const BASE_MEASURES: BaseSpec[] = [
   },
   {
     id: 'net_profit',
+    workbookLabel: 'NOI %',
     name: 'Net Profit',
     definition: 'Gross profit less operating expense.',
     formula: 'gross_profit − opex',
@@ -235,6 +244,7 @@ const BASE_MEASURES: BaseSpec[] = [
 ];
 
 const baseDefinitions: KpiDefinition[] = BASE_MEASURES.map((spec) => ({
+  workbookLabel: spec.workbookLabel,
   id: spec.id,
   name: spec.name,
   category: 'base',
@@ -303,6 +313,7 @@ const ratioDefinitions: KpiDefinition[] = RATIOS.map((spec) => ({
 const financeDefinitions: KpiDefinition[] = [
   {
     id: 'dso',
+    workbookLabel: 'Daily Sales Outstanding',
     name: 'Days Sales Outstanding',
     category: 'finance',
     definition: 'How long it takes ARG to collect what it has billed.',
@@ -335,6 +346,7 @@ const financeDefinitions: KpiDefinition[] = [
   },
   {
     id: 'dpo',
+    workbookLabel: 'Daily Payables Outstanding',
     name: 'Days Payable Outstanding',
     category: 'finance',
     definition: 'How long ARG takes to pay what it owes.',
@@ -367,6 +379,7 @@ const financeDefinitions: KpiDefinition[] = [
   },
   {
     id: 'ccc',
+    workbookLabel: 'Cash Conversion Cycle',
     name: 'Cash Conversion Cycle',
     category: 'finance',
     definition: 'Days between paying suppliers and collecting from customers.',
@@ -402,6 +415,7 @@ const financeDefinitions: KpiDefinition[] = [
   },
   {
     id: 'cash_runway',
+    workbookLabel: 'Cash Runway (Months)',
     name: 'Cash Runway',
     category: 'finance',
     definition: 'Months of operating expense the current cash balance covers.',
@@ -445,6 +459,7 @@ const financeDefinitions: KpiDefinition[] = [
   },
   {
     id: 'revenue_run_rate',
+    workbookLabel: 'Revenue Run Rate $',
     name: 'Revenue Run Rate',
     category: 'finance',
     definition: 'Annualised revenue, projected from year-to-date performance.',
@@ -471,6 +486,7 @@ const financeDefinitions: KpiDefinition[] = [
   },
   {
     id: 'ytd_gross_margin_pct',
+    workbookLabel: 'Gross Profit Run Rate %',
     name: 'YTD Gross Margin %',
     category: 'finance',
     definition: 'Year-to-date gross profit as a share of year-to-date revenue.',
@@ -496,6 +512,7 @@ const financeDefinitions: KpiDefinition[] = [
   },
   {
     id: 'ytd_net_margin_pct',
+    workbookLabel: 'Net Profit Run Rate %',
     name: 'YTD Net Margin %',
     category: 'finance',
     definition: 'Year-to-date net profit as a share of year-to-date revenue.',

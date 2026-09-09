@@ -53,6 +53,12 @@ export interface KpiComputation {
 }
 
 export interface KpiDefinition {
+  /**
+   * What this line is called in the Excel model ARG used before this system.
+   * Shown on a tile so somebody checking a figure against the workbook knows
+   * which row to look for.
+   */
+  workbookLabel?: string;
   id: string;
   name: string;
   category: KpiCategory;
