@@ -22,6 +22,13 @@ export const maxDuration = 60;
  * an interrupted run resumes from its cursor first, then the entity that has
  * gone longest without a refresh. Successive firings converge on a fully current
  * warehouse and then keep it there, and no single firing can time out.
+ *
+ * How often it fires is a plan limit, not a design choice: Vercel's Hobby tier
+ * allows one cron a day, so vercel.json asks for one, and a deployment carrying
+ * anything more frequent is REJECTED outright rather than merely ignored. At one
+ * firing a day this tops the stalest entities up rather than keeping everything
+ * current — the Pull button in Admin is still how a full refresh happens. Raising
+ * the schedule in vercel.json is the only change needed on a plan that allows it.
  */
 export async function GET(request: Request) {
   const secret = process.env.CRON_SECRET;
