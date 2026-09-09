@@ -10,7 +10,7 @@
  * A screen naming the one missing variable is a better answer than an
  * application that appears to work.
  */
-export function ConfigurationNeeded() {
+export function ConfigurationNeeded({ unreachable }: { unreachable?: boolean } = {}) {
   return (
     <main className="flex min-h-dvh items-center justify-center px-6 py-12">
       <div className="w-full max-w-lg">
@@ -23,12 +23,24 @@ export function ConfigurationNeeded() {
           <span className="text-[15px] font-semibold tracking-tight">Alliance Risk Group</span>
         </div>
 
-        <h1 className="text-[20px] font-semibold tracking-tight">One thing left to configure</h1>
+        <h1 className="text-[20px] font-semibold tracking-tight">
+          {unreachable ? 'The database could not be reached' : 'One thing left to configure'}
+        </h1>
 
         <p className="mt-2 text-[13px] leading-relaxed text-[var(--text-secondary)]">
-          This deployment has no database. Sign-ins, the authorisations for QuickBooks, HubSpot and
-          Google Sheets, and every figure loaded from them are kept in Postgres, and none of it
-          survives without one.
+          {unreachable ? (
+            <>
+              <code className="font-[var(--font-mono)]">DATABASE_URL</code> is set, but connecting to
+              it failed. The usual causes are a paused Neon project, a rotated password, or the
+              direct connection string being used where the pooled one is needed.
+            </>
+          ) : (
+            <>
+              This deployment has no database. Sign-ins, the authorisations for QuickBooks, HubSpot
+              and Google Sheets, and every figure loaded from them are kept in Postgres, and none of
+              it survives without one.
+            </>
+          )}
         </p>
 
         <div

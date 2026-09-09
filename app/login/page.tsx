@@ -2,6 +2,7 @@ import type { Metadata } from 'next';
 import { redirect } from 'next/navigation';
 import { getSessionUser } from '@/lib/auth/session';
 import { LoginForm } from './login-form';
+import { ConfigurationNeeded } from '@/components/shell/configuration-needed';
 
 export const metadata: Metadata = { title: 'Sign in' };
 
@@ -17,9 +18,22 @@ export default async function LoginPage({
 
   // A provisioned-but-empty database has no account to sign in with. Send the
   // first visitor to setup rather than to a form that cannot succeed.
-  const { isUninitialised } = await import('@/lib/db/bootstrap');
-  const { getDb } = await import('@/lib/db/client');
-  if (await isUninitialised(await getDb())) redirect('/setup');
+  //
+  // A database that cannot be reached is a different thing again, and it used to
+  // surface as a bare 500 with a digest — nothing anybody could act on. It now
+  // says which variable to look at.
+  let unreachable = false;
+  try {
+    const { isUninitialised } = await import('@/lib/db/bootstrap');
+    const { getDb } = await import('@/lib/db/client');
+    if (await isUninitialised(await getDb())) redirect('/setup');
+  } catch (error) {
+    // `redirect` throws by design; only a genuine failure gets the screen.
+    if (error && typeof error === 'object' && 'digest' in error) throw error;
+    unreachable = true;
+  }
+
+  if (unreachable) return <ConfigurationNeeded unreachable />;
 
   return (
     <main className="flex min-h-dvh items-center justify-center px-6 py-12">
@@ -44,8 +58,7 @@ export default async function LoginPage({
         <LoginForm next={next} />
 
         <p className="mt-8 border-t border-[var(--border)] pt-4 text-[11px] leading-relaxed text-[var(--text-muted)]">
-          Prepared by Westport Financial — fractional CFO of record. Figures are reported on the
-          accrual basis. Access is scoped by division.
+          Prepared by Westport Financial
         </p>
       </div>
     </main>

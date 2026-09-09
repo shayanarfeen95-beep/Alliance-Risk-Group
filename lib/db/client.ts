@@ -53,6 +53,51 @@ export class DatabaseNotConfiguredError extends Error {
   }
 }
 
+/**
+ * Parameters libpq understands and postgres-js does not.
+ *
+ * Anything in the query string that postgres-js has no option for is forwarded
+ * to the server as a *startup parameter*, and Postgres rejects an unknown one
+ * outright: `FATAL: unrecognized configuration parameter`. Every request then
+ * fails with a 500 that says nothing about its cause.
+ *
+ * This matters because Neon's console hands you a connection string ending
+ * `?sslmode=require&channel_binding=require`. That is correct for psql and fatal
+ * here, and pasting the string you were given is the obvious thing to do. So the
+ * ones that are meaningful only to a libpq client are dropped rather than
+ * passed on — the TLS they describe is already handled by `sslmode`.
+ */
+const LIBPQ_ONLY_PARAMS = [
+  'channel_binding',
+  'gssencmode',
+  'krbsrvname',
+  'service',
+  'passfile',
+  'sslcert',
+  'sslkey',
+  'sslcrl',
+  'sslcompression',
+  'requiressl',
+];
+
+export function sanitiseConnectionString(url: string): string {
+  try {
+    const parsed = new URL(url);
+    let changed = false;
+    for (const param of LIBPQ_ONLY_PARAMS) {
+      if (parsed.searchParams.has(param)) {
+        parsed.searchParams.delete(param);
+        changed = true;
+      }
+    }
+    return changed ? parsed.toString() : url;
+  } catch {
+    // Not parseable as a URL — hand it over untouched and let the driver report
+    // what is wrong with it, which it will do more precisely than this could.
+    return url;
+  }
+}
+
 async function create(): Promise<Database> {
   const url = process.env.DATABASE_URL;
 
@@ -72,7 +117,7 @@ async function create(): Promise<Database> {
     // `prepare: false` is required by pgbouncer in transaction mode, which is
     // what Neon's pooled endpoint runs.
     const serverless = Boolean(process.env.VERCEL);
-    const client = postgres(url, {
+    const client = postgres(sanitiseConnectionString(url), {
       max: serverless ? 1 : 10,
       prepare: false,
       idle_timeout: serverless ? 20 : undefined,
