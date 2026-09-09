@@ -58,6 +58,47 @@ function normaliseMonth(value: string | undefined): MonthKey | null {
   return null;
 }
 
+
+/**
+ * Every month that has anything loaded into it, newest first.
+ *
+ * This drives the month selector and, through it, what every dashboard is
+ * anchored on. It used to ask `fact_pl_actual` alone — the QuickBooks profit and
+ * loss — which quietly made QuickBooks a prerequisite for the whole application:
+ * with only HubSpot connected the list came back empty, every view fell through
+ * to a configured month nothing had loaded into, and tens of thousands of landed
+ * contacts, deals and meetings had no month to be displayed under. Every figure
+ * read zero, and the reason was invisible.
+ *
+ * A month is available when ANY source has put something in it. A dashboard that
+ * has no figure for the month it lands on still says so per figure — that part
+ * was already right — but it now lands somewhere the data actually is.
+ */
+async function monthsWithData(db: Awaited<ReturnType<typeof getDb>>): Promise<MonthKey[]> {
+  const rows = await db.execute(sql`
+    select period_month from (
+      select period_month from ${t.factPlActual}
+      union select period_month from ${t.factBsActual}
+      union select date_trunc('month', closedate)::date  from ${t.factDeal}    where closedate is not null
+      union select date_trunc('month', createdate)::date from ${t.factDeal}    where createdate is not null
+      union select date_trunc('month', createdate)::date from ${t.factContact} where createdate is not null
+      union select date_trunc('month', meeting_date)::date from ${t.factMeeting} where meeting_date is not null
+    ) months
+    where period_month in (select period_month from ${t.dimPeriod})
+    order by period_month desc
+  `);
+
+  const list = (Array.isArray(rows) ? rows : ((rows as { rows?: unknown[] }).rows ?? [])) as Array<{
+    period_month: string | Date;
+  }>;
+
+  return list.map((row) =>
+    typeof row.period_month === 'string'
+      ? (row.period_month.slice(0, 10) as MonthKey)
+      : (row.period_month.toISOString().slice(0, 10) as MonthKey),
+  );
+}
+
 export async function loadDashboardContext(
   searchParams: SearchParams,
 ): Promise<DashboardContext> {
@@ -66,25 +107,27 @@ export async function loadDashboardContext(
 
   const db = await getDb();
 
-  const periodRows = await db
-    .select({ periodMonth: t.dimPeriod.periodMonth })
-    .from(t.dimPeriod)
-    .innerJoin(t.factPlActual, eq(t.factPlActual.periodMonth, t.dimPeriod.periodMonth))
-    .groupBy(t.dimPeriod.periodMonth)
-    .orderBy(desc(t.dimPeriod.periodMonth));
-  const availableMonths = periodRows.map((row) => row.periodMonth);
+  const availableMonths = await monthsWithData(db);
 
   const defaultMonthRow = await db
     .select({ value: t.appConfig.value })
     .from(t.appConfig)
     .where(eq(t.appConfig.key, 'DEFAULT_REPORTING_MONTH'))
     .limit(1);
+  const configuredMonth = normaliseMonth(defaultMonthRow[0]?.value ?? undefined);
 
   const requested = normaliseMonth(first(searchParams.month));
   const month =
+    // What the URL asks for, if there is anything there to show.
     (requested && availableMonths.includes(requested) ? requested : null) ??
-    defaultMonthRow[0]?.value ??
+    // Then the configured reporting month — but only while it still holds data.
+    // Honouring it unconditionally is what put every dashboard on a month that
+    // nothing had ever loaded into, so a fully populated warehouse read as zeroes
+    // everywhere and no screen said which month it was even looking at.
+    (configuredMonth && availableMonths.includes(configuredMonth) ? configuredMonth : null) ??
+    // Otherwise the most recent month that actually has figures in it.
     availableMonths[0] ??
+    configuredMonth ??
     '2026-03-01';
 
   const session = await openSemanticSession(db, user, month);

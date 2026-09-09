@@ -94,6 +94,18 @@ const ENTITIES: EntityDescriptor[] = [
   },
 ];
 
+/** HubSpot's maximum page size for an ordinary object read. */
+const DEFAULT_PAGE_SIZE = 100;
+
+/**
+ * The maximum when `propertiesWithHistory` is requested.
+ *
+ * HubSpot refuses the request outright above this — "You can only request at
+ * most 50 objects in one request for properties with history" — rather than
+ * returning fewer. Deals are the only entity that asks for history.
+ */
+const HISTORY_PAGE_SIZE = 50;
+
 interface HubspotPage {
   results: Array<{ id: string }>;
   paging?: { next?: { after?: string } };
@@ -157,13 +169,14 @@ async function fetchPaged(
   properties: string[],
   extraParams: Record<string, string> = {},
   options?: FetchOptions,
+  pageSize = DEFAULT_PAGE_SIZE,
 ): Promise<{ records: RawRecord[]; nextCursor: string | null }> {
   const records: RawRecord[] = [];
   let after: string | undefined = options?.cursor ?? undefined;
 
   for (;;) {
     const json = await fetchPage(path, {
-      limit: '100',
+      limit: String(pageSize),
       // Omitted rather than sent empty: /crm/v3/owners is not an object route
       // and rejects a properties parameter outright.
       ...(properties.length ? { properties: properties.join(',') } : {}),
@@ -171,6 +184,16 @@ async function fetchPaged(
       ...extraParams,
       ...(after ? { after } : {}),
     });
+
+    // A page with no `results` array is not an empty page — it is a response
+    // this code does not understand, and treating the two alike is how a refused
+    // request came to be recorded as zero deals under a green tick.
+    if (!Array.isArray(json.results)) {
+      throw new Error(
+        `HubSpot returned no result set for ${path}, so the pull was stopped rather than ` +
+          `recorded as empty. The response was: ${JSON.stringify(json).slice(0, 300)}`,
+      );
+    }
 
     for (const result of json.results) {
       records.push({ entity: path, key: result.id, payload: result });
@@ -211,6 +234,10 @@ export const hubspotConnector: SourceConnector = {
           properties,
           { propertiesWithHistory: 'dealstage' },
           options,
+          // HubSpot caps a page at 50 when property history is requested, and
+          // rejects the whole call above that — it does not quietly truncate.
+          // Asking for 100 made every deals page a VALIDATION_ERROR.
+          HISTORY_PAGE_SIZE,
         );
         break;
       }

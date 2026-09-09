@@ -1144,6 +1144,41 @@ export async function conformBatch(
   );
 }
 
+
+/**
+ * The months a batch of HubSpot records falls into, within believable bounds.
+ *
+ * Open deals legitimately carry close dates in the future, so the forward bound
+ * is generous rather than absent — but a mistyped date should not conjure a
+ * period in 2087 and a month selector that runs to the next century. Anything
+ * outside the range is ignored here; the record itself is still written, and the
+ * date it carries is still the date it carries.
+ */
+function hubspotMonths(records: HubspotObject[]): string[] {
+  const now = new Date();
+  const floor = Date.UTC(now.getUTCFullYear() - 10, now.getUTCMonth(), 1);
+  const ceiling = Date.UTC(now.getUTCFullYear() + 2, now.getUTCMonth(), 1);
+
+  const months = new Set<string>();
+
+  for (const record of records) {
+    const p = record.properties ?? {};
+    for (const raw of [p.closedate, p.createdate, p.hs_meeting_start_time, p.hs_timestamp]) {
+      const parsed = date(raw);
+      if (!parsed) continue;
+
+      const stamp = Date.UTC(parsed.getUTCFullYear(), parsed.getUTCMonth(), 1);
+      if (stamp < floor || stamp > ceiling) continue;
+
+      months.add(
+        `${parsed.getUTCFullYear()}-${String(parsed.getUTCMonth() + 1).padStart(2, '0')}-01`,
+      );
+    }
+  }
+
+  return [...months].sort();
+}
+
 async function conformInTransaction(
   db: Database,
   loadRunId: string,
@@ -1215,6 +1250,17 @@ async function conformInTransaction(
 
   if (batch.sourceSystem === 'HUBSPOT') {
     const records = batch.records.map((record) => record.payload as HubspotObject);
+
+    // Register the months this batch actually falls into.
+    //
+    // A period is a month the business has data for, and HubSpot creates them
+    // exactly as QuickBooks does — but only the QuickBooks and budget paths ever
+    // called ensurePeriods, so dim_period stopped at the end of the seeded
+    // history. Deals closing after that had no period to belong to, the month
+    // selector could not offer those months, and a warehouse full of live
+    // pipeline read as zero on every screen.
+    const months = hubspotMonths(records);
+    if (months.length) await ensurePeriods(db, months);
 
     switch (batch.entity) {
       case 'deals':

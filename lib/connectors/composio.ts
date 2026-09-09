@@ -369,6 +369,11 @@ export async function executeTool<T>(
  * naively it looks like an empty report, and an empty report loaded into the
  * warehouse is a month of zeroes that nobody questions.
  */
+/** Exposed for tests: the silent-zero guard is worth asserting directly. */
+export function unwrapForTest<T>(response: Record<string, unknown>, what: string): T {
+  return unwrap<T>(response, what);
+}
+
 function unwrap<T>(response: Record<string, unknown>, what: string): T {
   const successful = response.successful ?? response.successfull ?? response.success;
 
@@ -383,12 +388,32 @@ function unwrap<T>(response: Record<string, unknown>, what: string): T {
   const data = (response.data ?? response.response_data ?? response) as Record<string, unknown>;
 
   // The proxy nests the provider's own body one level deeper.
+  let body = data;
   if (data && typeof data === 'object' && 'data' in data && Object.keys(data).length <= 3) {
     const inner = (data as { data?: unknown }).data;
-    if (inner && typeof inner === 'object') return inner as T;
+    if (inner && typeof inner === 'object') body = inner as Record<string, unknown>;
   }
 
-  return data as T;
+  // A provider error that the proxy reports as a successful call.
+  //
+  // Composio sets `successful` on its own envelope, and a request it delivered
+  // is successful from where it stands even when the provider refused it. So
+  // HubSpot's {status:"error", message:"You can only request at most 50 objects
+  // …"} arrives here looking like a payload, and a caller reading `results ?? []`
+  // off it gets an empty page — a validation error read as "there are no deals",
+  // written as zero rows, ticked green. That is precisely the confusion this
+  // codebase refuses everywhere else: an empty result and a failed request must
+  // never look the same. It is caught here, once, for every provider.
+  if (body && typeof body === 'object' && (body as { status?: unknown }).status === 'error') {
+    const message =
+      (body as { message?: string }).message ?? (body as { error?: string }).error ?? 'no reason given';
+    const category = (body as { category?: string }).category;
+    throw new Error(
+      `${what} was refused by the provider: ${message}${category ? ` (${category})` : ''}`,
+    );
+  }
+
+  return body as T;
 }
 
 // ---------------------------------------------------------------------------
