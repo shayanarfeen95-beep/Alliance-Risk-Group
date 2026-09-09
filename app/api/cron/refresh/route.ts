@@ -178,6 +178,9 @@ async function orderByStaleness(db: Database, steps: SyncStep[]): Promise<Refres
     if (!latest.has(key)) latest.set(key, run);
   }
 
+  // The sort below is stable, so entities that have never loaded keep the plan's
+  // own order — which is what makes reference data land before the facts that
+  // read it on a first refresh, HubSpot owners before HubSpot deals above all.
   return steps
     .map((step) => {
       const run = latest.get(`${step.source}:${step.entity}`);

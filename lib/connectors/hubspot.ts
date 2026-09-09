@@ -52,7 +52,27 @@ const MEETING_PROPERTIES = [
   'hubspot_owner_id',
 ];
 
+/**
+ * Order matters here, and it is not cosmetic.
+ *
+ * Owners are listed first because conforming a deal looks its owner's name up
+ * from the owners already landed. A pull that took deals first would write every
+ * row as "Unassigned" — and on a first-ever load, which is the only load where
+ * nothing is there to fall back on, the salesperson leaderboard would come up as
+ * a single meaningless line and stay that way until somebody pulled again.
+ *
+ * Reference data before the facts that read it. Everything downstream of this
+ * list — the plan the Pull button drives, the scheduled refresh, the agent —
+ * takes its order from here.
+ */
 const ENTITIES: EntityDescriptor[] = [
+  {
+    entity: 'owners',
+    label: 'Owners (salespeople)',
+    cadence: 'WEEKLY',
+    description:
+      'The people deals are assigned to. Without them a deal carries an owner id and no name, and the salesperson leaderboard reads every row as Unassigned.',
+  },
   {
     entity: 'deals',
     label: 'Deals (with stage history)',
@@ -65,13 +85,6 @@ const ENTITIES: EntityDescriptor[] = [
     label: 'Contacts',
     cadence: 'DAILY',
     description: 'Leads by the date they became a lead, and original source for CPL by channel.',
-  },
-  {
-    entity: 'owners',
-    label: 'Owners (salespeople)',
-    cadence: 'WEEKLY',
-    description:
-      'The people deals are assigned to. Without them a deal carries an owner id and no name, and the salesperson leaderboard reads every row as Unassigned.',
   },
   {
     entity: 'meetings',

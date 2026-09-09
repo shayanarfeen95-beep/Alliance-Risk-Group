@@ -152,3 +152,16 @@ describe('HubSpot owners', () => {
     expect(deal!.ownerName).toBe('Dana Whitfield');
   });
 });
+
+
+describe('the order a pull takes HubSpot in', () => {
+  it('lands owners before deals', () => {
+    const order = hubspotConnector.entities().map((entity) => entity.entity);
+
+    // Conforming a deal reads its owner's name from the owners already landed.
+    // Taking deals first writes every row as Unassigned — and on a first-ever
+    // load there is nothing earlier to fall back on, so the leaderboard comes up
+    // as one meaningless line and stays that way until somebody pulls again.
+    expect(order.indexOf('owners')).toBeLessThan(order.indexOf('deals'));
+  });
+});
