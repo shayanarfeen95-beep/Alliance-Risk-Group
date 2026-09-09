@@ -1,6 +1,6 @@
 import type { Metadata } from 'next';
 import { redirect } from 'next/navigation';
-import { getDb, isDemoMode } from '@/lib/db/client';
+import { getDb } from '@/lib/db/client';
 import { isUninitialised } from '@/lib/db/bootstrap';
 import { SetupForm } from './setup-form';
 
@@ -20,7 +20,7 @@ export default async function SetupPage() {
   const db = await getDb();
 
   // Demo mode seeds its own accounts, so there is nothing to set up.
-  if (isDemoMode() || !(await isUninitialised(db))) redirect('/login');
+  if (!(await isUninitialised(db))) redirect('/login');
 
   return (
     <main className="mx-auto flex min-h-dvh max-w-[560px] flex-col justify-center px-6 py-12">

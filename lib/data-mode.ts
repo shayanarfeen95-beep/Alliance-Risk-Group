@@ -44,10 +44,13 @@ export async function getDataMode(db: Database): Promise<DataMode> {
       .where(eq(t.appConfig.key, DATA_MODE_KEY))
       .limit(1);
 
-    return row?.value === 'LIVE' ? 'LIVE' : 'DEMONSTRATION';
+    // LIVE is the default now that nothing seeds itself. A database with no
+    // DATA_MODE row has never been told otherwise, and the honest reading of an
+    // unseeded warehouse is that everything in it came from a source.
+    return row?.value === 'DEMONSTRATION' ? 'DEMONSTRATION' : 'LIVE';
   } catch {
     // The config table may not exist yet on a cold first request.
-    return 'DEMONSTRATION';
+    return 'LIVE';
   }
 }
 

@@ -23,15 +23,27 @@ Three env vars, in increasing order of seriousness:
 
 | Want | Set |
 |---|---|
-| A live demo, no database | `DEMO_MODE=1` (already in `vercel.json`) |
-| A real deployment | `DATABASE_URL` — a Neon pooled connection string |
+| Anything at all | `DATABASE_URL` — a Neon **pooled** connection string |
+| Sessions that survive | `AUTH_SECRET` — `openssl rand -base64 48` |
 | Connectable sources | `COMPOSIO_API_KEY` — and nothing else |
 
-`DATABASE_URL` takes precedence over `DEMO_MODE`, so the same deployment starts
-as a self-seeding demo and becomes real the moment a database is attached —
-nothing to un-set. Migrations apply themselves on first request behind a
-Postgres advisory lock, and the first visit offers a setup screen to create the
-first administrator.
+**A database is not optional.** There is no demonstration mode: this reads
+ARG's own books or it reads nothing. A deployment without `DATABASE_URL` shows a
+screen naming the variable rather than starting something that resembles a
+working application.
+
+That mode used to exist and it seeded an in-memory database per instance on
+first use. On one machine it is a convincing preview; on serverless it is several
+unrelated databases behind one domain name. Signing in wrote a session to
+whichever instance served the request, the next request landed on another, and
+the user was returned to the login page indefinitely with nothing explaining why.
+The same split broke the source connections — the OAuth state written when you
+pressed Connect was read back by an instance that had never heard of it.
+
+Migrations apply themselves on first request behind a Postgres advisory lock, and
+the first visit offers a setup screen to create the first administrator. The
+warehouse starts empty; every figure that appears afterwards came from a source
+somebody connected.
 
 **Postgres specifically, not Redis.** The guarantees in the table below are
 database objects — a trigger, CHECK constraints, plpgsql. A key-value store

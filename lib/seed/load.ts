@@ -24,6 +24,7 @@ import { persistFindings, runAllChecks } from '@/lib/recon/checks';
 import { DEFAULT_GOALS, evaluateGoalsForUser, persistFindings as persistGoalFindings } from '@/lib/ai/goals';
 import { generateCommentary } from '@/lib/ai/commentary';
 import { openSemanticSession } from '@/lib/semantic/resolve';
+import { DATA_MODE_KEY, DATA_MODE_DESCRIPTION } from '@/lib/data-mode';
 
 const CHUNK = 400;
 
@@ -83,13 +84,6 @@ export const SEED_USERS = [
  * assumption.
  */
 export const SEED_CONFIG = [
-  {
-    key: 'DATA_MODE',
-    value: 'DEMONSTRATION',
-    description:
-      'Which figures the dashboards read. DEMONSTRATION shows the seeded dataset so every view can be exercised before a source is connected, and says so on every page. LIVE excludes every seeded row, so only data loaded from QuickBooks, HubSpot or Google Sheets is shown and an unloaded month reads as unavailable rather than as a figure.',
-    isConfirmed: true,
-  },
   {
     key: 'BALANCE_SHEET_CLASSED',
     value: 'true',
@@ -163,6 +157,24 @@ export async function seedDatabase(db: Database, options: SeedOptions = {}): Pro
 
   // --- Reference data ------------------------------------------------------
   await db.insert(t.appConfig).values(SEED_CONFIG);
+
+  // Seeding is the only thing that makes a warehouse demonstration data, so it
+  // is the only thing that sets the label. SEED_CONFIG deliberately does not
+  // carry it: the setup screen inserts that same list for a real deployment,
+  // and a fresh live database marked DEMONSTRATION would hide every row a
+  // source loaded and show a fabricated-data banner over the gap.
+  await db
+    .insert(t.appConfig)
+    .values({
+      key: DATA_MODE_KEY,
+      value: 'DEMONSTRATION',
+      description: DATA_MODE_DESCRIPTION,
+      isConfirmed: true,
+    })
+    .onConflictDoUpdate({
+      target: t.appConfig.key,
+      set: { value: 'DEMONSTRATION' },
+    });
 
   await db.insert(t.dimDivision).values(DIVISION_SEED);
 

@@ -63,37 +63,14 @@ export async function POST(request: Request) {
     });
   }
 
-  // The demo dataset needs the reference data the seed loads, so it is all or
-  // nothing: either the full seeded warehouse, or an empty one with just the
-  // divisions and configuration a real load requires.
-  if (body.loadDemoData) {
-    const { seedDatabase } = await import('@/lib/seed/load');
-    await seedDatabase(db, { quiet: true });
-
-    // Retire the seeded accounts rather than deleting them.
-    //
-    // Deleting is what you reach for first and it does not work: the demo data
-    // is *attributed* to those users — they closed the periods, locked the
-    // forecasts, signed the commentary — so the foreign keys hold them in
-    // place, and tearing those references out would leave a closed month with
-    // nobody who closed it.
-    //
-    // Retiring keeps the history coherent and still closes the hole that
-    // matters: these accounts ship with a password published in the README, and
-    // a deployment that loaded demo data must not be reachable through one.
-    // Both the login action and the session loader refuse an inactive user, and
-    // the scrambled hash means there is no password that would work even if
-    // somebody flipped the flag back.
-    await db.update(t.users).set({
-      isActive: false,
-      passwordHash: await hashPassword(randomBytes(32).toString('base64url')),
-    });
-  } else {
-    const { DIVISION_SEED } = await import('@/lib/divisions');
-    const { SEED_CONFIG } = await import('@/lib/seed/load');
-    await db.insert(t.dimDivision).values(DIVISION_SEED).onConflictDoNothing();
-    await db.insert(t.appConfig).values(SEED_CONFIG).onConflictDoNothing();
-  }
+  // The warehouse starts empty. Only the reference data a real load needs goes
+  // in: the four divisions, and the configuration rows that record Westport's
+  // open decisions. Every figure from here came from a source somebody
+  // connected — there is no path that puts an invented number on a dashboard.
+  const { DIVISION_SEED } = await import('@/lib/divisions');
+  const { SEED_CONFIG } = await import('@/lib/seed/load');
+  await db.insert(t.dimDivision).values(DIVISION_SEED).onConflictDoNothing();
+  await db.insert(t.appConfig).values(SEED_CONFIG).onConflictDoNothing();
 
   let userId: string;
   try {
@@ -120,7 +97,7 @@ export async function POST(request: Request) {
     action: 'DEPLOYMENT_INITIALISED',
     entity: 'users',
     entityId: userId,
-    detail: { loadDemoData: Boolean(body.loadDemoData) },
+    detail: { note: 'First administrator created; the warehouse starts empty.' },
   });
 
   await createSession(userId);

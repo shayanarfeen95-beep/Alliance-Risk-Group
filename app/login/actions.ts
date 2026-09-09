@@ -38,7 +38,11 @@ export async function login(_prev: LoginState, formData: FormData): Promise<Logi
   await db.insert(auditEvent).values({ userId: user.id, action: 'LOGIN', entity: 'users', entityId: user.id });
   await createSession(user.id);
 
-  redirect('/executive');
+  // Resume whatever they were doing when they were asked to sign in — clicking
+  // "Sign in with HubSpot" and landing on the executive dashboard instead is a
+  // small thing that reads as the button not working.
+  const next = String(formData.get('next') ?? '');
+  redirect(next.startsWith('/') && !next.startsWith('//') ? next : '/executive');
 }
 
 export async function logout(): Promise<void> {

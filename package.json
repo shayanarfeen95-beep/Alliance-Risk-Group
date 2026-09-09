@@ -23,7 +23,9 @@
     "verify:tieout": "tsx scripts/verify/tieout.mts",
     "verify:agent": "tsx scripts/agent-e2e.mts",
     "verify:connect": "tsx scripts/connect-e2e.mts",
-    "verify:mode": "tsx scripts/mode-e2e.mts"
+    "verify:mode": "tsx scripts/mode-e2e.mts",
+    "verify:live": "tsx scripts/live-journey.mts",
+    "verify:session": "tsx scripts/session-across-instances.mts"
   },
   "pnpm": {
     "onlyBuiltDependencies": [

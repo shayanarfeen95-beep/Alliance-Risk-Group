@@ -118,6 +118,15 @@ export interface FactBundle {
   contacts: ContactRecord[];
   meetings: MeetingRecord[];
   config: Map<string, ConfigValue>;
+  /**
+   * Source systems that have completed at least one successful load.
+   *
+   * The difference between "HubSpot says ARG booked nothing this month" and
+   * "HubSpot has never been read" is invisible in the facts themselves — both
+   * are an empty list of deals — and the two mean opposite things to whoever is
+   * looking at the number. This is what lets a metric tell them apart.
+   */
+  loadedSources: Set<string>;
   lastRefreshedAt: Date | null;
 }
 
@@ -193,6 +202,7 @@ export async function loadFactBundle(
       contacts: [],
       meetings: [],
       config: new Map(),
+      loadedSources: new Set(),
       lastRefreshedAt: null,
     };
   }
@@ -293,7 +303,7 @@ export async function loadFactBundle(
       ),
     db.select().from(t.appConfig),
     db
-      .select({ finishedAt: t.loadRun.finishedAt })
+      .select({ finishedAt: t.loadRun.finishedAt, sourceSystem: t.loadRun.sourceSystem })
       .from(t.loadRun)
       .where(
         and(
@@ -304,6 +314,17 @@ export async function loadFactBundle(
       .orderBy(sql`${t.loadRun.finishedAt} desc nulls last`)
       .limit(1),
   ]);
+
+  const loadedSourceRows = await db
+    .selectDistinct({ sourceSystem: t.loadRun.sourceSystem })
+    .from(t.loadRun)
+    .where(
+      and(
+        eq(t.loadRun.status, 'SUCCEEDED'),
+        excludeSeed(t.loadRun.id as never),
+        sql`${t.loadRun.rowsWritten} > 0`,
+      ),
+    );
 
   // HubSpot records are timestamped, not month-keyed, so they are loaded by a
   // date window covering the trailing period the dashboards can reach.
@@ -488,6 +509,7 @@ export async function loadFactBundle(
       associatedDealId: row.associatedDealId,
     })),
     config,
+    loadedSources: new Set(loadedSourceRows.map((row) => row.sourceSystem)),
     lastRefreshedAt: lastRun[0]?.finishedAt ?? null,
   };
 }

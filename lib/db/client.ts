@@ -9,6 +9,19 @@
  * behave identically to production. That means the forecast-immutability trigger
  * and the ARG_TOTAL constraints are exercised by the local test suite, not just
  * asserted in a comment.
+ *
+ * There is no third mode. A deployment reads ARG's own books or it reads
+ * nothing: DATABASE_URL is required in production, and the app refuses to start
+ * without one rather than falling back to something that looks like data.
+ *
+ * The demonstration mode that used to live here seeded an in-memory database per
+ * instance on first use. On a single machine that is a convincing preview; on
+ * serverless it is several unrelated databases wearing one domain name. Signing
+ * in wrote a session to whichever instance served the request, the next request
+ * landed on a different one, and the user was returned to the login page — over
+ * and over, with nothing on screen explaining why. The same split broke the
+ * source connections: the OAuth state written when you pressed Connect was read
+ * back by an instance that had never heard of it.
  */
 import { drizzle as drizzlePglite, type PgliteDatabase } from 'drizzle-orm/pglite';
 import { drizzle as drizzlePostgres, type PostgresJsDatabase } from 'drizzle-orm/postgres-js';
@@ -28,8 +41,27 @@ const globalForDb = globalThis as unknown as {
 
 export const DATA_DIR = process.env.PGLITE_DATA_DIR ?? '.pgdata';
 
+export class DatabaseNotConfiguredError extends Error {
+  constructor() {
+    super(
+      'DATABASE_URL is not set. This application reads ARG\u2019s own figures and keeps sessions, ' +
+        'source authorisations and load history in Postgres, none of which survive without one. ' +
+        'Set it to a Postgres connection string — Neon\u2019s free tier is enough, and its pooled ' +
+        'endpoint is what this expects — then redeploy.',
+    );
+    this.name = 'DatabaseNotConfiguredError';
+  }
+}
+
 async function create(): Promise<Database> {
   const url = process.env.DATABASE_URL;
+
+  // Embedded Postgres is for development and the test suite. In production it
+  // would be a per-instance database on a read-only filesystem, which is not a
+  // degraded version of the real thing but a different and much worse one.
+  if (!url && process.env.NODE_ENV === 'production') {
+    throw new DatabaseNotConfiguredError();
+  }
 
   if (url) {
     const { default: postgres } = await import('postgres');
@@ -54,12 +86,9 @@ async function create(): Promise<Database> {
   }
 
   const { PGlite } = await import('@electric-sql/pglite');
-  // In-memory keeps the test suite hermetic; the dev server persists to disk.
-  // Demo mode is always in-memory — a serverless filesystem is read-only, and
-  // an instance that cannot write its data directory fails at import time with
-  // an error that looks nothing like its cause.
-  const dataDir =
-    process.env.PGLITE_IN_MEMORY === '1' || isDemoMode() ? undefined : DATA_DIR;
+  // In-memory keeps the test suite hermetic; the dev server persists to disk so
+  // a developer's data survives a restart.
+  const dataDir = process.env.PGLITE_IN_MEMORY === '1' ? undefined : DATA_DIR;
   const client = await PGlite.create(dataDir);
   globalForDb.__argDbClose = async () => {
     await client.close();
@@ -68,34 +97,7 @@ async function create(): Promise<Database> {
 }
 
 /**
- * Demo mode.
- *
- * With `DEMO_MODE=1` and no `DATABASE_URL`, an instance brings up its own
- * in-memory Postgres, applies the real migrations and loads the seed on first
- * use. That makes the app explorable from a bare deployment with no database
- * provisioned — which is the only way a reviewer sees it before ARG's own
- * QuickBooks credentials exist.
- *
- * Two things are true of this mode and both matter:
- *
- *   - It is **ephemeral**. Each serverless instance holds its own copy, so a
- *     write in one request may not be visible to the next, and everything
- *     resets when the instance recycles. It is a demonstration, not a
- *     deployment.
- *   - It is **opt-in**. Setting `DATABASE_URL` takes precedence and this code
- *     never runs. A real deployment cannot accidentally end up seeded, and a
- *     seeded instance cannot be mistaken for one — the app labels it.
- *
- * The seed is the same deterministic dataset the test suite ties out against,
- * so the figures on a demo instance are the spec's published figures rather
- * than plausible-looking noise.
- */
-export function isDemoMode(): boolean {
-  return process.env.DEMO_MODE === '1' && !process.env.DATABASE_URL;
-}
-
-/**
- * Brings an embedded PGlite database up to schema, and seeds it in demo mode.
+ * Brings an embedded PGlite database up to schema.
  *
  * Migration runs for *every* PGlite database, not only the demo one. Without
  * that, `pnpm install && pnpm dev` — which is what anyone actually types —
@@ -107,14 +109,13 @@ export function isDemoMode(): boolean {
  * The migrator records what it has applied, so this is a no-op on every
  * subsequent start rather than repeated work.
  */
-async function bootstrapEmbedded(db: Database, seed: boolean): Promise<void> {
+async function bootstrapEmbedded(db: Database): Promise<void> {
   const { migrate } = await import('drizzle-orm/pglite/migrator');
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   await migrate(db as any, { migrationsFolder: 'lib/db/migrations' });
-
-  if (!seed) return;
-  const { seedDatabase } = await import('@/lib/seed/load');
-  await seedDatabase(db, { quiet: true });
+  // Nothing is seeded. A database with a schema and no rows is the honest
+  // starting state: the first visit offers the setup screen, and every figure
+  // that appears afterwards came from a source somebody connected.
 }
 
 export async function getDb(): Promise<Database> {
@@ -125,7 +126,7 @@ export async function getDb(): Promise<Database> {
       // Held as a promise rather than a boolean: concurrent requests during a
       // cold start must await the same bootstrap, not race to run four of them
       // against the same database.
-      globalForDb.__argBootstrap ??= bootstrapEmbedded(db, isDemoMode()).catch((error) => {
+      globalForDb.__argBootstrap ??= bootstrapEmbedded(db).catch((error) => {
         // A failed bootstrap must not be cached as done — the next request
         // should retry rather than serve an empty warehouse as if it were real.
         globalForDb.__argBootstrap = undefined;

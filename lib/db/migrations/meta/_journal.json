@@ -50,6 +50,13 @@
       "when": 1786531120000,
       "tag": "0006_data_mode",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1786531130000,
+      "tag": "0007_live_by_default",
+      "breakpoints": true
     }
   ]
 }

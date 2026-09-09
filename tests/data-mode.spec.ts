@@ -43,9 +43,28 @@ async function revenue(month = '2026-03-01') {
 }
 
 describe('data mode', () => {
-  it('defaults a fresh deployment to demonstration', async () => {
+  it('labels a seeded warehouse as demonstration', async () => {
+    // Seeding is the only thing that puts fabricated rows in, so it is the only
+    // thing that sets this label.
     expect(await getDataMode(harness.db)).toBe('DEMONSTRATION');
   });
+
+  it('reports live for a database nothing has seeded', async () => {
+    // What a real deployment is: a schema, the reference data the setup screen
+    // writes, and no figures until a source loads some. Reporting DEMONSTRATION
+    // here would hide every row a connector wrote and put a fabricated-data
+    // banner over the gap.
+    const fresh = await createTestDb();
+    try {
+      expect(await getDataMode(fresh.db)).toBe('LIVE');
+
+      const { SEED_CONFIG } = await import('@/lib/seed/load');
+      await fresh.db.insert(t.appConfig).values(SEED_CONFIG).onConflictDoNothing();
+      expect(await getDataMode(fresh.db)).toBe('LIVE');
+    } finally {
+      await fresh.close();
+    }
+  }, 120_000);
 
   it('shows seeded figures in demonstration mode', async () => {
     const result = await revenue();

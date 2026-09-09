@@ -57,6 +57,12 @@ export function DataControls(props: DataControlsProps) {
   const connected = props.connectedSources.filter((source) => source.connected);
   const live = props.mode === 'LIVE';
 
+  const seedRows =
+    props.seedFootprint.plRows +
+    props.seedFootprint.glRows +
+    props.seedFootprint.dealRows +
+    props.seedFootprint.budgetRows;
+
   async function sync(sources?: string[]) {
     setBusy('sync');
     setError(null);
@@ -117,12 +123,6 @@ export function DataControls(props: DataControlsProps) {
     }
   }
 
-  const seedRows =
-    props.seedFootprint.plRows +
-    props.seedFootprint.glRows +
-    props.seedFootprint.dealRows +
-    props.seedFootprint.budgetRows;
-
   return (
     <div className="space-y-4">
       {/* --- Which figures are being shown ---------------------------------- */}
@@ -141,10 +141,11 @@ export function DataControls(props: DataControlsProps) {
           <p className="mt-1 text-[11.5px] leading-relaxed text-[var(--text-secondary)]">
             {live ? (
               <>
-                Every seeded row is excluded from every view. The dashboards show only what
-                QuickBooks, HubSpot and Google Sheets have loaded — {props.loadedRowCount.toLocaleString()}{' '}
-                row{props.loadedRowCount === 1 ? '' : 's'} so far. A month nothing has loaded reads
-                as unavailable rather than as a figure.
+                The dashboards show only what QuickBooks, HubSpot and Google Sheets have loaded —{' '}
+                {props.loadedRowCount.toLocaleString()} row
+                {props.loadedRowCount === 1 ? '' : 's'} so far.
+                {seedRows > 0 && ' Seeded rows are excluded from every view.'} A month nothing has
+                loaded reads as unavailable rather than as a figure.
               </>
             ) : (
               <>
@@ -166,7 +167,9 @@ export function DataControls(props: DataControlsProps) {
           )}
         </div>
 
-        {props.canManage && (
+        {/* Offering "show demonstration data" with none stored is a button that
+            empties the dashboards and explains nothing. */}
+        {props.canManage && (seedRows > 0 || !live) && (
           <button
             type="button"
             onClick={() => switchMode(live ? 'DEMONSTRATION' : 'LIVE')}

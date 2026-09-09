@@ -215,17 +215,17 @@ whether the app starts at all.
 
 ### Fastest path — a demo instance, no database
 
-Useful for showing ARG the system before QuickBooks credentials exist.
+This is no longer possible, and the removal was deliberate.
 
-| Variable | Value |
-|---|---|
-| `AUTH_SECRET` | output of `openssl rand -base64 48` |
-| `DEMO_MODE` | `1` |
+A deployment with no database used to seed an in-memory one per instance. On a
+single machine that is a convincing preview of the system; on serverless it is
+several unrelated databases behind one domain name. A session written by the
+instance that served the sign-in did not exist on the instance that served the
+next request, so the user was returned to the login page indefinitely — and the
+source connections failed the same way, because the OAuth state written when
+Connect was pressed was read back somewhere that had never heard of it.
 
-That is the whole configuration. Each instance seeds itself in memory on first
-request from the same deterministic dataset the tie-out suite asserts against,
-so the figures on screen are the spec's published figures. Every page carries a
-banner saying the warehouse is in memory and resets on recycle.
+Provision a database. It is one free Neon project and takes about a minute.
 
 Two consequences to expect and not mistake for faults: the first request after
 an instance starts is slow (it is applying migrations and loading the seed), and
@@ -240,9 +240,10 @@ request may land on a different instance.
 | `DATABASE_URL` | the Neon connection string |
 | `OPENROUTER_API_KEY` | optional — enables the assistant; a free key is enough, and everything else works without it |
 
-Do **not** set `DEMO_MODE`. `DATABASE_URL` takes precedence over it anyway, so a
-real deployment cannot end up seeded by accident, but leaving it unset keeps the
-intent legible.
+`DATABASE_URL` is required. Without it the application renders a screen naming
+the variable instead of starting, because sessions, source authorisations and
+every loaded figure live in Postgres and none of them survive an in-memory
+database that each serverless instance holds its own copy of.
 
 Then, once, against that database:
 
@@ -268,9 +269,8 @@ Almost always one of three things, in this order of likelihood:
    deliberately — a signing key that silently defaults is worse than a crash.
 2. `DATABASE_URL` is set but unreachable, or points at a database with no
    migrations applied.
-3. Neither `DATABASE_URL` nor `DEMO_MODE` is set. The app then falls back to
-   PGlite against a read-only serverless filesystem and cannot write its data
-   directory.
+3. `DATABASE_URL` is unset. The application renders the configuration screen
+   rather than starting; the runtime log carries `DatabaseNotConfiguredError`.
 
 The build logs will not distinguish these; the runtime logs will.
 

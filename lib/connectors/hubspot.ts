@@ -65,6 +65,13 @@ const ENTITIES: EntityDescriptor[] = [
     description: 'Leads by the date they became a lead, and original source for CPL by channel.',
   },
   {
+    entity: 'owners',
+    label: 'Owners (salespeople)',
+    cadence: 'WEEKLY',
+    description:
+      'The people deals are assigned to. Without them a deal carries an owner id and no name, and the salesperson leaderboard reads every row as Unassigned.',
+  },
+  {
     entity: 'meetings',
     label: 'Meetings (engagements)',
     cadence: 'DAILY',
@@ -132,7 +139,9 @@ async function fetchAll(
   do {
     const json = await fetchPage(path, {
       limit: '100',
-      properties: properties.join(','),
+      // Omitted rather than sent empty: /crm/v3/owners is not an object route
+      // and rejects a properties parameter outright.
+      ...(properties.length ? { properties: properties.join(',') } : {}),
       archived: 'false',
       ...extraParams,
       ...(after ? { after } : {}),
@@ -183,6 +192,12 @@ export const hubspotConnector: SourceConnector = {
         records = await fetchAll('/crm/v3/objects/meetings', MEETING_PROPERTIES, {
           associations: 'deals,contacts',
         });
+        break;
+      case 'owners':
+        // The owners endpoint is not a CRM object route: it returns whole
+        // records rather than a `properties` bag, and takes no properties
+        // parameter. Asking it for one is a 400.
+        records = await fetchAll('/crm/v3/owners', [], {});
         break;
       default:
         throw new Error(`Unknown HubSpot entity "${entity}".`);

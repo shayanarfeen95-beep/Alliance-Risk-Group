@@ -1,21 +1,25 @@
 import type { Metadata } from 'next';
 import { redirect } from 'next/navigation';
-import { isDemoMode } from '@/lib/db/client';
 import { getSessionUser } from '@/lib/auth/session';
 import { LoginForm } from './login-form';
 
 export const metadata: Metadata = { title: 'Sign in' };
 
-export default async function LoginPage() {
-  if (await getSessionUser()) redirect('/executive');
+export default async function LoginPage({
+  searchParams,
+}: {
+  searchParams: Promise<Record<string, string | string[] | undefined>>;
+}) {
+  const query = await searchParams;
+  const next = safeNext(typeof query.next === 'string' ? query.next : null);
+
+  if (await getSessionUser()) redirect(next ?? '/executive');
 
   // A provisioned-but-empty database has no account to sign in with. Send the
   // first visitor to setup rather than to a form that cannot succeed.
-  if (!isDemoMode()) {
-    const { isUninitialised } = await import('@/lib/db/bootstrap');
-    const { getDb } = await import('@/lib/db/client');
-    if (await isUninitialised(await getDb())) redirect('/setup');
-  }
+  const { isUninitialised } = await import('@/lib/db/bootstrap');
+  const { getDb } = await import('@/lib/db/client');
+  if (await isUninitialised(await getDb())) redirect('/setup');
 
   return (
     <main className="flex min-h-dvh items-center justify-center px-6 py-12">
@@ -37,7 +41,7 @@ export default async function LoginPage() {
           </p>
         </div>
 
-        <LoginForm />
+        <LoginForm next={next} />
 
         <p className="mt-8 border-t border-[var(--border)] pt-4 text-[11px] leading-relaxed text-[var(--text-muted)]">
           Prepared by Westport Financial — fractional CFO of record. Figures are reported on the
@@ -46,4 +50,19 @@ export default async function LoginPage() {
       </div>
     </main>
   );
+}
+
+/**
+ * Where to go after signing in.
+ *
+ * Only a path on this site is accepted. A `next` that can name another origin is
+ * an open redirect: the sign-in page is exactly where somebody would send a link
+ * to make a phishing destination look like it came from us. Protocol-relative
+ * URLs (`//evil.example`) are the case that slips through a naive check, so the
+ * test is for a single leading slash rather than for the absence of a scheme.
+ */
+function safeNext(value: string | null): string | null {
+  if (!value) return null;
+  if (!value.startsWith('/') || value.startsWith('//')) return null;
+  return value;
 }

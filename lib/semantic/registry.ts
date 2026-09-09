@@ -85,6 +85,41 @@ function balanceSheetScope(input: KpiInput): Unavailable | null {
  * marketing KPIs report at ARG Total only in Phase 1. Do not invent an
  * attribution rule."
  */
+/**
+ * Whether HubSpot has ever been read.
+ *
+ * Zero deals and no HubSpot connection produce the same empty list, and the two
+ * mean opposite things: one says ARG booked nothing this month, the other says
+ * nobody has looked. Reporting $0 for the second is the "showing zero instead of
+ * nothing" failure §2 names, and it is worse on a freshly deployed system than
+ * anywhere else, because every sales figure reads zero and looks like a
+ * catastrophe rather than an empty warehouse.
+ */
+function hubspotNotLoaded(input: KpiInput): Unavailable | null {
+  if (input.bundle.loadedSources.has('HUBSPOT')) return null;
+
+  // Records in hand settle it regardless of what the load history says. A
+  // warehouse holding deals has plainly been loaded from somewhere, and the
+  // seeded dataset writes one run labelled SEED rather than one per source —
+  // so keying only on the label reported "not loaded" over five hundred deals.
+  if (input.bundle.deals.length || input.bundle.contacts.length || input.bundle.meetings.length) {
+    return null;
+  }
+
+  return {
+    reason: 'NO_DATA',
+    detail:
+      'HubSpot has not been loaded yet, so there are no deals, contacts or meetings to measure. ' +
+      'This is not zero — nothing has been read. Sign in to HubSpot in Admin and pull, and this ' +
+      'fills in.',
+  };
+}
+
+/** The two HubSpot guards, in the order a reader would ask about them. */
+function hubspotScope(input: KpiInput): Unavailable | null {
+  return hubspotNotLoaded(input) ?? hubspotDivisionScope(input);
+}
+
 function hubspotDivisionScope(input: KpiInput): Unavailable | null {
   if (input.isConsolidated) return null;
   const attribution = input.bundle.config.get('HUBSPOT_DIVISION_ATTRIBUTION');
@@ -601,7 +636,7 @@ const salesDefinitions: KpiDefinition[] = [
     refreshCadence: 'Daily, overnight',
     specReference: '§6 Sales',
     compute: (input) => {
-      const scope = hubspotDivisionScope(input);
+      const scope = hubspotScope(input);
       if (scope) return { value: null, unavailable: scope, citations: [] };
       const closed = dealsClosedIn(input.bundle, input.period.month, input.divisions, input.isConsolidated);
       const won = closed.filter((deal) => deal.isClosedWon);
@@ -627,7 +662,7 @@ const salesDefinitions: KpiDefinition[] = [
     refreshCadence: 'Daily, overnight',
     specReference: '§6 Sales',
     compute: (input) => {
-      const scope = hubspotDivisionScope(input);
+      const scope = hubspotScope(input);
       if (scope) return { value: null, unavailable: scope, citations: [] };
       const won = dealsClosedIn(input.bundle, input.period.month, input.divisions, input.isConsolidated).filter(
         (deal) => deal.isClosedWon,
@@ -650,7 +685,7 @@ const salesDefinitions: KpiDefinition[] = [
     refreshCadence: 'Daily, overnight',
     specReference: '§6 Sales',
     compute: (input) => {
-      const scope = hubspotDivisionScope(input);
+      const scope = hubspotScope(input);
       if (scope) return { value: null, unavailable: scope, citations: [] };
       const won = dealsClosedIn(input.bundle, input.period.month, input.divisions, input.isConsolidated).filter(
         (deal) => deal.isClosedWon,
@@ -679,7 +714,7 @@ const salesDefinitions: KpiDefinition[] = [
     notes:
       'The denominator is deals CLOSED in the period — won plus lost — not all open deals. §6: "State the denominator on the dashboard — it is the single most commonly misread sales metric."',
     compute: (input) => {
-      const scope = hubspotDivisionScope(input);
+      const scope = hubspotScope(input);
       if (scope) return { value: null, unavailable: scope, citations: [] };
       const closed = dealsClosedIn(input.bundle, input.period.month, input.divisions, input.isConsolidated);
       if (closed.length === 0) {
@@ -708,7 +743,7 @@ const salesDefinitions: KpiDefinition[] = [
     refreshCadence: 'Daily, overnight',
     specReference: '§6 Sales',
     compute: (input) => {
-      const scope = hubspotDivisionScope(input);
+      const scope = hubspotScope(input);
       if (scope) return { value: null, unavailable: scope, citations: [] };
       const open = input.bundle.deals.filter(
         (deal) =>
@@ -738,7 +773,7 @@ const salesDefinitions: KpiDefinition[] = [
     refreshCadence: 'Daily, overnight',
     specReference: '§6 Sales',
     compute: (input) => {
-      const scope = hubspotDivisionScope(input);
+      const scope = hubspotScope(input);
       if (scope) return { value: null, unavailable: scope, citations: [] };
       const { start, endExclusive } = monthBounds(input.period.month);
       const held = input.bundle.meetings.filter(
@@ -769,7 +804,7 @@ const salesDefinitions: KpiDefinition[] = [
     notes:
       'Requires deal stage history, not current stage. A deal that entered Proposal in March and closed in April still counts in March.',
     compute: (input) => {
-      const scope = hubspotDivisionScope(input);
+      const scope = hubspotScope(input);
       if (scope) return { value: null, unavailable: scope, citations: [] };
       const { start, endExclusive } = monthBounds(input.period.month);
       const entries = input.bundle.proposalEntries.filter(
@@ -799,7 +834,7 @@ const salesDefinitions: KpiDefinition[] = [
     refreshCadence: 'Daily, overnight',
     specReference: '§6 Sales',
     compute: (input) => {
-      const scope = hubspotDivisionScope(input);
+      const scope = hubspotScope(input);
       if (scope) return { value: null, unavailable: scope, citations: [] };
       const won = dealsClosedIn(input.bundle, input.period.month, input.divisions, input.isConsolidated).filter(
         (deal) => deal.isClosedWon && deal.createdate && deal.closedate,
@@ -830,7 +865,7 @@ const salesDefinitions: KpiDefinition[] = [
     refreshCadence: 'Daily, overnight',
     specReference: '§6 Sales',
     compute: (input) => {
-      const scope = hubspotDivisionScope(input);
+      const scope = hubspotScope(input);
       if (scope) return { value: null, unavailable: scope, citations: [] };
       const { period, bundle, divisions } = input;
 
@@ -886,7 +921,7 @@ const marketingDefinitions: KpiDefinition[] = [
     refreshCadence: 'Daily, overnight',
     specReference: '§6 Marketing',
     compute: (input) => {
-      const scope = hubspotDivisionScope(input);
+      const scope = hubspotScope(input);
       if (scope) return { value: null, unavailable: scope, citations: [] };
       const leads = leadsIn(input.bundle, input.period.month, input.divisions, input.isConsolidated);
       return {
@@ -910,7 +945,7 @@ const marketingDefinitions: KpiDefinition[] = [
     compute: (input) => {
       const pending = spendDefinitionScope(input.bundle, 'MARKETING_SPEND_ACCOUNTS');
       if (pending) return { value: null, unavailable: pending, citations: [] };
-      const scope = hubspotDivisionScope(input);
+      const scope = hubspotScope(input);
       if (scope) return { value: null, unavailable: scope, citations: [] };
 
       const spend = sumSpend(input.bundle.marketingSpend, [input.period.month], input.divisions);
@@ -942,7 +977,7 @@ const marketingDefinitions: KpiDefinition[] = [
     compute: (input) => {
       const pending = spendDefinitionScope(input.bundle, 'MARKETING_SPEND_ACCOUNTS');
       if (pending) return { value: null, unavailable: pending, citations: [] };
-      const scope = hubspotDivisionScope(input);
+      const scope = hubspotScope(input);
       if (scope) return { value: null, unavailable: scope, citations: [] };
 
       const spend = sumSpend(input.bundle.marketingSpend, [input.period.month], input.divisions);
@@ -1007,7 +1042,7 @@ const marketingDefinitions: KpiDefinition[] = [
     compute: (input) => {
       const pending = spendDefinitionScope(input.bundle, 'SALES_AND_MARKETING_SPEND_ACCOUNTS');
       if (pending) return { value: null, unavailable: pending, citations: [] };
-      const scope = hubspotDivisionScope(input);
+      const scope = hubspotScope(input);
       if (scope) return { value: null, unavailable: scope, citations: [] };
 
       const spend = sumSpend(

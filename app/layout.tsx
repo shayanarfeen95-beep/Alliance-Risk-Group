@@ -1,5 +1,6 @@
 import type { Metadata, Viewport } from 'next';
 import './globals.css';
+import { ConfigurationNeeded } from '@/components/shell/configuration-needed';
 
 export const metadata: Metadata = {
   title: {
@@ -34,7 +35,19 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
           }}
         />
       </head>
-      <body>{children}</body>
+      {/*
+        Checked here rather than left to fail deeper in: without a database every
+        page throws the same error, and a 500 with a digest tells the person who
+        deployed it nothing. This is a pure environment check — it opens no
+        connection — so it costs nothing on a configured deployment.
+      */}
+      <body>
+        {!process.env.DATABASE_URL && process.env.NODE_ENV === 'production' ? (
+          <ConfigurationNeeded />
+        ) : (
+          children
+        )}
+      </body>
     </html>
   );
 }

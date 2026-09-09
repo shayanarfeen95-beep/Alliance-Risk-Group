@@ -4,11 +4,12 @@ import { useActionState } from 'react';
 import { AlertCircle, LoaderCircle } from 'lucide-react';
 import { login, type LoginState } from './actions';
 
-export function LoginForm() {
+export function LoginForm({ next }: { next?: string | null }) {
   const [state, formAction, pending] = useActionState<LoginState, FormData>(login, {});
 
   return (
     <form action={formAction} className="space-y-4">
+      {next ? <input type="hidden" name="next" value={next} /> : null}
       <Field label="Email" name="email" type="email" autoComplete="username" autoFocus />
       <Field label="Password" name="password" type="password" autoComplete="current-password" />
 

@@ -654,21 +654,58 @@ function dealDivision(
   return lookup.byKey.get(raw.trim().toLowerCase()) ?? null;
 }
 
+/**
+ * HubSpot's owners, as a map from owner id to a person's name.
+ *
+ * The salesperson leaderboard is grouped by this name. Read from the owner rows
+ * already loaded, so a deals pull does not depend on the order the entities were
+ * fetched in — and a deal whose owner is not among them keeps whatever name it
+ * had rather than being demoted to Unassigned by a partial load.
+ */
+async function ownerNameMap(db: Database): Promise<Map<string, string>> {
+  const map = new Map<string, string>();
+
+  // Owners land in raw_payload: they are reference data about people, not a
+  // fact, and the leaderboard needs only the name against the id.
+  const rows = await db
+    .select({ payload: t.rawPayload.payload })
+    .from(t.rawPayload)
+    .where(eq(t.rawPayload.entity, '/crm/v3/owners'));
+
+  for (const row of rows) {
+    const owner = row.payload as {
+      id?: string;
+      firstName?: string;
+      lastName?: string;
+      email?: string;
+    };
+    if (!owner?.id) continue;
+
+    const name = [owner.firstName, owner.lastName].filter(Boolean).join(' ').trim();
+    map.set(owner.id, name || owner.email || `Owner ${owner.id}`);
+  }
+
+  // Names already attributed to deals fill any gap, so a deals-only refresh
+  // never blanks a leaderboard that was populated by an earlier owners load.
+  for (const row of await db
+    .select({ ownerId: t.factDeal.ownerId, ownerName: t.factDeal.ownerName })
+    .from(t.factDeal)
+    .where(sql`${t.factDeal.ownerName} is not null`)) {
+    if (row.ownerId && row.ownerName && !map.has(row.ownerId)) {
+      map.set(row.ownerId, row.ownerName);
+    }
+  }
+
+  return map;
+}
+
 async function conformDeals(
   db: Database,
   loadRunId: string,
   records: HubspotObject[],
   lookup: DivisionLookup,
 ): Promise<number> {
-  // Owner names come from HubSpot's owners endpoint in a separate load; until
-  // one has run, a deal keeps whatever name it already had rather than losing it.
-  const ownerNames = new Map(
-    (await db
-      .select({ ownerId: t.factDeal.ownerId, ownerName: t.factDeal.ownerName })
-      .from(t.factDeal)
-      .where(sql`${t.factDeal.ownerName} is not null`))
-      .map((row) => [row.ownerId ?? '', row.ownerName ?? '']),
-  );
+  const ownerNames = await ownerNameMap(db);
 
   let written = 0;
 
@@ -1196,6 +1233,26 @@ async function conformInTransaction(
       case 'meetings':
         rowsWritten = await conformMeetings(db, loadRunId, records);
         break;
+      case 'owners': {
+        // Owners are reference data, already landed in raw_payload by the
+        // caller. What conforming means here is attaching the names to the deals
+        // that carry their ids, so the salesperson leaderboard has something to
+        // group by.
+        const names = await ownerNameMap(db);
+        for (const [ownerId, ownerName] of names) {
+          await db
+            .update(t.factDeal)
+            .set({ ownerName })
+            .where(eq(t.factDeal.ownerId, ownerId));
+        }
+        rowsWritten = names.size;
+        notes.push(
+          names.size
+            ? `${names.size} salespeople named; the leaderboard groups deals by these.`
+            : 'HubSpot returned no owners, so deals will show as Unassigned on the leaderboard.',
+        );
+        break;
+      }
       default:
         notes.push(`${batch.entity} was landed but is not conformed into a fact table.`);
     }

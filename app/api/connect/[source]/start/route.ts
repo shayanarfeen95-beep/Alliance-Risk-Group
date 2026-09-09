@@ -34,7 +34,13 @@ export async function GET(request: Request, context: { params: Promise<{ source:
   const sourceSystem = source.toUpperCase();
 
   const user = await getSessionUser();
-  if (!user) return NextResponse.redirect(new URL('/login', request.url));
+  if (!user) {
+    // Send them back to where they were trying to go, so signing in resumes the
+    // connect instead of dropping them on a dashboard with no explanation.
+    const login = new URL('/login', request.url);
+    login.searchParams.set('next', `/api/connect/${source.toLowerCase()}/start`);
+    return NextResponse.redirect(login);
+  }
 
   if (!can(user, 'EDIT_MAPPINGS')) {
     return fail(request, 'Only an administrator or the CFO can connect a source.');

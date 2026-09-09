@@ -9,7 +9,6 @@ export function SetupForm() {
   const [name, setName] = useState('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
-  const [loadDemoData, setLoadDemoData] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -22,7 +21,7 @@ export function SetupForm() {
       const response = await fetch('/api/setup', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ name, email, password, loadDemoData }),
+        body: JSON.stringify({ name, email, password }),
       });
       const payload = await response.json();
       if (!payload.ok) {
@@ -51,26 +50,6 @@ export function SetupForm() {
         hint="At least 12 characters."
       />
 
-      <label
-        className="flex cursor-pointer items-start gap-2.5 rounded-[var(--radius)] border p-3"
-        style={{ borderColor: 'var(--border)' }}
-      >
-        <input
-          type="checkbox"
-          checked={loadDemoData}
-          onChange={(e) => setLoadDemoData(e.target.checked)}
-          className="mt-0.5"
-        />
-        <span className="text-[11.5px] leading-relaxed">
-          <span className="font-medium">Load the demonstration dataset.</span>{' '}
-          <span className="text-[var(--text-secondary)]">
-            Three years of figures reproducing the build specification&rsquo;s published numbers, so
-            every dashboard is populated before QuickBooks is connected. Leave this off for a
-            deployment that will hold ARG&rsquo;s real books — the warehouse then starts empty and
-            fills from the connectors.
-          </span>
-        </span>
-      </label>
 
       {error && (
         <p className="text-[11.5px] leading-relaxed text-[var(--status-critical)]">{error}</p>
