@@ -166,6 +166,8 @@ export const sheetsConnector: SourceConnector = {
     const values = await readRange(spreadsheetId, range);
     const records: RawRecord[] = [{ entity, key: range, payload: { range, values } }];
 
-    return { sourceSystem: 'SHEETS', entity, window, records, fetchedAt: new Date() };
+    // One range, one request. There is nothing here to slice, so a Sheets
+    // entity always completes in the slice that starts it.
+    return { sourceSystem: 'SHEETS', entity, window, records, fetchedAt: new Date(), nextCursor: null };
   },
 };

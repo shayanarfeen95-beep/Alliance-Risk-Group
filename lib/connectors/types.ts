@@ -33,6 +33,52 @@ export interface RawBatch {
   window: FetchWindow;
   records: RawRecord[];
   fetchedAt: Date;
+  /**
+   * Set when the connector stopped early and more remains.
+   *
+   * A pull is not one request. HubSpot paginates a hundred records at a time and
+   * a real portal holds tens of thousands; QuickBooks wants a separate report
+   * call per month. Fetching all of it inside one HTTP request is what made the
+   * Pull button die at the platform timeout with nothing written and nothing
+   * said. So a connector fetches until its deadline, hands back an opaque
+   * position, and the caller comes straight back for the next slice.
+   *
+   * The value is the connector's own business — a HubSpot cursor, a month, a
+   * sheet name. Nothing outside the connector may read it, only return it.
+   */
+  nextCursor?: string | null;
+}
+
+/** How much of an entity to fetch, and where to resume from. */
+export interface FetchOptions {
+  /** An earlier batch's `nextCursor`, or null/undefined to start at the beginning. */
+  cursor?: string | null;
+  /**
+   * Epoch milliseconds after which the connector should stop at the next safe
+   * boundary and return a cursor. A slice that overruns is killed by the
+   * platform mid-write, so the budget has to be respected by the fetcher rather
+   * than enforced around it.
+   */
+  deadline?: number;
+  /**
+   * How many records one slice may return.
+   *
+   * Time alone is not enough of a bound. Fetching is fast and conforming is not
+   * — every HubSpot deal is an upsert plus a stage-history rewrite — so a slice
+   * that spent its whole budget fetching would hand conform more work than the
+   * rest of the invocation can absorb, and be killed after the network calls
+   * rather than before them. Capping the haul caps the write that follows it.
+   */
+  maxRecords?: number;
+}
+
+/**
+ * True when a slice should stop and hand back a cursor — because its time is up,
+ * or because it is already holding as much as the conform step can take.
+ */
+export function budgetSpent(options: FetchOptions | undefined, recordsHeld = 0): boolean {
+  if (options?.maxRecords !== undefined && recordsHeld >= options.maxRecords) return true;
+  return options?.deadline !== undefined && Date.now() >= options.deadline;
 }
 
 /** What a connector can be asked to produce. */
@@ -57,7 +103,7 @@ export interface SourceConnector {
    * would report a connected source as unconnected — or worse, the reverse.
    */
   isConfigured(): Promise<boolean>;
-  fetch(entity: string, window: FetchWindow): Promise<RawBatch>;
+  fetch(entity: string, window: FetchWindow, options?: FetchOptions): Promise<RawBatch>;
 }
 
 export class ConnectorNotConfiguredError extends Error {

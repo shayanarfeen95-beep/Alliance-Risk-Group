@@ -1,14 +1,20 @@
 'use client';
 
 /**
- * Pulling data, and deciding whose data it is.
+ * Pulling data, and watching it arrive.
  *
- * These two controls sit together because they are the two halves of the same
- * question — "am I looking at ARG's numbers yet?" — and separating them is how
- * somebody ends up on a live-labelled dashboard with nothing loaded, or on a
- * fully loaded dashboard still reading the seed.
+ * A pull is not one request any more. Fourteen entities of live QuickBooks,
+ * HubSpot and Sheets data cannot be fetched inside a single serverless
+ * invocation — the attempt died at the platform timeout, and what reached the
+ * browser was a gateway error with no JSON in it, which is why this panel used
+ * to say nothing more useful than "The request did not complete."
+ *
+ * So the browser drives the pull instead: ask what the work is, then run one
+ * short request per slice until each entity says it is finished. The operator
+ * watches rows land source by source rather than staring at a spinner, and an
+ * interrupted pull keeps everything it had already written.
  */
-import { useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import {
   CircleAlert,
@@ -18,23 +24,34 @@ import {
   RefreshCw,
 } from 'lucide-react';
 
-interface SyncOutcome {
+interface SyncStep {
+  source: string;
+  sourceLabel: string;
+  entity: string;
+  label: string;
+}
+
+interface SliceOutcome {
   source: string;
   entity: string;
   ok: boolean;
+  done: boolean;
+  loadRunId: string;
+  recordsRead: number;
   rowsWritten: number;
+  slices: number;
   notes?: string[];
   error?: string;
 }
 
-interface SyncResponse {
-  ok: boolean;
+type StepState = 'waiting' | 'running' | 'done' | 'failed';
+
+interface StepProgress extends SyncStep {
+  state: StepState;
+  rowsWritten: number;
+  recordsRead: number;
+  notes: string[];
   error?: string;
-  window?: string;
-  rowsWritten?: number;
-  outcomes?: SyncOutcome[];
-  failedCount?: number;
-  reconciliation?: string;
 }
 
 export interface DataControlsProps {
@@ -43,36 +60,183 @@ export interface DataControlsProps {
   canManage: boolean;
 }
 
+/**
+ * A slice may fail on a transient network hiccup rather than on anything wrong
+ * with the data. Retrying the same slice is safe — it resumes from the cursor
+ * the last successful slice committed — so a blip costs seconds rather than the
+ * whole pull.
+ */
+const SLICE_RETRIES = 2;
+
+/** Guards against a connector that keeps claiming there is more to fetch. */
+const MAX_SLICES_PER_ENTITY = 200;
+
 export function DataControls(props: DataControlsProps) {
   const router = useRouter();
-  const [busy, setBusy] = useState<null | 'sync'>(null);
-  const [result, setResult] = useState<SyncResponse | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [steps, setSteps] = useState<StepProgress[]>([]);
+  const [window_, setWindow] = useState<string | null>(null);
+  const [reconciliation, setReconciliation] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const cancelled = useRef(false);
+
+  // A pull that is still running when the panel unmounts must stop driving, or
+  // it keeps posting slices at a page nobody is looking at.
+  useEffect(() => () => {
+    cancelled.current = true;
+  }, []);
+
+  const post = useCallback(async (body: Record<string, unknown>) => {
+    const response = await fetch('/api/sync', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+
+    if (!response.ok && response.status >= 500) {
+      throw new Error(`The server returned ${response.status} while pulling.`);
+    }
+
+    return (await response.json()) as Record<string, unknown>;
+  }, []);
 
   const connected = props.connectedSources.filter((source) => source.connected);
 
   async function sync(sources?: string[]) {
-    setBusy('sync');
+    cancelled.current = false;
+    setBusy(true);
     setError(null);
-    setResult(null);
+    setReconciliation(null);
+    setSteps([]);
+    setWindow(null);
+
     try {
-      const response = await fetch('/api/sync', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ sources, months: 3 }),
-      });
-      const payload = (await response.json()) as SyncResponse;
-      if (!payload.ok) setError(payload.error ?? 'The sync did not complete.');
-      else {
-        setResult(payload);
+      // --- What is there to pull? ----------------------------------------
+      const planned = (await post({ mode: 'plan', sources, months: 3 })) as {
+        ok: boolean;
+        error?: string;
+        window?: string;
+        windowStart?: string;
+        windowEnd?: string;
+        steps?: SyncStep[];
+      };
+
+      if (!planned.ok || !planned.steps?.length) {
+        setError(planned.error ?? 'There was nothing to pull.');
+        return;
+      }
+
+      setWindow(planned.window ?? null);
+      const progress: StepProgress[] = planned.steps.map((step) => ({
+        ...step,
+        state: 'waiting',
+        rowsWritten: 0,
+        recordsRead: 0,
+        notes: [],
+      }));
+      setSteps(progress);
+
+      // --- Pull it, one bounded slice at a time ---------------------------
+      for (let index = 0; index < progress.length; index++) {
+        if (cancelled.current) return;
+
+        const step = progress[index]!;
+        step.state = 'running';
+        setSteps([...progress]);
+
+        let loadRunId: string | null = null;
+        let sliceCount = 0;
+
+        for (;;) {
+          if (cancelled.current) return;
+
+          let outcome: SliceOutcome | null = null;
+          let lastError = 'The slice did not complete.';
+
+          for (let attempt = 0; attempt <= SLICE_RETRIES; attempt++) {
+            if (attempt > 0) await pause(2 ** attempt * 500);
+            try {
+              const response = (await post({
+                mode: 'slice',
+                source: step.source,
+                entity: step.entity,
+                windowStart: planned.windowStart,
+                windowEnd: planned.windowEnd,
+                loadRunId,
+              })) as { ok: boolean; error?: string; outcome?: SliceOutcome };
+
+              if (response.ok && response.outcome) {
+                outcome = response.outcome;
+                break;
+              }
+              lastError = response.error ?? lastError;
+            } catch (err) {
+              lastError = err instanceof Error ? err.message : lastError;
+            }
+          }
+
+          if (!outcome) {
+            step.state = 'failed';
+            step.error = lastError;
+            setSteps([...progress]);
+            break;
+          }
+
+          step.rowsWritten += outcome.rowsWritten;
+          step.recordsRead += outcome.recordsRead;
+          if (outcome.notes?.length) step.notes = outcome.notes;
+
+          if (!outcome.ok) {
+            step.state = 'failed';
+            step.error = outcome.error ?? 'The source rejected the request.';
+            setSteps([...progress]);
+            break;
+          }
+
+          setSteps([...progress]);
+
+          if (outcome.done) {
+            step.state = 'done';
+            setSteps([...progress]);
+            break;
+          }
+
+          loadRunId = outcome.loadRunId;
+          sliceCount += 1;
+          if (sliceCount >= MAX_SLICES_PER_ENTITY) {
+            step.state = 'failed';
+            step.error =
+              'The source kept returning more data than a single pull can take. What arrived is ' +
+              'saved; pull this source again to continue.';
+            setSteps([...progress]);
+            break;
+          }
+        }
+
+        // Each finished entity is already committed, so the dashboards behind
+        // this page can show it without waiting for the rest.
         router.refresh();
       }
-    } catch {
-      setError('The request did not complete.');
+
+      // --- Then the controls, once ----------------------------------------
+      if (cancelled.current) return;
+      const finalized = (await post({ mode: 'finalize' })) as {
+        ok: boolean;
+        reconciliation?: string;
+        error?: string;
+      };
+      setReconciliation(finalized.reconciliation ?? finalized.error ?? null);
+      router.refresh();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'The pull stopped unexpectedly.');
     } finally {
-      setBusy(null);
+      if (!cancelled.current) setBusy(false);
     }
   }
+
+  const totalRows = steps.reduce((sum, step) => sum + step.rowsWritten, 0);
+  const finishedSteps = steps.filter((step) => step.state === 'done' || step.state === 'failed');
+  const failedSteps = steps.filter((step) => step.state === 'failed');
 
   return (
     <div className="space-y-4">
@@ -112,8 +276,9 @@ export function DataControls(props: DataControlsProps) {
             <p className="mt-1 text-[11.5px] leading-relaxed text-[var(--text-muted)]">
               Fetches the last three months from every connected source and writes it into the
               warehouse — QuickBooks into the profit and loss and balance sheet, HubSpot into deals,
-              contacts and meetings, Sheets into budget and headcount. Closed months are left
-              untouched. The reconciliation controls run immediately afterwards.
+              contacts and meetings, Sheets into budget and headcount. Each entity is saved as it
+              lands, so the dashboards update while the pull is still running. Closed months are left
+              untouched. The reconciliation controls run at the end.
             </p>
           </div>
 
@@ -121,17 +286,17 @@ export function DataControls(props: DataControlsProps) {
             <button
               type="button"
               onClick={() => sync()}
-              disabled={busy !== null || connected.length === 0}
+              disabled={busy || connected.length === 0}
               title={connected.length === 0 ? 'No source is connected yet.' : undefined}
               className="flex shrink-0 items-center gap-1.5 rounded-[5px] px-3 py-1.5 text-[11.5px] font-medium disabled:opacity-40"
               style={{ background: 'var(--text-primary)', color: 'var(--text-inverse)' }}
             >
-              {busy === 'sync' ? (
+              {busy ? (
                 <Loader2 size={12} className="animate-spin" aria-hidden />
               ) : (
                 <RefreshCw size={12} aria-hidden />
               )}
-              {busy === 'sync' ? 'Pulling…' : 'Pull everything'}
+              {busy ? 'Pulling…' : 'Pull everything'}
             </button>
           )}
         </div>
@@ -142,7 +307,7 @@ export function DataControls(props: DataControlsProps) {
               key={source.source}
               type="button"
               onClick={() => sync([source.source])}
-              disabled={!props.canManage || busy !== null || !source.connected}
+              disabled={!props.canManage || busy || !source.connected}
               className="flex items-center gap-1.5 rounded-[5px] border px-2.5 py-1 text-[11px] font-medium transition-colors hover:bg-[var(--surface-2)] disabled:opacity-40"
               style={{ borderColor: 'var(--border)' }}
               title={source.connected ? undefined : `${source.label} is not signed in.`}
@@ -166,34 +331,48 @@ export function DataControls(props: DataControlsProps) {
           </p>
         )}
 
-        {result && (
+        {steps.length > 0 && (
           <div className="mt-3 space-y-2 border-t pt-3" style={{ borderColor: 'var(--border)' }}>
             <p className="flex items-center gap-2 text-[12px] font-medium">
-              {result.failedCount ? (
+              {busy ? (
+                <Loader2 size={13} className="animate-spin" aria-hidden />
+              ) : failedSteps.length ? (
                 <CircleAlert size={13} style={{ color: 'var(--status-warning)' }} aria-hidden />
               ) : (
                 <CircleCheck size={13} style={{ color: 'var(--status-good)' }} aria-hidden />
               )}
-              {result.rowsWritten?.toLocaleString()} row
-              {result.rowsWritten === 1 ? '' : 's'} written for {result.window}
+              {totalRows.toLocaleString()} row{totalRows === 1 ? '' : 's'} written
+              {window_ ? ` for ${window_}` : ''} · {finishedSteps.length} of {steps.length}
             </p>
-            <p className="text-[11px] text-[var(--text-secondary)]">{result.reconciliation}</p>
+
+            {reconciliation && (
+              <p className="text-[11px] text-[var(--text-secondary)]">{reconciliation}</p>
+            )}
 
             <ul className="space-y-1">
-              {result.outcomes?.map((outcome, index) => (
-                <li key={index} className="text-[11px] leading-relaxed">
-                  <span className="text-[var(--text-secondary)]">
-                    {outcome.source} · {outcome.entity.replace(/_/g, ' ')}
-                  </span>{' '}
-                  {outcome.ok ? (
-                    <span className="text-[var(--text-muted)]">
-                      {outcome.rowsWritten.toLocaleString()} rows
+              {steps.map((step) => (
+                <li key={`${step.source}:${step.entity}`} className="text-[11px] leading-relaxed">
+                  <span className="inline-flex items-center gap-1.5">
+                    <StepIcon state={step.state} />
+                    <span className="text-[var(--text-secondary)]">
+                      {step.sourceLabel} · {step.label}
                     </span>
+                  </span>{' '}
+                  {step.state === 'failed' ? (
+                    <span style={{ color: 'var(--status-critical)' }}>{step.error}</span>
+                  ) : step.state === 'waiting' ? (
+                    <span className="text-[var(--text-muted)]">queued</span>
                   ) : (
-                    <span style={{ color: 'var(--status-critical)' }}>{outcome.error}</span>
+                    <span className="text-[var(--text-muted)]">
+                      {step.rowsWritten.toLocaleString()} row{step.rowsWritten === 1 ? '' : 's'}
+                      {step.state === 'running' ? ' so far…' : ''}
+                    </span>
                   )}
-                  {outcome.notes?.map((note, noteIndex) => (
-                    <span key={noteIndex} className="block pl-3 text-[10.5px] text-[var(--text-muted)]">
+                  {step.notes.map((note, noteIndex) => (
+                    <span
+                      key={noteIndex}
+                      className="block pl-5 text-[10.5px] text-[var(--text-muted)]"
+                    >
                       {note}
                     </span>
                   ))}
@@ -203,7 +382,25 @@ export function DataControls(props: DataControlsProps) {
           </div>
         )}
       </div>
-
     </div>
   );
+}
+
+function StepIcon({ state }: { state: StepState }) {
+  if (state === 'running') return <Loader2 size={11} className="animate-spin" aria-hidden />;
+  if (state === 'done')
+    return <CircleCheck size={11} style={{ color: 'var(--status-good)' }} aria-hidden />;
+  if (state === 'failed')
+    return <CircleAlert size={11} style={{ color: 'var(--status-critical)' }} aria-hidden />;
+  return (
+    <span
+      className="inline-block size-[7px] rounded-full"
+      style={{ background: 'var(--border)' }}
+      aria-hidden
+    />
+  );
+}
+
+function pause(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }

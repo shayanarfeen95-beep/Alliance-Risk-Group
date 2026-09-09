@@ -4,25 +4,37 @@ import { getSessionUser } from '@/lib/auth/session';
 import { can } from '@/lib/auth/scope';
 import { getDb } from '@/lib/db/client';
 import * as t from '@/lib/db/schema';
-import { syncAll } from '@/lib/etl/ingest';
+import { runSlice, syncPlan, SLICE_FETCH_BUDGET_MS } from '@/lib/etl/ingest';
 import { runAllChecks, persistFindings } from '@/lib/recon/checks';
 import type { SourceSystemCode } from '@/lib/connectors/types';
 
 export const dynamic = 'force-dynamic';
-export const maxDuration = 300;
+export const maxDuration = 60;
 
 /**
- * Pull everything, now.
- *
- * Ingestion used to be reachable only by asking the assistant to propose a pull
- * and then confirming it. That is the right shape for "pull March because the
- * numbers look wrong", and the wrong shape for "I have just connected
- * QuickBooks and want my data" — which is the first thing anybody does.
+ * Pulling data, a slice at a time.
  *
  * The click is the confirmation, so there is no preview step; everything else is
- * identical, because both paths run the same code in lib/etl/ingest.ts. The
- * reconciliation controls run straight afterwards, so a load that breaks a
- * tie-out says so in the same response rather than at the next refresh.
+ * identical to an agent-initiated pull, because both run the same code in
+ * lib/etl/ingest.ts. There is still no second, weaker ingestion path.
+ *
+ * What changed is the shape of the request. Pulling every entity of every
+ * connected source inside one HTTP call is not something a serverless function
+ * can do — a real HubSpot portal alone is hundreds of paginated round trips —
+ * and the attempt died at the platform timeout, which reaches the browser as a
+ * gateway error rather than as JSON. The operator saw "The request did not
+ * complete" and had no way to tell an expired budget from a broken connection.
+ *
+ * So the work is split into requests that are each comfortably short, and the
+ * browser drives them:
+ *
+ *   plan     — what would be pulled, given what is connected
+ *   slice    — fetch, land and conform as much of one entity as fits, then say
+ *              whether to come back for the rest
+ *   finalize — run the reconciliation controls once, at the end
+ *
+ * Each slice commits what it read, so an interrupted pull leaves real data
+ * behind and resumes from its cursor rather than starting again.
  */
 export async function POST(request: Request) {
   const user = await getSessionUser();
@@ -36,15 +48,49 @@ export async function POST(request: Request) {
     );
   }
 
-  let body: { sources?: SourceSystemCode[]; months?: number } = {};
+  let body: {
+    mode?: 'plan' | 'slice' | 'finalize';
+    sources?: SourceSystemCode[];
+    months?: number;
+    source?: SourceSystemCode;
+    entity?: string;
+    windowStart?: string;
+    windowEnd?: string;
+    loadRunId?: string | null;
+  } = {};
   try {
     body = (await request.json()) as typeof body;
   } catch {
-    // An empty body means "everything connected", which is the common case.
+    // An empty body means "plan everything connected", which is the common case.
   }
 
   const db = await getDb();
 
+  try {
+    switch (body.mode ?? 'plan') {
+      case 'plan':
+        return NextResponse.json(await plan(db, body));
+      case 'slice':
+        return NextResponse.json(await slice(db, user, body));
+      case 'finalize':
+        return NextResponse.json(await finalize(db));
+      default:
+        return NextResponse.json({ ok: false, error: 'Unknown sync mode.' }, { status: 400 });
+    }
+  } catch (error) {
+    // Anything that escapes still leaves the browser holding JSON. A pull that
+    // fails must say what failed; "the request did not complete" is what a
+    // gateway says when this route says nothing at all.
+    return NextResponse.json({
+      ok: false,
+      error: error instanceof Error ? error.message : 'The sync could not run.',
+    });
+  }
+}
+
+type Db = Awaited<ReturnType<typeof getDb>>;
+
+async function plan(db: Db, body: { sources?: SourceSystemCode[]; months?: number }) {
   // Anchored on the configured reporting month rather than today, so a sync does
   // not silently reach into a month the business has not started reporting on.
   const [configured] = await db
@@ -58,53 +104,86 @@ export async function POST(request: Request) {
   const windowEnd = anchor;
   const windowStart = shiftMonths(anchor, -(months - 1));
 
-  let outcomes;
-  try {
-    outcomes = await syncAll(db, user, {
-      windowStart,
-      windowEnd,
-      sources: body.sources,
-    });
-  } catch (error) {
-    return NextResponse.json({
-      ok: false,
-      error: error instanceof Error ? error.message : 'The sync could not start.',
-    });
-  }
+  const steps = await syncPlan(body.sources);
 
-  if (outcomes.length === 0) {
-    return NextResponse.json({
+  if (steps.length === 0) {
+    return {
       ok: false,
       error:
-        'No source is connected yet, so there was nothing to pull. Sign in to QuickBooks, HubSpot ' +
+        'No source is connected yet, so there is nothing to pull. Sign in to QuickBooks, HubSpot ' +
         'or Google Sheets above first.',
-    });
+    };
   }
 
-  // A load that breaks a standing control must say so now, not overnight.
-  const recon = await runAllChecks(db);
-  await persistFindings(db, recon.findings, outcomes[0]?.loadRunId || undefined);
-
-  const rowsWritten = outcomes.reduce((sum, outcome) => sum + outcome.rowsWritten, 0);
-  const failed = outcomes.filter((outcome) => !outcome.ok);
-
-  return NextResponse.json({
+  return {
     ok: true,
+    mode: 'plan' as const,
+    windowStart,
+    windowEnd,
     window: `${windowStart.slice(0, 7)} → ${windowEnd.slice(0, 7)}`,
-    rowsWritten,
-    outcomes: outcomes.map((outcome) => ({
+    steps,
+  };
+}
+
+async function slice(
+  db: Db,
+  user: NonNullable<Awaited<ReturnType<typeof getSessionUser>>>,
+  body: {
+    source?: SourceSystemCode;
+    entity?: string;
+    windowStart?: string;
+    windowEnd?: string;
+    loadRunId?: string | null;
+  },
+) {
+  if (!body.source || !body.entity || !body.windowStart || !body.windowEnd) {
+    return { ok: false, error: 'A slice needs a source, an entity and a window.' };
+  }
+
+  const outcome = await runSlice(
+    db,
+    user,
+    {
+      source: body.source,
+      entity: body.entity,
+      windowStart: body.windowStart,
+      windowEnd: body.windowEnd,
+      loadRunId: body.loadRunId ?? null,
+    },
+    { deadline: Date.now() + SLICE_FETCH_BUDGET_MS },
+  );
+
+  return {
+    ok: true,
+    mode: 'slice' as const,
+    outcome: {
       source: outcome.source,
       entity: outcome.entity,
       ok: outcome.ok,
+      done: outcome.done,
+      loadRunId: outcome.loadRunId,
+      recordsRead: outcome.recordsRead,
       rowsWritten: outcome.rowsWritten,
+      slices: outcome.slices,
       notes: outcome.notes,
       error: outcome.error,
-    })),
-    failedCount: failed.length,
+    },
+  };
+}
+
+/** A load that breaks a standing control must say so now, not overnight. */
+async function finalize(db: Db) {
+  const recon = await runAllChecks(db);
+  await persistFindings(db, recon.findings);
+
+  return {
+    ok: true,
+    mode: 'finalize' as const,
     reconciliation: recon.allPass
       ? `All ${recon.passed} reconciliation controls pass.`
       : `${recon.failed} reconciliation control${recon.failed === 1 ? '' : 's'} now fail — check below before relying on affected figures.`,
-  });
+    allPass: recon.allPass,
+  };
 }
 
 function shiftMonths(month: string, delta: number): string {

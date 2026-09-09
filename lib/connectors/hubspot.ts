@@ -11,8 +11,10 @@
  */
 import {
   ConnectorNotConfiguredError,
+  budgetSpent,
   requestWithRetry,
   type EntityDescriptor,
+  type FetchOptions,
   type FetchWindow,
   type RawBatch,
   type RawRecord,
@@ -127,16 +129,26 @@ async function fetchPage(
   return (await response.json()) as HubspotPage;
 }
 
-/** Walks HubSpot's cursor pagination to completion. */
-async function fetchAll(
+/**
+ * Walks HubSpot's cursor pagination for as long as the budget allows.
+ *
+ * A portal with thirty thousand contacts is three hundred round trips, and no
+ * serverless invocation survives that. So this stops on the page boundary once
+ * the deadline passes and hands the caller HubSpot's own `after` token: the next
+ * slice picks up exactly where this one stopped, with no page fetched twice and
+ * none skipped. Every record already read is returned and written — a slice that
+ * runs out of time is progress, not a failure.
+ */
+async function fetchPaged(
   path: string,
   properties: string[],
   extraParams: Record<string, string> = {},
-): Promise<RawRecord[]> {
+  options?: FetchOptions,
+): Promise<{ records: RawRecord[]; nextCursor: string | null }> {
   const records: RawRecord[] = [];
-  let after: string | undefined;
+  let after: string | undefined = options?.cursor ?? undefined;
 
-  do {
+  for (;;) {
     const json = await fetchPage(path, {
       limit: '100',
       // Omitted rather than sent empty: /crm/v3/owners is not an object route
@@ -150,10 +162,11 @@ async function fetchAll(
     for (const result of json.results) {
       records.push({ entity: path, key: result.id, payload: result });
     }
-    after = json.paging?.next?.after;
-  } while (after);
 
-  return records;
+    after = json.paging?.next?.after;
+    if (!after) return { records, nextCursor: null };
+    if (budgetSpent(options, records.length)) return { records, nextCursor: after };
+  }
 }
 
 export const hubspotConnector: SourceConnector = {
@@ -164,10 +177,10 @@ export const hubspotConnector: SourceConnector = {
 
   isConfigured: () => isConnected('HUBSPOT'),
 
-  async fetch(entity: string, window: FetchWindow): Promise<RawBatch> {
+  async fetch(entity: string, window: FetchWindow, options?: FetchOptions): Promise<RawBatch> {
     if (!(await hubspotConnector.isConfigured())) throw new ConnectorNotConfiguredError('HUBSPOT');
 
-    let records: RawRecord[];
+    let page: { records: RawRecord[]; nextCursor: string | null };
 
     switch (entity) {
       case 'deals': {
@@ -180,29 +193,42 @@ export const hubspotConnector: SourceConnector = {
           ? [...DEAL_PROPERTIES, divisionProperty]
           : DEAL_PROPERTIES;
 
-        records = await fetchAll('/crm/v3/objects/deals', properties, {
-          propertiesWithHistory: 'dealstage',
-        });
+        page = await fetchPaged(
+          '/crm/v3/objects/deals',
+          properties,
+          { propertiesWithHistory: 'dealstage' },
+          options,
+        );
         break;
       }
       case 'contacts':
-        records = await fetchAll('/crm/v3/objects/contacts', CONTACT_PROPERTIES);
+        page = await fetchPaged('/crm/v3/objects/contacts', CONTACT_PROPERTIES, {}, options);
         break;
       case 'meetings':
-        records = await fetchAll('/crm/v3/objects/meetings', MEETING_PROPERTIES, {
-          associations: 'deals,contacts',
-        });
+        page = await fetchPaged(
+          '/crm/v3/objects/meetings',
+          MEETING_PROPERTIES,
+          { associations: 'deals,contacts' },
+          options,
+        );
         break;
       case 'owners':
         // The owners endpoint is not a CRM object route: it returns whole
         // records rather than a `properties` bag, and takes no properties
         // parameter. Asking it for one is a 400.
-        records = await fetchAll('/crm/v3/owners', [], {});
+        page = await fetchPaged('/crm/v3/owners', [], {}, options);
         break;
       default:
         throw new Error(`Unknown HubSpot entity "${entity}".`);
     }
 
-    return { sourceSystem: 'HUBSPOT', entity, window, records, fetchedAt: new Date() };
+    return {
+      sourceSystem: 'HUBSPOT',
+      entity,
+      window,
+      records: page.records,
+      fetchedAt: new Date(),
+      nextCursor: page.nextCursor,
+    };
   },
 };

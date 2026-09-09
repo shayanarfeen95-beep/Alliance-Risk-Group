@@ -10,10 +10,12 @@
  */
 import {
   ConnectorNotConfiguredError,
+  budgetSpent,
   lastDayOfMonth,
   monthsInWindow,
   requestWithRetry,
   type EntityDescriptor,
+  type FetchOptions,
   type FetchWindow,
   type RawBatch,
   type RawRecord,
@@ -77,6 +79,15 @@ const ENTITIES: EntityDescriptor[] = [
     description: 'Reference data. Alerts on new classes so nothing lands unmapped.',
   },
 ];
+
+/** Which QBO report backs each monthly entity. */
+const MONTHLY_REPORTS: Record<string, string> = {
+  profit_and_loss: 'ProfitAndLoss',
+  balance_sheet: 'BalanceSheet',
+  trial_balance: 'TrialBalance',
+  ar_aging: 'AgedReceivables',
+  ap_aging: 'AgedPayables',
+};
 
 interface TokenCache {
   accessToken: string;
@@ -189,10 +200,20 @@ async function fetchMonthlyReport(
   reportName: string,
   window: FetchWindow,
   extraParams: Record<string, string> = {},
-): Promise<RawRecord[]> {
+  options?: FetchOptions,
+): Promise<{ records: RawRecord[]; nextCursor: string | null }> {
   const records: RawRecord[] = [];
 
-  for (const month of monthsInWindow(window)) {
+  // The month boundary is the only place a report fetch may be interrupted.
+  // Conform replaces a month wholesale, so half a month landing on its own would
+  // read as a genuine collapse in that month's figures rather than as an
+  // unfinished pull. A month is fetched entirely or not at all.
+  const months = monthsInWindow(window);
+  const resumeAt = options?.cursor ? months.indexOf(options.cursor) : 0;
+  const from = resumeAt < 0 ? 0 : resumeAt;
+
+  for (let i = from; i < months.length; i++) {
+    const month = months[i]!;
     const payload = await callApi(`reports/${reportName}`, {
       start_date: month,
       end_date: lastDayOfMonth(month),
@@ -202,9 +223,12 @@ async function fetchMonthlyReport(
       ...extraParams,
     });
     records.push({ entity: reportName, key: month, payload });
+
+    const next = months[i + 1];
+    if (next && budgetSpent(options, records.length)) return { records, nextCursor: next };
   }
 
-  return records;
+  return { records, nextCursor: null };
 }
 
 export const qboConnector: SourceConnector = {
@@ -215,27 +239,22 @@ export const qboConnector: SourceConnector = {
 
   isConfigured: () => isConnected('QBO'),
 
-  async fetch(entity: string, window: FetchWindow): Promise<RawBatch> {
+  async fetch(entity: string, window: FetchWindow, options?: FetchOptions): Promise<RawBatch> {
     if (!(await qboConnector.isConfigured())) throw new ConnectorNotConfiguredError('QBO');
 
     let records: RawRecord[];
+    let nextCursor: string | null = null;
 
     switch (entity) {
       case 'profit_and_loss':
-        records = await fetchMonthlyReport('ProfitAndLoss', window);
-        break;
       case 'balance_sheet':
-        records = await fetchMonthlyReport('BalanceSheet', window);
-        break;
       case 'trial_balance':
-        records = await fetchMonthlyReport('TrialBalance', window);
-        break;
       case 'ar_aging':
-        records = await fetchMonthlyReport('AgedReceivables', window);
+      case 'ap_aging': {
+        const report = MONTHLY_REPORTS[entity]!;
+        ({ records, nextCursor } = await fetchMonthlyReport(report, window, {}, options));
         break;
-      case 'ap_aging':
-        records = await fetchMonthlyReport('AgedPayables', window);
-        break;
+      }
       case 'accounts':
         records = [
           {
@@ -258,6 +277,6 @@ export const qboConnector: SourceConnector = {
         throw new Error(`Unknown QBO entity "${entity}".`);
     }
 
-    return { sourceSystem: 'QBO', entity, window, records, fetchedAt: new Date() };
+    return { sourceSystem: 'QBO', entity, window, records, fetchedAt: new Date(), nextCursor };
   },
 };
