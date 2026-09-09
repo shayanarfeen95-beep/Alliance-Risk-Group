@@ -10,7 +10,10 @@
  * A screen naming the one missing variable is a better answer than an
  * application that appears to work.
  */
-export function ConfigurationNeeded({ unreachable }: { unreachable?: boolean } = {}) {
+export function ConfigurationNeeded({
+  unreachable,
+  missing = [],
+}: { unreachable?: boolean; missing?: string[] } = {}) {
   return (
     <main className="flex min-h-dvh items-center justify-center px-6 py-12">
       <div className="w-full max-w-lg">
@@ -24,11 +27,22 @@ export function ConfigurationNeeded({ unreachable }: { unreachable?: boolean } =
         </div>
 
         <h1 className="text-[20px] font-semibold tracking-tight">
-          {unreachable ? 'The database could not be reached' : 'One thing left to configure'}
+          {unreachable
+            ? 'The database could not be reached'
+            : missing.length > 1
+              ? 'Two things left to configure'
+              : 'One thing left to configure'}
         </h1>
 
         <p className="mt-2 text-[13px] leading-relaxed text-[var(--text-secondary)]">
-          {unreachable ? (
+          {!unreachable && missing.length > 0 && !missing.includes('DATABASE_URL') ? (
+            <>
+              This deployment is missing{' '}
+              <code className="font-[var(--font-mono)]">{missing.join(', ')}</code>. Signing in
+              cannot work without it: the session cookie is signed with that key, and every instance
+              has to use the same one.
+            </>
+          ) : unreachable ? (
             <>
               <code className="font-[var(--font-mono)]">DATABASE_URL</code> is set, but connecting to
               it failed. The usual causes are a paused Neon project, a rotated password, or the
@@ -47,13 +61,19 @@ export function ConfigurationNeeded({ unreachable }: { unreachable?: boolean } =
           className="mt-5 rounded-[var(--radius)] border p-4"
           style={{ borderColor: 'var(--border)', background: 'var(--surface-1)' }}
         >
-          <p className="text-[12px] font-medium">Set one environment variable</p>
+          <p className="text-[12px] font-medium">
+            {missing.length && !missing.includes('DATABASE_URL')
+              ? 'Set this in Vercel, then redeploy'
+              : 'Set one environment variable'}
+          </p>
           <pre
             className="mt-2 overflow-x-auto rounded-[var(--radius-sm)] px-3 py-2 text-[11.5px]"
             style={{ background: 'var(--surface-2)' }}
           >
             <code className="font-[var(--font-mono)]">
-              DATABASE_URL=postgres://…-pooler…neon.tech/neondb?sslmode=require
+              {missing.length && !missing.includes('DATABASE_URL')
+                ? missing.map((name) => `${name}=…`).join('\n')
+                : 'DATABASE_URL=postgres://…-pooler…neon.tech/neondb?sslmode=require'}
             </code>
           </pre>
           <p className="mt-2.5 text-[11.5px] leading-relaxed text-[var(--text-muted)]">
