@@ -57,6 +57,30 @@ function secret(): Uint8Array {
   return new TextEncoder().encode(value);
 }
 
+/**
+ * Accept the previous secret during a rotation, but always mint new sessions
+ * with AUTH_SECRET. This prevents a deploy that rotates credentials from
+ * turning every existing dashboard session into a server error.
+ */
+function verificationSecrets(): Uint8Array[] {
+  const values = [process.env.AUTH_SECRET, process.env.AUTH_SECRET_2].filter(
+    (value): value is string => Boolean(value),
+  );
+  if (values.length) return values.map((value) => new TextEncoder().encode(value));
+  return [secret()];
+}
+
+async function verifySessionToken(token: string) {
+  for (const key of verificationSecrets()) {
+    try {
+      return await jwtVerify(token, key);
+    } catch {
+      // Try the next configured rotation key.
+    }
+  }
+  return null;
+}
+
 export async function createSession(userId: string): Promise<void> {
   const db = await getDb();
   const expiresAt = new Date(Date.now() + SESSION_DAYS * 24 * 60 * 60 * 1000);
@@ -85,7 +109,9 @@ export async function destroySession(): Promise<void> {
   const token = store.get(COOKIE_NAME)?.value;
   if (token) {
     try {
-      const { payload } = await jwtVerify(token, secret());
+      const verified = await verifySessionToken(token);
+      if (!verified) throw new Error('invalid session');
+      const { payload } = verified;
       const db = await getDb();
       await db.delete(sessions).where(eq(sessions.id, payload.sid as string));
     } catch {
@@ -103,8 +129,9 @@ export async function getSessionUser(): Promise<SessionUser | null> {
 
   let sid: string;
   try {
-    const { payload } = await jwtVerify(token, secret());
-    sid = payload.sid as string;
+    const verified = await verifySessionToken(token);
+    if (!verified) return null;
+    sid = verified.payload.sid as string;
   } catch {
     return null;
   }
