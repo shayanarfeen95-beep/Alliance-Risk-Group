@@ -26,6 +26,15 @@ import { proxy } from './composio';
 const API = 'https://api.hubapi.com';
 
 /**
+ * The property every incremental read hangs on.
+ *
+ * HubSpot stamps it on every object and updates it on every change, which makes
+ * it the only field that can answer "what is new since last time" without
+ * walking the whole portal to find out.
+ */
+const LAST_MODIFIED = 'hs_lastmodifieddate';
+
+/**
  * Candidate property names for "how did this deal come to us".
  *
  * There is no standard HubSpot field for it. ARG records it on `zoho_lead_source`
@@ -52,6 +61,10 @@ const DEAL_PROPERTIES = [
   // differently, so the candidates are tried in order and the first one present
   // on the record wins — see sourceLabel() in the conform step.
   ...DEAL_SOURCE_PROPERTIES,
+  // Asked for explicitly so the FIRST full crawl can record a watermark. Without
+  // it the pass that walks the whole portal would leave nothing behind, and the
+  // next pull would walk it again.
+  LAST_MODIFIED,
 ];
 
 const CONTACT_PROPERTIES = [
@@ -63,9 +76,16 @@ const CONTACT_PROPERTIES = [
   // the MQL and SQL dates are derived from lifecyclestage history instead.
   'hs_lifecyclestage_lead_date',
   'hs_lifecyclestage_customer_date',
+  LAST_MODIFIED,
 ];
 
-const COMPANY_PROPERTIES = ['name', 'domain', 'hs_ideal_customer_profile', 'lifecyclestage'];
+const COMPANY_PROPERTIES = [
+  'name',
+  'domain',
+  'hs_ideal_customer_profile',
+  'lifecyclestage',
+  LAST_MODIFIED,
+];
 
 const MEETING_PROPERTIES = [
   'hs_meeting_start_time',
@@ -75,6 +95,7 @@ const MEETING_PROPERTIES = [
   // "Call and meeting type" — the axis the leadership review is read along.
   // Discovery calls and demos are values of this field, not separate objects.
   'hs_activity_type',
+  LAST_MODIFIED,
 ];
 
 /**
@@ -256,6 +277,280 @@ async function fetchPaged(
   }
 }
 
+
+/** The newest `hs_lastmodifieddate` across a batch of landed records. */
+function latestModified(records: RawRecord[]): Date | null {
+  let newest: Date | null = null;
+  for (const record of records) {
+    const properties = (record.payload as HubspotRecord | undefined)?.properties;
+    // Contacts historically answer to the unprefixed spelling; both are read so
+    // a watermark is recorded whichever one this object carries.
+    const value = properties?.hs_lastmodifieddate ?? properties?.lastmodifieddate;
+    if (!value) continue;
+    const parsed = new Date(value);
+    if (Number.isNaN(parsed.getTime())) continue;
+    if (!newest || parsed > newest) newest = parsed;
+  }
+  return newest;
+}
+
+// ---------------------------------------------------------------------------
+// Incremental reads
+// ---------------------------------------------------------------------------
+
+/**
+ * What an incremental slice is resuming from.
+ *
+ * HubSpot's search endpoint caps a single query at ten thousand results however
+ * far you page it. Sorting ascending by modification time makes that survivable:
+ * when a query is exhausted, the next one starts from the last timestamp seen
+ * rather than from the beginning. So a cursor has to carry both halves — where
+ * the current query is, and where to restart it.
+ */
+interface IncrementalCursor {
+  /** Epoch milliseconds; the exclusive lower bound of the current query. */
+  since: number;
+  /** HubSpot's paging token within that query, if there is one. */
+  after?: string;
+}
+
+function parseCursor(raw: string | null | undefined): IncrementalCursor | null {
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw) as Partial<IncrementalCursor>;
+    if (typeof parsed.since === 'number') {
+      return { since: parsed.since, after: parsed.after };
+    }
+  } catch {
+    // A plain token is a cursor from a full crawl, not an incremental one.
+  }
+  return null;
+}
+
+interface SearchPage {
+  total?: number;
+  results?: Array<{ id: string; properties?: Record<string, string | null> }>;
+  paging?: { next?: { after?: string } };
+}
+
+/** POSTs through whichever transport this connection uses. */
+async function post<T>(path: string, body: unknown): Promise<T> {
+  const credential = await loadCredential('HUBSPOT');
+  if (!credential) throw new ConnectorNotConfiguredError('HUBSPOT');
+
+  if (credential.authMethod === 'COMPOSIO') {
+    const connectedAccountId = credential.data.connectedAccountId;
+    if (!connectedAccountId) throw new ConnectorNotConfiguredError('HUBSPOT');
+    return proxy<T>({
+      connectedAccountId,
+      endpoint: path,
+      method: 'POST',
+      headers: { accept: 'application/json' },
+      body,
+    });
+  }
+
+  const accessToken = credential.data.accessToken;
+  if (!accessToken) throw new ConnectorNotConfiguredError('HUBSPOT');
+
+  const response = await requestWithRetry(
+    `${API}${path}`,
+    {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        Accept: 'application/json',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(body),
+    },
+    'HUBSPOT',
+  );
+  return (await response.json()) as T;
+}
+
+/**
+ * Everything that changed since a moment, in three steps.
+ *
+ * Search finds the ids and nothing else — it returns neither property history
+ * nor associations, so it cannot be the whole answer. Batch read fills in the
+ * properties and the history; a second batch call fills in associations. Three
+ * round trips per hundred records rather than one, which is still a fraction of
+ * the cost of walking a portal that has not changed.
+ */
+async function fetchChanged(
+  object: string,
+  properties: string[],
+  options: FetchOptions | undefined,
+  config: {
+    withHistory?: string[];
+    associateTo?: string;
+    pageSize?: number;
+  } = {},
+): Promise<{ records: RawRecord[]; nextCursor: string | null; watermark: Date | null }> {
+  const path = `/crm/v3/objects/${object}`;
+  const pageSize = config.pageSize ?? 100;
+
+  const resumed = parseCursor(options?.cursor);
+  let since = resumed?.since ?? options?.since?.getTime() ?? 0;
+  let after = resumed?.after;
+
+  const records: RawRecord[] = [];
+  let watermark: Date | null = null;
+
+  for (;;) {
+    const page = await post<SearchPage>(`${path}/search`, {
+      filterGroups: [
+        {
+          filters: [
+            { propertyName: 'hs_lastmodifieddate', operator: 'GTE', value: String(since) },
+          ],
+        },
+      ],
+      // Ascending, so an exhausted query can be restarted from the last record
+      // rather than from the beginning.
+      sorts: [{ propertyName: 'hs_lastmodifieddate', direction: 'ASCENDING' }],
+      properties: ['hs_lastmodifieddate'],
+      limit: pageSize,
+      ...(after ? { after } : {}),
+    });
+
+    const hits = page.results ?? [];
+    if (hits.length === 0) return { records, nextCursor: null, watermark };
+
+    const ids = hits.map((hit) => hit.id);
+    const hydrated = await batchRead(object, ids, properties, config.withHistory);
+
+    if (config.associateTo) {
+      const associations = await batchAssociations(object, config.associateTo, ids);
+      for (const record of hydrated) {
+        const to = associations.get(record.id);
+        if (to?.length) {
+          record.associations = {
+            ...(record.associations ?? {}),
+            [config.associateTo]: { results: to.map((id) => ({ id })) },
+          };
+        }
+      }
+    }
+
+    for (const record of hydrated) {
+      records.push({ entity: path, key: record.id, payload: record });
+    }
+
+    for (const hit of hits) {
+      const modified = hit.properties?.hs_lastmodifieddate;
+      const parsed = modified ? new Date(modified) : null;
+      if (parsed && !Number.isNaN(parsed.getTime())) {
+        if (!watermark || parsed > watermark) watermark = parsed;
+      }
+    }
+
+    after = page.paging?.next?.after;
+
+    if (!after) {
+      // Either the query is finished, or it hit HubSpot's ten-thousand cap. The
+      // two are indistinguishable from here, so if the total says there is more,
+      // restart from the last timestamp seen rather than declaring done.
+      const more = (page.total ?? 0) > records.length && watermark;
+      if (!more) return { records, nextCursor: null, watermark };
+
+      since = watermark!.getTime();
+      if (budgetSpent(options, records.length)) {
+        return { records, nextCursor: JSON.stringify({ since }), watermark };
+      }
+      continue;
+    }
+
+    if (budgetSpent(options, records.length)) {
+      return { records, nextCursor: JSON.stringify({ since, after }), watermark };
+    }
+  }
+}
+
+interface HubspotRecord {
+  id: string;
+  properties?: Record<string, string | null>;
+  propertiesWithHistory?: Record<string, Array<{ value?: string; timestamp?: string }>>;
+  associations?: Record<string, { results?: Array<{ id: string }> }>;
+}
+
+async function batchRead(
+  object: string,
+  ids: string[],
+  properties: string[],
+  withHistory?: string[],
+): Promise<HubspotRecord[]> {
+  const page = await post<{ results?: HubspotRecord[] }>(
+    `/crm/v3/objects/${object}/batch/read`,
+    {
+      inputs: ids.map((id) => ({ id })),
+      ...(properties.length ? { properties } : {}),
+      ...(withHistory?.length ? { propertiesWithHistory: withHistory } : {}),
+    },
+  );
+  return page.results ?? [];
+}
+
+async function batchAssociations(
+  from: string,
+  to: string,
+  ids: string[],
+): Promise<Map<string, string[]>> {
+  const page = await post<{
+    results?: Array<{ from?: { id?: string }; to?: Array<{ toObjectId?: number | string }> }>;
+  }>(`/crm/v4/associations/${from}/${to}/batch/read`, { inputs: ids.map((id) => ({ id })) });
+
+  const map = new Map<string, string[]>();
+  for (const row of page.results ?? []) {
+    const fromId = row.from?.id;
+    if (!fromId) continue;
+    map.set(
+      fromId,
+      (row.to ?? []).map((entry) => String(entry.toObjectId)).filter(Boolean),
+    );
+  }
+  return map;
+}
+
+
+/**
+ * The entities worth asking "what changed" about, and how.
+ *
+ * Owners, stages and pipelines are absent deliberately. They are tens of rows,
+ * they change when somebody reorganises the sales team, and a search-plus-batch
+ * round trip costs more than reading them whole. Reference data is re-read every
+ * time; only the facts are incremental.
+ */
+const INCREMENTAL_ENTITIES: Record<
+  string,
+  { object: string; properties: () => string[]; withHistory?: string[]; associateTo?: string }
+> = {
+  deals: {
+    object: 'deals',
+    properties: () => {
+      const divisionProperty = process.env.HUBSPOT_DIVISION_PROPERTY;
+      return divisionProperty ? [...DEAL_PROPERTIES, divisionProperty] : DEAL_PROPERTIES;
+    },
+    withHistory: ['dealstage'],
+    associateTo: 'companies',
+  },
+  contacts: {
+    object: 'contacts',
+    properties: () => CONTACT_PROPERTIES,
+    withHistory: ['lifecyclestage'],
+  },
+  meetings: {
+    object: 'meetings',
+    properties: () => MEETING_PROPERTIES,
+    associateTo: 'deals',
+  },
+  companies: {
+    object: 'companies',
+    properties: () => COMPANY_PROPERTIES,
+  },
+};
+
 export const hubspotConnector: SourceConnector = {
   sourceSystem: 'HUBSPOT',
   label: 'HubSpot',
@@ -267,7 +562,38 @@ export const hubspotConnector: SourceConnector = {
   async fetch(entity: string, window: FetchWindow, options?: FetchOptions): Promise<RawBatch> {
     if (!(await hubspotConnector.isConfigured())) throw new ConnectorNotConfiguredError('HUBSPOT');
 
-    let page: { records: RawRecord[]; nextCursor: string | null };
+    let page: { records: RawRecord[]; nextCursor: string | null; watermark?: Date | null };
+
+    /**
+     * Incremental once there is a watermark, or once a slice is resuming one.
+     *
+     * The first pass of an entity is a full crawl: the list endpoint returns
+     * associations inline and is not rate-limited the way search is, so walking
+     * a portal once is cheaper that way than asking "what changed since the
+     * beginning of time". Every pass after it asks only for changes.
+     */
+    const incremental =
+      INCREMENTAL_ENTITIES[entity] !== undefined &&
+      (options?.since != null || (options?.cursor?.startsWith('{') ?? false));
+
+    if (incremental) {
+      const config = INCREMENTAL_ENTITIES[entity]!;
+      const changed = await fetchChanged(config.object, config.properties(), options, {
+        withHistory: config.withHistory,
+        associateTo: config.associateTo,
+        pageSize: config.withHistory?.length ? HISTORY_PAGE_SIZE : DEFAULT_PAGE_SIZE,
+      });
+
+      return {
+        sourceSystem: 'HUBSPOT',
+        entity,
+        window,
+        records: changed.records,
+        fetchedAt: new Date(),
+        nextCursor: changed.nextCursor,
+        watermark: changed.watermark,
+      };
+    }
 
     switch (entity) {
       case 'deals': {
@@ -348,6 +674,9 @@ export const hubspotConnector: SourceConnector = {
       records: page.records,
       fetchedAt: new Date(),
       nextCursor: page.nextCursor,
+      // A full crawl reports one too, so the pass that walks the portal once is
+      // also the pass that makes every later pass incremental.
+      watermark: page.watermark ?? latestModified(page.records),
     };
   },
 };

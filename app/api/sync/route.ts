@@ -4,7 +4,7 @@ import { getSessionUser } from '@/lib/auth/session';
 import { can } from '@/lib/auth/scope';
 import { getDb } from '@/lib/db/client';
 import * as t from '@/lib/db/schema';
-import { runSlice, syncPlan, SLICE_FETCH_BUDGET_MS } from '@/lib/etl/ingest';
+import { runSlice, syncPlan, resetWatermarks, SLICE_FETCH_BUDGET_MS } from '@/lib/etl/ingest';
 import { runAllChecks, persistFindings } from '@/lib/recon/checks';
 import type { SourceSystemCode } from '@/lib/connectors/types';
 
@@ -57,6 +57,7 @@ export async function POST(request: Request) {
     windowStart?: string;
     windowEnd?: string;
     loadRunId?: string | null;
+    fullRefresh?: boolean;
   } = {};
   try {
     body = (await request.json()) as typeof body;
@@ -90,7 +91,10 @@ export async function POST(request: Request) {
 
 type Db = Awaited<ReturnType<typeof getDb>>;
 
-async function plan(db: Db, body: { sources?: SourceSystemCode[]; months?: number }) {
+async function plan(
+  db: Db,
+  body: { sources?: SourceSystemCode[]; months?: number; fullRefresh?: boolean },
+) {
   // Anchored on the configured reporting month rather than today, so a sync does
   // not silently reach into a month the business has not started reporting on.
   const [configured] = await db
@@ -103,6 +107,10 @@ async function plan(db: Db, body: { sources?: SourceSystemCode[]; months?: numbe
   const months = Math.min(Math.max(body.months ?? 3, 1), 36);
   const windowEnd = anchor;
   const windowStart = shiftMonths(anchor, -(months - 1));
+
+  // A full re-import is the watermarks being cleared, once, before the first
+  // slice — not a flag every slice has to carry and could disagree about.
+  if (body.fullRefresh) await resetWatermarks(db, body.sources);
 
   const steps = await syncPlan(body.sources);
 
@@ -122,6 +130,7 @@ async function plan(db: Db, body: { sources?: SourceSystemCode[]; months?: numbe
     windowEnd,
     window: `${windowStart.slice(0, 7)} → ${windowEnd.slice(0, 7)}`,
     steps,
+    fullRefresh: Boolean(body.fullRefresh),
   };
 }
 
@@ -134,6 +143,7 @@ async function slice(
     windowStart?: string;
     windowEnd?: string;
     loadRunId?: string | null;
+    fullRefresh?: boolean;
   },
 ) {
   if (!body.source || !body.entity || !body.windowStart || !body.windowEnd) {
@@ -150,7 +160,7 @@ async function slice(
       windowEnd: body.windowEnd,
       loadRunId: body.loadRunId ?? null,
     },
-    { deadline: Date.now() + SLICE_FETCH_BUDGET_MS },
+    { deadline: Date.now() + SLICE_FETCH_BUDGET_MS, fullRefresh: body.fullRefresh },
   );
 
   return {

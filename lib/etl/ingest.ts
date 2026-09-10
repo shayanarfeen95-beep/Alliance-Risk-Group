@@ -1,5 +1,5 @@
 import 'server-only';
-import { and, eq, sql } from 'drizzle-orm';
+import { and, eq, gte, lte, sql } from 'drizzle-orm';
 import type { Database } from '@/lib/db/client';
 import * as t from '@/lib/db/schema';
 import type { SessionUser } from '@/lib/auth/session';
@@ -48,6 +48,15 @@ export interface LoadOutcome {
 export interface SliceBudget {
   deadline?: number;
   maxRecords?: number;
+  /**
+   * Ignore the watermark and read the source from the beginning.
+   *
+   * For the case where the warehouse and the source have genuinely diverged —
+   * a mapping changed, a conform bug was fixed, somebody edited history in the
+   * provider. Never the default: it is the expensive path, and the whole reason
+   * the watermark exists is that it was previously the ONLY path.
+   */
+  fullRefresh?: boolean;
 }
 
 /** Where a run is resuming from, kept on `load_run.plan`. */
@@ -55,6 +64,67 @@ interface RunPlan {
   startedFrom?: string;
   cursor?: string | null;
   slices?: number;
+  /** Newest source-side change seen so far in this run, across all its slices. */
+  watermark?: string | null;
+}
+
+/** The later of what the run has already seen and what this slice just saw. */
+function highWatermark(plan: RunPlan, fromBatch: Date | null): Date | null {
+  const carried = plan.watermark ? new Date(plan.watermark) : null;
+  if (!carried) return fromBatch;
+  if (!fromBatch) return carried;
+  return fromBatch > carried ? fromBatch : carried;
+}
+
+async function readWatermark(
+  db: Database,
+  source: SourceSystemCode,
+  entity: string,
+): Promise<Date | null> {
+  const [row] = await db
+    .select({ watermark: t.syncState.watermark })
+    .from(t.syncState)
+    .where(and(eq(t.syncState.sourceSystem, source), eq(t.syncState.entity, entity)))
+    .limit(1);
+  return row?.watermark ?? null;
+}
+
+async function advanceWatermark(
+  db: Database,
+  source: SourceSystemCode,
+  entity: string,
+  watermark: Date | null,
+  recordCount: number,
+): Promise<void> {
+  const row = {
+    sourceSystem: source,
+    entity,
+    watermark,
+    lastSyncedAt: new Date(),
+    lastRecordCount: recordCount,
+  };
+
+  await db
+    .insert(t.syncState)
+    .values(row)
+    .onConflictDoUpdate({
+      target: [t.syncState.sourceSystem, t.syncState.entity],
+      set: row,
+    });
+}
+
+/** Clears the watermarks, so the next pull reads the source from the beginning. */
+export async function resetWatermarks(
+  db: Database,
+  sources?: SourceSystemCode[],
+): Promise<void> {
+  if (sources?.length) {
+    for (const source of sources) {
+      await db.delete(t.syncState).where(eq(t.syncState.sourceSystem, source));
+    }
+    return;
+  }
+  await db.delete(t.syncState);
 }
 
 /**
@@ -96,6 +166,15 @@ export async function executeLoadRun(
   const priorPlan = (run.plan ?? {}) as RunPlan;
   const slices = (priorPlan.slices ?? 0) + 1;
 
+  // Where the last completed pass got to. A resuming slice must not re-read it
+  // from the table — the run already carries its own position, and re-reading
+  // would restart the entity mid-pull.
+  const since = options.fullRefresh
+    ? null
+    : slices > 1
+      ? null
+      : await readWatermark(db, run.sourceSystem as SourceSystemCode, run.entity);
+
   const base = {
     source: run.sourceSystem as SourceSystemCode,
     entity: run.entity,
@@ -114,6 +193,7 @@ export async function executeLoadRun(
         cursor: priorPlan.cursor ?? null,
         deadline: options.deadline ?? Date.now() + SLICE_FETCH_BUDGET_MS,
         maxRecords: options.maxRecords ?? SLICE_MAX_RECORDS,
+        since,
       },
     );
 
@@ -136,6 +216,23 @@ export async function executeLoadRun(
 
     const done = !batch.nextCursor;
 
+    // The watermark moves only when the entity finishes.
+    //
+    // A run that stops halfway — budget spent, network lost, deploy mid-pull —
+    // leaves it where it was, so whatever this pass did not reach is fetched
+    // again next time. Advancing it per slice would be faster and would lose
+    // records permanently the first time a slice failed, which is the one
+    // outcome nobody would notice.
+    if (done) {
+      await advanceWatermark(
+        db,
+        run.sourceSystem as SourceSystemCode,
+        run.entity,
+        highWatermark(priorPlan, batch.watermark ?? null),
+        batch.records.length,
+      );
+    }
+
     // Slices accumulate onto the run rather than replacing it: one entity is one
     // load_run however many requests it took, so provenance still points at a
     // single row and the audit trail does not fragment by network conditions.
@@ -146,7 +243,14 @@ export async function executeLoadRun(
         rowsRead: sql`${t.loadRun.rowsRead} + ${batch.records.length}`,
         rowsWritten: sql`${t.loadRun.rowsWritten} + ${conformed.rowsWritten}`,
         finishedAt: done ? new Date() : null,
-        plan: { ...priorPlan, cursor: batch.nextCursor ?? null, slices },
+        plan: {
+          ...priorPlan,
+          cursor: batch.nextCursor ?? null,
+          slices,
+          // Carried across slices so the finishing one can commit the newest
+          // timestamp the whole run saw, not just the newest in its own page.
+          watermark: highWatermark(priorPlan, batch.watermark ?? null)?.toISOString() ?? null,
+        },
       })
       .where(eq(t.loadRun.id, run.id));
 
@@ -253,12 +357,19 @@ export async function runLoad(
     };
   }
 
+  // Closed months do not change, and conform refuses to write them anyway — so
+  // fetching them is a report call per month for a result that is discarded.
+  // The window starts at the first month still open.
+  const windowStart = options.fullRefresh
+    ? input.windowStart
+    : await firstOpenMonth(db, input.windowStart, input.windowEnd);
+
   const [run] = await db
     .insert(t.loadRun)
     .values({
       sourceSystem: input.source,
       entity: input.entity,
-      windowStart: input.windowStart,
+      windowStart,
       windowEnd: input.windowEnd,
       status: 'RUNNING',
       requestedByUserId: user.id,
@@ -268,6 +379,31 @@ export async function runLoad(
     .returning();
 
   return executeLoadRun(db, user, run!, 'SOURCE_SYNCED', options);
+}
+
+
+/**
+ * The first month in the window that is still open.
+ *
+ * A closed month is frozen: conform refuses to write it, and the reconciliation
+ * that proves it has already run. Fetching it produces a report call per month
+ * whose result is thrown away. If every month in the window is closed the window
+ * is left alone rather than collapsing to nothing — an empty window would read
+ * as "this source has no data" rather than "there was nothing to refresh".
+ */
+async function firstOpenMonth(
+  db: Database,
+  windowStart: string,
+  windowEnd: string,
+): Promise<string> {
+  const rows = await db
+    .select({ periodMonth: t.dimPeriod.periodMonth, isClosed: t.dimPeriod.isClosed })
+    .from(t.dimPeriod)
+    .where(and(gte(t.dimPeriod.periodMonth, windowStart), lte(t.dimPeriod.periodMonth, windowEnd)))
+    .orderBy(t.dimPeriod.periodMonth);
+
+  const open = rows.find((row) => !row.isClosed);
+  return open?.periodMonth ?? windowStart;
 }
 
 /**

@@ -47,6 +47,15 @@ export interface RawBatch {
    * sheet name. Nothing outside the connector may read it, only return it.
    */
   nextCursor?: string | null;
+  /**
+   * The newest source-side modification time in this batch.
+   *
+   * Becomes the next watermark once the entity finishes. A connector that
+   * cannot report one leaves it undefined and is simply read in full every time
+   * — which is the right answer for reference data small enough that asking
+   * "what changed" costs more than re-reading it.
+   */
+  watermark?: Date | null;
 }
 
 /** How much of an entity to fetch, and where to resume from. */
@@ -70,6 +79,16 @@ export interface FetchOptions {
    * rather than before them. Capping the haul caps the write that follows it.
    */
   maxRecords?: number;
+  /**
+   * Only fetch what changed after this moment.
+   *
+   * Null or absent means a full read — the first sync of an entity, or one the
+   * operator asked to redo from scratch. Set, it is the watermark from the last
+   * completed pass, and the connector is expected to ask the source for its
+   * changes rather than filtering a full crawl locally: filtering locally would
+   * still walk every record, which is the cost this exists to avoid.
+   */
+  since?: Date | null;
 }
 
 /**

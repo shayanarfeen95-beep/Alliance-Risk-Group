@@ -102,7 +102,7 @@ export function DataControls(props: DataControlsProps) {
 
   const connected = props.connectedSources.filter((source) => source.connected);
 
-  async function sync(sources?: string[]) {
+  async function sync(sources?: string[], fullRefresh = false) {
     cancelled.current = false;
     setBusy(true);
     setError(null);
@@ -112,7 +112,7 @@ export function DataControls(props: DataControlsProps) {
 
     try {
       // --- What is there to pull? ----------------------------------------
-      const planned = (await post({ mode: 'plan', sources, months: 3 })) as {
+      const planned = (await post({ mode: 'plan', sources, months: 3, fullRefresh })) as {
         ok: boolean;
         error?: string;
         window?: string;
@@ -163,6 +163,7 @@ export function DataControls(props: DataControlsProps) {
                 windowStart: planned.windowStart,
                 windowEnd: planned.windowEnd,
                 loadRunId,
+                fullRefresh,
               })) as { ok: boolean; error?: string; outcome?: SliceOutcome };
 
               if (response.ok && response.outcome) {
@@ -274,11 +275,12 @@ export function DataControls(props: DataControlsProps) {
           <div className="max-w-2xl">
             <p className="text-[13px] font-semibold">Pull the latest data</p>
             <p className="mt-1 text-[11.5px] leading-relaxed text-[var(--text-muted)]">
-              Fetches the last three months from every connected source and writes it into the
-              warehouse — QuickBooks into the profit and loss and balance sheet, HubSpot into deals,
+              Fetches <strong>only what has changed</strong> since the last successful pull, so a
+              refresh reads the hundred records that moved rather than the sixty thousand that did
+              not. QuickBooks goes into the profit and loss and balance sheet, HubSpot into deals,
               contacts and meetings, Sheets into budget and headcount. Each entity is saved as it
-              lands, so the dashboards update while the pull is still running. Closed months are left
-              untouched. The reconciliation controls run at the end.
+              lands, so the dashboards update while the pull is still running. Closed months are
+              left untouched. The reconciliation controls run at the end.
             </p>
           </div>
 
@@ -320,6 +322,26 @@ export function DataControls(props: DataControlsProps) {
             </button>
           ))}
         </div>
+
+        {props.canManage && (
+          <div className="mt-3 border-t pt-3" style={{ borderColor: 'var(--border)' }}>
+            <button
+              type="button"
+              onClick={() => sync(undefined, true)}
+              disabled={busy || connected.length === 0}
+              className="text-[11px] font-medium underline underline-offset-2 disabled:opacity-40"
+              style={{ color: 'var(--text-muted)' }}
+            >
+              Re-import everything from scratch
+            </button>
+            <p className="mt-1 max-w-2xl text-[10.5px] leading-relaxed text-[var(--text-muted)]">
+              Ignores what has already been pulled and reads each source from the beginning. Needed
+              only when the warehouse and the source have genuinely diverged — a mapping changed, or
+              records were edited in a way the provider does not stamp as a change. It reads
+              everything, so it takes as long as the first pull did.
+            </p>
+          </div>
+        )}
 
         {error && (
           <p

@@ -1001,6 +1001,36 @@ export const factCompany = pgTable('fact_company', {
 });
 
 /**
+ * How far each source has been read.
+ *
+ * Without this, every pull re-fetched every record a source had ever held —
+ * sixty-four thousand contacts on a portal where a hundred had changed. Nothing
+ * was duplicated, because conform upserts by id, but the work was almost
+ * entirely redundant and a refresh took long enough that people stopped running
+ * it. A sync that is too slow to run is a sync that does not happen.
+ *
+ * The watermark is the newest modification timestamp this system has SUCCESSFULLY
+ * conformed for an entity. The next pull asks the source for everything modified
+ * after it. It advances only when an entity finishes: a run that stops halfway
+ * leaves the watermark where it was, so the records it did not reach are fetched
+ * again next time rather than being skipped forever. Re-fetching a record costs
+ * a second; missing one silently is a wrong figure nobody goes looking for.
+ */
+export const syncState = pgTable(
+  'sync_state',
+  {
+    sourceSystem: sourceSystem('source_system').notNull(),
+    entity: text('entity').notNull(),
+    /** Newest source-side modification time fully processed. Null = never synced. */
+    watermark: timestamp('watermark', { withTimezone: true }),
+    lastSyncedAt: timestamp('last_synced_at', { withTimezone: true }),
+    /** Records read on the last completed pass, for the "nothing changed" message. */
+    lastRecordCount: integer('last_record_count').notNull().default(0),
+  },
+  (t) => [primaryKey({ columns: [t.sourceSystem, t.entity] })],
+);
+
+/**
  * Open items that are Westport decisions, not developer guesses (§14.3). They
  * live as data and are visible in the admin area rather than silently assumed.
  * e.g. BALANCE_SHEET_CLASSED, HUBSPOT_DIVISION_ATTRIBUTION.
