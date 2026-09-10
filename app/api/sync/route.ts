@@ -95,18 +95,42 @@ async function plan(
   db: Db,
   body: { sources?: SourceSystemCode[]; months?: number; fullRefresh?: boolean },
 ) {
-  // Anchored on the configured reporting month rather than today, so a sync does
-  // not silently reach into a month the business has not started reporting on.
+  /**
+   * How far back to fetch, ending at the month we are actually in.
+   *
+   * This used to end at DEFAULT_REPORTING_MONTH, on the reasoning that a sync
+   * should not reach into a month the business has not started reporting on.
+   * That confused two different things. The reporting month is a DISPLAY
+   * choice — which month the dashboards open on — and it is set once and rarely
+   * moved. How far the books have been kept is a fact about the source.
+   *
+   * Using the first for the second meant that with the reporting month sitting
+   * at its seeded 2026-03, a pull run in September fetched January, February and
+   * March and stopped. Six months of QuickBooks had never been fetched and never
+   * would be, however many times anybody pressed Pull. Nothing said so: the
+   * window was printed on the screen and read as a description of the data
+   * rather than as a limit on it.
+   *
+   * The window now ends at the current month. Fetching an open month is
+   * harmless — conform refuses to write a closed one anyway — and the reporting
+   * month goes back to meaning only what it says.
+   */
   const [configured] = await db
     .select({ value: t.appConfig.value })
     .from(t.appConfig)
     .where(eq(t.appConfig.key, 'DEFAULT_REPORTING_MONTH'))
     .limit(1);
 
-  const anchor = configured?.value ?? new Date().toISOString().slice(0, 8) + '01';
-  const months = Math.min(Math.max(body.months ?? 3, 1), 36);
-  const windowEnd = anchor;
-  const windowStart = shiftMonths(anchor, -(months - 1));
+  const thisMonth = new Date().toISOString().slice(0, 8) + '01';
+  // Never earlier than the reporting month: a deployment configured to report on
+  // a month ahead of the calendar still gets that month fetched.
+  const windowEnd =
+    configured?.value && configured.value > thisMonth ? configured.value : thisMonth;
+
+  // Twelve, not three. A first load of a year of books is the common case, and
+  // three months was not enough to fill a single trailing-twelve chart.
+  const months = Math.min(Math.max(body.months ?? 12, 1), 36);
+  const windowStart = shiftMonths(windowEnd, -(months - 1));
 
   // A full re-import is the watermarks being cleared, once, before the first
   // slice — not a flag every slice has to carry and could disagree about.
@@ -129,6 +153,16 @@ async function plan(
     windowStart,
     windowEnd,
     window: `${windowStart.slice(0, 7)} → ${windowEnd.slice(0, 7)}`,
+    /**
+     * What the window actually constrains, which is not the same for every
+     * source. QuickBooks is fetched one report per month, so the window is a
+     * real limit. HubSpot is fetched by object and filtered on modification
+     * time, so the window constrains nothing at all — printing a month range
+     * over a HubSpot pull describes a filter that does not exist, and invites
+     * exactly the question "why only three months?" about an import that was
+     * never limited to three months.
+     */
+    windowApplies: steps.some((step) => step.source === 'QBO'),
     steps,
     fullRefresh: Boolean(body.fullRefresh),
   };

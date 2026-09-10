@@ -76,6 +76,10 @@ export function DataControls(props: DataControlsProps) {
   const [busy, setBusy] = useState(false);
   const [steps, setSteps] = useState<StepProgress[]>([]);
   const [window_, setWindow] = useState<string | null>(null);
+  // Whether the month range means anything for what was pulled. It does for
+  // QuickBooks, which is fetched a report per month; it does not for HubSpot,
+  // which is fetched by object.
+  const [windowApplies, setWindowApplies] = useState(false);
   const [reconciliation, setReconciliation] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const cancelled = useRef(false);
@@ -112,12 +116,13 @@ export function DataControls(props: DataControlsProps) {
 
     try {
       // --- What is there to pull? ----------------------------------------
-      const planned = (await post({ mode: 'plan', sources, months: 3, fullRefresh })) as {
+      const planned = (await post({ mode: 'plan', sources, fullRefresh })) as {
         ok: boolean;
         error?: string;
         window?: string;
         windowStart?: string;
         windowEnd?: string;
+        windowApplies?: boolean;
         steps?: SyncStep[];
       };
 
@@ -127,6 +132,7 @@ export function DataControls(props: DataControlsProps) {
       }
 
       setWindow(planned.window ?? null);
+      setWindowApplies(Boolean(planned.windowApplies));
       const progress: StepProgress[] = planned.steps.map((step) => ({
         ...step,
         state: 'waiting',
@@ -277,8 +283,10 @@ export function DataControls(props: DataControlsProps) {
             <p className="mt-1 text-[11.5px] leading-relaxed text-[var(--text-muted)]">
               Fetches <strong>only what has changed</strong> since the last successful pull, so a
               refresh reads the hundred records that moved rather than the sixty thousand that did
-              not. QuickBooks goes into the profit and loss and balance sheet, HubSpot into deals,
-              contacts and meetings, Sheets into budget and headcount. Each entity is saved as it
+              not. QuickBooks is read a month at a time, ending at the current month and reaching
+              twelve months back; HubSpot and Sheets are not read by month at all — HubSpot pulls
+              the whole portal. QuickBooks goes into the profit and loss and balance sheet, HubSpot
+              into deals, contacts and meetings, Sheets into budget and headcount. Each entity is saved as it
               lands, so the dashboards update while the pull is still running. Closed months are
               left untouched. The reconciliation controls run at the end.
             </p>
@@ -363,8 +371,24 @@ export function DataControls(props: DataControlsProps) {
               ) : (
                 <CircleCheck size={13} style={{ color: 'var(--status-good)' }} aria-hidden />
               )}
-              {totalRows.toLocaleString()} row{totalRows === 1 ? '' : 's'} written
-              {window_ ? ` for ${window_}` : ''} · {finishedSteps.length} of {steps.length}
+              {totalRows.toLocaleString()} row{totalRows === 1 ? '' : 's'} written ·{' '}
+              {finishedSteps.length} of {steps.length}
+            </p>
+
+            <p className="text-[10.5px] leading-relaxed text-[var(--text-muted)]">
+              {windowApplies ? (
+                <>
+                  QuickBooks was fetched a report per month for{' '}
+                  <strong>{window_}</strong> — that range is a real limit on the accounting data.
+                  HubSpot is fetched by object and is <strong>not</strong> limited to those months:
+                  it pulls the whole portal, or everything changed since the last pull.
+                </>
+              ) : (
+                <>
+                  HubSpot and Sheets are not fetched by month. HubSpot pulls the whole portal, or
+                  everything changed since the last pull — the reporting month does not limit it.
+                </>
+              )}
             </p>
 
             {reconciliation && (
