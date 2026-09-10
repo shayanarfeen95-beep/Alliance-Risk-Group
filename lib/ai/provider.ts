@@ -107,16 +107,49 @@ interface WireMessage {
   tool_call_id?: string;
 }
 
+/**
+ * The conversation, in the shape the API accepts.
+ *
+ * Every message here is checked for being *sendable*, not merely well-typed.
+ * The provider rejects the whole request — not the offending message — if any
+ * entry has neither content nor tool calls:
+ *
+ *   invalid message provided at index 3: must have non-empty content or tool calls
+ *
+ * And one empty message poisons a conversation permanently: it is replayed on
+ * every subsequent turn, so the assistant answers nothing again and again until
+ * the user starts over. That is what happened. A turn ended with the model
+ * returning no text and no tool calls, an empty assistant message was kept in
+ * the history, and every question after it failed before reaching the model.
+ *
+ * The history arrives from the browser, so this is also the only place that can
+ * repair a conversation already holding a bad message — a fix in the client
+ * cannot help a tab that is already open. Dropping an empty assistant turn loses
+ * nothing: it said nothing.
+ */
+/** Exposed for tests: one bad message here breaks a whole conversation. */
+export function toWireForTest(system: string, messages: ConversationMessage[]) {
+  return toWire(system, messages);
+}
+
 function toWire(system: string, messages: ConversationMessage[]): WireMessage[] {
   const out: WireMessage[] = [{ role: 'system', content: system }];
 
   for (const message of messages) {
     if (message.role === 'user' || message.role === 'assistant') {
+      if (!message.content?.trim()) continue;
       out.push({ role: message.role, content: message.content });
       continue;
     }
 
     if (message.role === 'assistant_tool_use') {
+      // Content may be null here ONLY because tool_calls carries the payload.
+      if (message.toolCalls.length === 0) {
+        if (!message.text.trim()) continue;
+        out.push({ role: 'assistant', content: message.text });
+        continue;
+      }
+
       out.push({
         role: 'assistant',
         content: message.text.trim() ? message.text : null,
@@ -132,8 +165,16 @@ function toWire(system: string, messages: ConversationMessage[]): WireMessage[] 
     // One message per result. A tool result that does not answer a tool call the
     // assistant actually made is rejected by the API, which is why ids are
     // carried through rather than regenerated.
+    //
+    // A result is never dropped for being empty the way an assistant message is:
+    // the call it answers has already been sent, and a tool_call with no matching
+    // response is itself a rejection. An empty one is sent as a stated blank.
     for (const result of message.results) {
-      out.push({ role: 'tool', tool_call_id: result.id, content: result.content });
+      out.push({
+        role: 'tool',
+        tool_call_id: result.id,
+        content: result.content?.trim() ? result.content : '(the tool returned nothing)',
+      });
     }
   }
 

@@ -901,6 +901,44 @@ export const auditEvent = pgTable(
 );
 
 /**
+ * A view somebody built and kept.
+ *
+ * The dashboards answer the questions the build anticipated. A saved view is how
+ * a question nobody anticipated gets a permanent home — "closed-won by lead
+ * source for the Claims division, last six months" is a legitimate thing to want
+ * on screen every month, and it should not require a developer.
+ *
+ * What is stored is a SPEC, never a result set and never a number. The figures
+ * are resolved through the semantic layer every time the view is opened, so a
+ * saved view cannot drift from the dashboards, cannot preserve a stale figure,
+ * and cannot outlive a metric definition changing — it re-resolves or it fails
+ * loudly. It is also why a view is safe to share: it carries no data, so it
+ * shows each reader exactly what their own entitlements allow.
+ */
+export const savedView = pgTable(
+  'saved_view',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    name: text('name').notNull(),
+    description: text('description'),
+    /** A ViewSpec. Validated on write and again on read. */
+    spec: jsonb('spec').notNull(),
+    /** Who built it — a view is attributable like everything else here. */
+    createdByUserId: uuid('created_by_user_id').references(() => users.id),
+    /** True when it was the assistant that built it, on somebody's instruction. */
+    createdByAgent: boolean('created_by_agent').notNull().default(false),
+    /** Visible to everyone who can see the data, or only to its author. */
+    isShared: boolean('is_shared').notNull().default(true),
+    /** Where it appears — a dashboard slug, or null for the views page only. */
+    pinnedTo: text('pinned_to'),
+    sortOrder: integer('sort_order').notNull().default(0),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index('saved_view_pinned_idx').on(t.pinnedTo)],
+);
+
+/**
  * Open items that are Westport decisions, not developer guesses (§14.3). They
  * live as data and are visible in the admin area rather than silently assumed.
  * e.g. BALANCE_SHEET_CLASSED, HUBSPOT_DIVISION_ATTRIBUTION.

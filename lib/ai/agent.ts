@@ -36,6 +36,11 @@ import type { ChartCardProps } from '@/components/charts/chart-card';
  */
 const MAX_ITERATIONS = 14;
 
+/** Shown, and logged, when the model produces no answer at all. */
+const FALLBACK_ANSWER =
+  'I could not produce an answer for that. The lookups above did run — ask again, or narrow the ' +
+  'question to one metric, division and month.';
+
 export interface AgentTurnInput {
   user: SessionUser;
   session: SemanticSession;
@@ -122,6 +127,18 @@ export async function runAgentTurn(input: AgentTurnInput): Promise<AgentTurnResu
    */
   let spoken = '';
 
+  /**
+   * A turn that ends with nothing said is retried once, with a nudge.
+   *
+   * Free-tier models occasionally return neither text nor a tool call after a
+   * long run of tool results — nothing is wrong with the request, the model
+   * simply stops. Before this, that produced an empty answer AND an empty
+   * message in the history, which then broke every following question in the
+   * conversation. One retry costs a second and recovers almost all of them;
+   * a second retry never has, so there is not one.
+   */
+  let nudged = false;
+
   for (let iteration = 0; iteration < MAX_ITERATIONS; iteration++) {
     const turn = await streamTurn({
       system: buildSystemPrompt(input.user, input.session, input.pageContext),
@@ -139,12 +156,28 @@ export async function runAgentTurn(input: AgentTurnInput): Promise<AgentTurnResu
     if (toolUses.length === 0) {
       const text = spoken.trim();
 
-      await logTurn(db, input, 'assistant', text, false, Date.now() - started, citations, model);
+      if (!text && !nudged) {
+        nudged = true;
+        messages.push({
+          role: 'user',
+          content:
+            'You returned nothing. Answer the question now in plain prose using the figures you ' +
+            'already retrieved above. If they do not answer it, say exactly what is missing.',
+        });
+        continue;
+      }
+
+      // What is logged is what the user was shown. Logging the empty string
+      // while showing a fallback would leave an audit trail that disagrees with
+      // the conversation it is supposed to be a record of.
+      const answer = text || FALLBACK_ANSWER;
+
+      await logTurn(db, input, 'assistant', answer, false, Date.now() - started, citations, model);
 
       if (citations.length) emit({ type: 'citations', citations });
 
       return {
-        content: text || 'I could not produce an answer for that.',
+        content: answer,
         citations,
         activity,
         view,

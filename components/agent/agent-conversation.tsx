@@ -221,6 +221,17 @@ export function AgentConversation({ pageContext }: { pageContext: PageContext })
               break;
             }
             case 'aborted':
+              // An answer stopped before it said anything leaves nothing worth
+              // keeping — and an empty assistant message in the history is
+              // rejected by the model provider on the NEXT question, which
+              // silently breaks the rest of the conversation rather than just
+              // this turn.
+              setMessages((current) =>
+                current.filter(
+                  (message, index) =>
+                    index !== current.length - 1 || message.content.trim().length > 0,
+                ),
+              );
               updateLast((message) => ({ ...message, streaming: false }));
               break;
             case 'error':

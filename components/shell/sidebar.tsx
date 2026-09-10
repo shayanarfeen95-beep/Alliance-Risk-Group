@@ -13,6 +13,7 @@ import {
   TrendingUp,
   Wallet,
   Filter,
+  LayoutGrid,
 } from 'lucide-react';
 import { useEffect, useState } from 'react';
 
@@ -34,6 +35,7 @@ const NAV_GROUPS: Array<{ label: string; items: Array<{ href: string; label: str
       { href: '/sales', label: 'Sales', icon: TrendingUp },
       { href: '/hubspot', label: 'HubSpot Leadership', icon: Filter },
       { href: '/marketing', label: 'Marketing', icon: Megaphone },
+      { href: '/views', label: 'Views', icon: LayoutGrid },
     ],
   },
   {

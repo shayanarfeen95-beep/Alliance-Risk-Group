@@ -110,7 +110,13 @@ export async function POST(request: Request) {
           user,
           session,
           pageContext: body.pageContext ?? { page: 'executive' },
-          messages: body.messages.slice(-20),
+          // A message with nothing in it is rejected by the provider for the
+          // whole request, so an empty one anywhere in the history breaks every
+          // question after it. The browser holds this history, so it can arrive
+          // from a tab opened before the client stopped keeping them.
+          messages: body.messages
+            .filter((message) => message.content?.trim())
+            .slice(-20),
           conversationId: conversation!.id,
           signal: request.signal,
           onEvent: (event: AgentStreamEvent) => send(event as unknown as Record<string, unknown>),

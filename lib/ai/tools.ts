@@ -11,6 +11,8 @@ import { resolveKpi, CONSOLIDATED_CODE, type SemanticSession } from '@/lib/seman
 import { sumPl, key } from '@/lib/semantic/facts';
 import { connectorStatuses, getConnector, type SourceSystemCode } from '@/lib/connectors';
 import { executeViewSpec, viewSpecJsonSchema, ViewSpecError } from './viewspec';
+import { executeSavedView, pipelineViewJsonSchema } from '@/lib/views/spec';
+import { listViews, saveView } from '@/lib/views/store';
 import type { ChartCardProps } from '@/components/charts/chart-card';
 
 /**
@@ -864,6 +866,169 @@ const getConnectionStatus: ToolDefinition = {
 
 // ---------------------------------------------------------------------------
 
+
+// ---------------------------------------------------------------------------
+// Views the assistant builds and keeps
+// ---------------------------------------------------------------------------
+
+/**
+ * A chart of the deal table rather than of a metric.
+ *
+ * `make_chart` plots the metrics registry, and everything in that registry has a
+ * definition the whole application shares. Plenty of real questions are not
+ * about a metric at all — "closed-won by lead source", "open pipeline by stage
+ * for one rep" — and answering those by inventing a metric would put a second
+ * definition of bookings into the system, which is the one thing this
+ * architecture exists to prevent. So they get their own spec, counted from the
+ * same deal records the HubSpot dashboard counts.
+ */
+const makePipelineView: ToolDefinition = {
+  name: 'make_pipeline_view',
+  description:
+    'Chart the deal pipeline itself — grouped by stage, owner, lead source, pipeline or month, and filtered by status, owner, source, stage or amount. Use this for questions about deals rather than about a defined metric; use make_chart for anything in the metrics registry. Call list_pipeline_fields first so you filter on values that actually exist.',
+  input_schema: pipelineViewJsonSchema(),
+  async run(input, context) {
+    try {
+      const executed = executeSavedView(context.session, input);
+      return {
+        result: {
+          rendered: true,
+          summary: executed.summary,
+          instruction:
+            'The chart is visible to the user. Describe what it shows in a sentence or two; do not list the values. If they asked for it to be kept, call save_view with the same specification.',
+        },
+        view: executed.chart,
+        activity: `Built a pipeline view: ${executed.chart.title}`,
+      };
+    } catch (error) {
+      if (error instanceof ViewSpecError) {
+        return { result: { rendered: false, error: error.message } };
+      }
+      throw error;
+    }
+  },
+};
+
+/**
+ * The values a pipeline view can actually filter on.
+ *
+ * Without this the model guesses owner names and stage ids, and a filter that
+ * matches nothing renders an empty chart that looks exactly like a real answer
+ * of zero. Reading the live values first is what makes the difference between
+ * "no deals matched" and "no such owner".
+ */
+const listPipelineFields: ToolDefinition = {
+  name: 'list_pipeline_fields',
+  description:
+    'List the stages, owners, lead sources and pipelines present in the deal data, with how many deals carry each. Call this before make_pipeline_view so filters name values that exist.',
+  input_schema: { type: 'object', additionalProperties: false, properties: {} },
+  async run(_input, context) {
+    const deals = context.session.bundle.deals;
+
+    const tally = (pick: (deal: (typeof deals)[number]) => string) => {
+      const counts = new Map<string, number>();
+      for (const deal of deals) counts.set(pick(deal), (counts.get(pick(deal)) ?? 0) + 1);
+      return [...counts.entries()]
+        .map(([value, deals]) => ({ value, deals }))
+        .sort((a, b) => b.deals - a.deals);
+    };
+
+    return {
+      result: {
+        totalDeals: deals.length,
+        stages: tally((deal) => deal.dealstage ?? 'Not recorded'),
+        owners: tally((deal) => deal.ownerName ?? 'Unassigned'),
+        sources: tally((deal) => deal.sourceLabel ?? 'Not recorded'),
+        pipelines: tally((deal) => deal.pipeline ?? 'Not recorded'),
+        note:
+          'Filter on these exact strings. "Not recorded" and "Unassigned" are real, selectable groups — they are what the field being empty looks like, not an error.',
+      },
+      activity: `Read the pipeline's stages, owners and sources`,
+    };
+  },
+};
+
+/** Keeping a view, so it is on the dashboard next month without being rebuilt. */
+const saveViewTool: ToolDefinition = {
+  name: 'save_view',
+  description:
+    'Save a chart so it appears permanently on the Views page. Pass the same specification you passed to make_chart (with kind:"metric") or make_pipeline_view (with kind:"pipeline"). Only do this when the user asks for the view to be kept, added or pinned — building a chart in conversation does not need saving.',
+  input_schema: {
+    type: 'object',
+    additionalProperties: false,
+    required: ['name', 'spec'],
+    properties: {
+      name: { type: 'string', description: 'What to call it on the Views page.' },
+      description: { type: 'string', description: 'One line on why it exists.' },
+      spec: {
+        type: 'object',
+        description:
+          'The view specification. Include "kind": "metric" for a metrics chart or "kind": "pipeline" for a deal view.',
+      },
+    },
+  },
+  async run(input, context) {
+    const name = typeof input.name === 'string' ? input.name : '';
+    const spec = input.spec as Record<string, unknown> | undefined;
+    if (!spec) return { result: { saved: false, error: 'No specification was given.' } };
+
+    try {
+      // Resolved before it is stored. Saving a spec that cannot render would
+      // put a permanently broken card on the dashboard, and the person who
+      // asked for it would not find out until they next opened the page.
+      const executed = executeSavedView(context.session, spec);
+
+      const saved = await saveView(context.db, context.user, {
+        name: name || executed.chart.title,
+        description: typeof input.description === 'string' ? input.description : null,
+        spec,
+        byAgent: true,
+      });
+
+      return {
+        result: {
+          saved: true,
+          id: saved.id,
+          summary: executed.summary,
+          instruction: `Tell the user it is saved and visible on the Views page as "${saved.name}".`,
+        },
+        view: executed.chart,
+        activity: `Saved the view "${saved.name}"`,
+      };
+    } catch (error) {
+      return {
+        result: {
+          saved: false,
+          error: error instanceof Error ? error.message : 'The view could not be saved.',
+        },
+      };
+    }
+  },
+};
+
+/** What is already saved, so the assistant does not build a duplicate. */
+const listSavedViews: ToolDefinition = {
+  name: 'list_saved_views',
+  description:
+    'List the views already saved to the Views page. Check here before saving a new one so you extend or replace rather than duplicating.',
+  input_schema: { type: 'object', additionalProperties: false, properties: {} },
+  async run(_input, context) {
+    const views = await listViews(context.db, context.user);
+    return {
+      result: {
+        views: views.map((view) => ({
+          id: view.id,
+          name: view.name,
+          description: view.description,
+          kind: view.spec.kind,
+          builtByAssistant: view.createdByAgent,
+        })),
+      },
+      activity: `Listed ${views.length} saved view${views.length === 1 ? '' : 's'}`,
+    };
+  },
+};
+
 export const AGENT_TOOLS: ToolDefinition[] = [
   listKpis,
   getKpi,
@@ -873,6 +1038,10 @@ export const AGENT_TOOLS: ToolDefinition[] = [
   getPeriodState,
   getReconStatus,
   makeChart,
+  makePipelineView,
+  listPipelineFields,
+  saveViewTool,
+  listSavedViews,
   listSources,
   getConnectionStatus,
   getDataProvenance,
