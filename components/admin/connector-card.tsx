@@ -155,9 +155,37 @@ export function ConnectorCard(props: ConnectorCardProps) {
           <p className="text-[11px] leading-relaxed text-[var(--text-secondary)]">
             Signed in. Intuit grants access to a <em>user</em> rather than to a company, and the
             company id it returns is not kept by the sign-in broker — so QuickBooks still needs to
-            be told which books to open. In QuickBooks: the gear icon &rarr; Account and settings
-            &rarr; Billing &amp; subscription. The Company ID is the number at the top.
+            be told which books to open.
           </p>
+          <div
+            className="rounded-[5px] border p-2.5"
+            style={{ borderColor: 'var(--border)', background: 'var(--surface-2)' }}
+          >
+            <p className="text-[10.5px] font-medium text-[var(--text-secondary)]">
+              Where to find it, in order of what usually works
+            </p>
+            <ol className="mt-1 list-decimal space-y-1 pl-4 text-[10.5px] leading-relaxed text-[var(--text-muted)]">
+              <li>
+                In QuickBooks, press <strong>Ctrl + Alt + ?</strong> (on a Mac,{' '}
+                <strong>Ctrl + Option + ?</strong>). The shortcuts panel opens and shows the Company
+                ID. This works on every plan, including trials and accountant access.
+              </li>
+              <li>
+                Gear icon &rarr; <strong>Account and settings</strong> &rarr;{' '}
+                <strong>Billing &amp; subscription</strong> — the ID sits at the top. This tab is
+                hidden on some accountant and trial logins, which is why it is not the first
+                suggestion.
+              </li>
+              <li>
+                Gear icon &rarr; <strong>Additional information</strong>, at the bottom of the
+                menu on newer layouts.
+              </li>
+            </ol>
+            <p className="mt-1.5 text-[10.5px] leading-relaxed text-[var(--text-muted)]">
+              Intuit displays it in groups of four — <span className="tabular-nums">1234 5678
+              9012 3456</span>. Paste it with or without the spaces.
+            </p>
+          </div>
           <Field
             label="QuickBooks Company ID"
             placeholder="1234567890123456"
