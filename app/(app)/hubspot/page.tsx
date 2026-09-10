@@ -2,6 +2,8 @@ import type { Metadata } from 'next';
 import { loadDashboardContext, type SearchParams } from '@/lib/dashboards/context';
 import { loadHubspotDashboard } from '@/lib/dashboards/hubspot';
 import { loadEosPanel } from '@/lib/dashboards/hubspot-eos';
+import { loadLeadership2026 } from '@/lib/dashboards/leadership-2026';
+import { loadBookedVsActual, type NewBusinessFilter } from '@/lib/dashboards/booked-vs-actual';
 import { buildDivisionColorMap } from '@/lib/charts/colors';
 import { formatMonth } from '@/lib/semantic/periods';
 import { formatNumber } from '@/lib/format';
@@ -19,6 +21,8 @@ import {
 import { OwnerFilter } from '@/components/dashboard/owner-filter';
 import { PipelineFilter } from '@/components/dashboard/pipeline-filter';
 import { EosPanel } from '@/components/dashboard/eos-panel';
+import { Leadership2026Panel } from '@/components/dashboard/leadership-2026-panel';
+import { BookedVsActualPanel } from '@/components/dashboard/booked-vs-actual-panel';
 import { SectionTitle } from '@/components/ui/primitives';
 
 export const metadata: Metadata = { title: 'HubSpot Leadership' };
@@ -33,16 +37,24 @@ export const dynamic = 'force-dynamic';
  * every tile resolves through the semantic layer, so this page and the Sales
  * page cannot disagree about what was booked.
  */
+function first(value: string | string[] | undefined): string | undefined {
+  return Array.isArray(value) ? value[0] : value;
+}
+
 export default async function HubspotPage({
   searchParams,
 }: {
   searchParams: Promise<SearchParams>;
 }) {
-  const context = await loadDashboardContext(await searchParams);
+  const resolvedParams = await searchParams;
+  const context = await loadDashboardContext(resolvedParams);
   const { session, divisionCode, range, owners, ownerName, pipelines, pipeline } = context;
   const colors = buildDivisionColorMap(session.bundle.divisions);
   const model = loadHubspotDashboard(session, divisionCode, colors, { range, ownerName, pipeline });
   const eos = loadEosPanel(session, divisionCode, { range, ownerName, pipeline });
+  const leadership = loadLeadership2026(session, divisionCode);
+  const newBusiness = (first(resolvedParams.newBusiness) ?? 'all') as NewBusinessFilter;
+  const bookedVsActual = loadBookedVsActual(session, divisionCode, { newBusiness });
 
   return (
     <div className="space-y-6">
@@ -96,6 +108,26 @@ export default async function HubspotPage({
           Leadership review
         </SectionTitle>
         <EosPanel model={eos} rangeLabel={model.scope.rangeLabel} />
+      </section>
+
+      <section className="space-y-3">
+        <SectionTitle hint="Sold in HubSpot against billed in QuickBooks, year to date">
+          Booked versus billed
+        </SectionTitle>
+        <BookedVsActualPanel
+          model={bookedVsActual}
+          basePath="/hubspot"
+          searchParams={Object.fromEntries(
+            Object.entries(resolvedParams).map(([k, v]) => [k, first(v)]),
+          )}
+        />
+      </section>
+
+      <section className="space-y-3">
+        <SectionTitle hint="Trailing twelve months, counted from stage history where it matters">
+          Leadership 2026
+        </SectionTitle>
+        <Leadership2026Panel model={leadership} />
       </section>
 
       <section className="space-y-3">

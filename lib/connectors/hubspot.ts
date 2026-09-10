@@ -45,6 +45,9 @@ const DEAL_PROPERTIES = [
   'createdate',
   'closedate',
   'hubspot_owner_id',
+  // New business versus renewal/expansion. The filter leadership asked for, and
+  // the distinction booked-versus-billed depends on.
+  'dealtype',
   // How the business says the deal was sourced. Portals name this field
   // differently, so the candidates are tried in order and the first one present
   // on the record wins — see sourceLabel() in the conform step.
@@ -55,9 +58,14 @@ const CONTACT_PROPERTIES = [
   'lifecyclestage',
   'createdate',
   'hs_analytics_source',
+  // Kept because a portal that populates them gives a cleaner answer than
+  // history does. ARG's portal leaves every one of them empty — which is why
+  // the MQL and SQL dates are derived from lifecyclestage history instead.
   'hs_lifecyclestage_lead_date',
   'hs_lifecyclestage_customer_date',
 ];
+
+const COMPANY_PROPERTIES = ['name', 'domain', 'hs_ideal_customer_profile', 'lifecyclestage'];
 
 const MEETING_PROPERTIES = [
   'hs_meeting_start_time',
@@ -82,7 +90,25 @@ const MEETING_PROPERTIES = [
  * list — the plan the Pull button drives, the scheduled refresh, the agent —
  * takes its order from here.
  */
+/**
+ * Stages are loaded before deals, and before everything else.
+ *
+ * A stage id is opaque and portal-specific — ARG's Proposal stage is
+ * `presentationscheduled` and its Compliance Review stage is `1383067404` — so
+ * conforming a deal cannot tell which stage it reached without the labels
+ * already in place.
+ */
+const STAGE_ENTITY: EntityDescriptor = {
+  entity: 'deal_stages',
+  label: 'Deal stages and pipelines',
+  cadence: 'WEEKLY',
+  description:
+    'The names behind HubSpot\'s opaque stage ids. Without these, "reached the Proposal stage" cannot be evaluated at all.',
+};
+
+
 const ENTITIES: EntityDescriptor[] = [
+  STAGE_ENTITY,
   {
     entity: 'owners',
     label: 'Owners (salespeople)',
@@ -109,7 +135,15 @@ const ENTITIES: EntityDescriptor[] = [
     cadence: 'DAILY',
     description: 'Meetings Completed, by meeting date in period.',
   },
+  {
+    entity: 'companies',
+    label: 'Companies (with ICP tier)',
+    cadence: 'WEEKLY',
+    description:
+      'Ideal Customer Profile tier lives on the company, not the deal, so average deal size by ICP cannot be answered without it.',
+  },
 ];
+
 
 /** HubSpot's maximum page size for an ordinary object read. */
 const DEFAULT_PAGE_SIZE = 100;
@@ -249,7 +283,7 @@ export const hubspotConnector: SourceConnector = {
         page = await fetchPaged(
           '/crm/v3/objects/deals',
           properties,
-          { propertiesWithHistory: 'dealstage' },
+          { propertiesWithHistory: 'dealstage', associations: 'companies' },
           options,
           // HubSpot caps a page at 50 when property history is requested, and
           // rejects the whole call above that — it does not quietly truncate.
@@ -259,7 +293,21 @@ export const hubspotConnector: SourceConnector = {
         break;
       }
       case 'contacts':
-        page = await fetchPaged('/crm/v3/objects/contacts', CONTACT_PROPERTIES, {}, options);
+        // History, because the hs_lifecyclestage_*_date properties are empty in
+        // this portal — every one of them, across every contact. The date a
+        // contact became an MQL exists only as a transition in this property's
+        // history, so asking for it is the only way to count MQLs by month.
+        // It caps the page at 50, as it does for deals.
+        page = await fetchPaged(
+          '/crm/v3/objects/contacts',
+          CONTACT_PROPERTIES,
+          { propertiesWithHistory: 'lifecyclestage' },
+          options,
+          HISTORY_PAGE_SIZE,
+        );
+        break;
+      case 'companies':
+        page = await fetchPaged('/crm/v3/objects/companies', COMPANY_PROPERTIES, {}, options);
         break;
       case 'meetings':
         page = await fetchPaged(
@@ -269,6 +317,20 @@ export const hubspotConnector: SourceConnector = {
           options,
         );
         break;
+      case 'deal_stages': {
+        // Not an object route: /crm/v3/pipelines returns every pipeline with its
+        // stages inline, so there is nothing to paginate and no cursor to carry.
+        const pipelines = await fetchPage('/crm/v3/pipelines/deals', {});
+        page = {
+          records: (pipelines.results ?? []).map((pipeline) => ({
+            entity: '/crm/v3/pipelines/deals',
+            key: (pipeline as { id: string }).id,
+            payload: pipeline,
+          })),
+          nextCursor: null,
+        };
+        break;
+      }
       case 'owners':
         // The owners endpoint is not a CRM object route: it returns whole
         // records rather than a `properties` bag, and takes no properties

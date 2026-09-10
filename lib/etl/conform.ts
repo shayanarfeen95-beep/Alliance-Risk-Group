@@ -729,6 +729,7 @@ async function conformDeals(
   lookup: DivisionLookup,
 ): Promise<number> {
   const ownerNames = await ownerNameMap(db);
+  const stageLabels = await stageLabelMap(db);
 
   let written = 0;
 
@@ -745,10 +746,12 @@ async function conformDeals(
       isClosed: p.hs_is_closed === 'true',
       createdate: date(p.createdate),
       closedate: date(p.closedate),
-      enteredProposalAt: proposalEntry(record),
+      enteredProposalAt: stageEntry(record, stageLabels, /proposal|quote/i),
       ownerId: p.hubspot_owner_id ?? null,
       ownerName: ownerNames.get(p.hubspot_owner_id ?? '') ?? null,
       sourceLabel: sourceLabel(p),
+      dealType: p.dealtype ?? null,
+      companyId: record.associations?.companies?.results?.[0]?.id ?? null,
       contactId: null,
       loadRunId,
     };
@@ -796,11 +799,63 @@ async function conformDeals(
   return written;
 }
 
-/** The earliest time a deal entered a stage whose name mentions a proposal. */
-function proposalEntry(record: HubspotObject): Date | null {
+/**
+ * The earliest time a deal entered a stage whose NAME mentions a proposal.
+ *
+ * The name, not the id. This matched against the raw stage value before, which
+ * works only where the id happens to read like a word — true of HubSpot's
+ * defaults and of the seeded dataset, and false of ARG's real portal, where the
+ * Proposal stage carries the id `presentationscheduled`. So New Proposals Sent
+ * was null for every live deal while the seeded dashboard showed a healthy
+ * figure: a bug that could only appear once real data arrived.
+ *
+ * Labels come from dim_deal_stage, loaded first. A stage whose label is unknown
+ * falls back to matching the id, which is no worse than before and still catches
+ * a default pipeline.
+ */
+function stageEntry(
+  record: HubspotObject,
+  labels: Map<string, string>,
+  pattern: RegExp,
+): Date | null {
   const history = record.propertiesWithHistory?.dealstage ?? [];
   const entries = history
-    .filter((entry) => /proposal|quote/i.test(entry.value ?? ''))
+    .filter((entry) => {
+      const stage = entry.value ?? '';
+      return pattern.test(labels.get(stage) ?? stage);
+    })
+    .map((entry) => date(entry.timestamp))
+    .filter((value): value is Date => value !== null)
+    .sort((a, b) => a.getTime() - b.getTime());
+
+  return entries[0] ?? null;
+}
+
+/** Stage id -> label, so downstream code can match on names people recognise. */
+async function stageLabelMap(db: Database): Promise<Map<string, string>> {
+  const rows = await db
+    .select({ stageId: t.dimDealStage.stageId, label: t.dimDealStage.label })
+    .from(t.dimDealStage);
+  return new Map(rows.map((row) => [row.stageId, row.label]));
+}
+
+/**
+ * When a contact reached a lifecycle stage.
+ *
+ * HubSpot documents `hs_lifecyclestage_marketingqualifiedlead_date` and its
+ * siblings, and in ARG's portal every one of them is empty — checked across a
+ * hundred contacts, none carried a value. Only `lifecyclestage` itself is set.
+ * So the transition exists only in that property's history, and the first time
+ * a contact entered a stage is the earliest history entry naming it.
+ *
+ * This is also why leads-by-month has read as empty: `became_lead_date` was
+ * reading one of those absent fields, so every contact had a null date and the
+ * marketing dashboard counted nothing while the seed showed a full chart.
+ */
+function lifecycleEntry(record: HubspotObject, stage: string): Date | null {
+  const history = record.propertiesWithHistory?.lifecyclestage ?? [];
+  const entries = history
+    .filter((entry) => (entry.value ?? '').toLowerCase() === stage)
     .map((entry) => date(entry.timestamp))
     .filter((value): value is Date => value !== null)
     .sort((a, b) => a.getTime() - b.getTime());
@@ -823,8 +878,13 @@ async function conformContacts(
       lifecycleStage: p.lifecyclestage ?? null,
       originalSource: p.hs_analytics_source ?? null,
       createdate: date(p.createdate),
-      becameLeadDate: date(p.hs_lifecyclestage_lead_date),
-      becameCustomerDate: date(p.hs_lifecyclestage_customer_date),
+      // The documented field first, because a portal that populates it gives a
+      // cleaner answer than history does; history when it does not.
+      becameLeadDate: date(p.hs_lifecyclestage_lead_date) ?? lifecycleEntry(record, 'lead'),
+      becameCustomerDate:
+        date(p.hs_lifecyclestage_customer_date) ?? lifecycleEntry(record, 'customer'),
+      becameMqlDate: lifecycleEntry(record, 'marketingqualifiedlead'),
+      becameSqlDate: lifecycleEntry(record, 'salesqualifiedlead'),
       loadRunId,
     };
 
@@ -834,6 +894,88 @@ async function conformContacts(
       .onConflictDoUpdate({ target: t.factContact.contactId, set: values });
 
     written += 1;
+  }
+
+  return written;
+}
+
+/** Companies, for ICP tier and for matching a booking to billed revenue. */
+async function conformCompanies(
+  db: Database,
+  loadRunId: string,
+  records: HubspotObject[],
+): Promise<number> {
+  let written = 0;
+
+  for (const record of records) {
+    const p = record.properties ?? {};
+    const values = {
+      companyId: record.id,
+      name: p.name ?? null,
+      icpTier: p.hs_ideal_customer_profile ?? null,
+      domain: p.domain ?? null,
+      divisionCode: null,
+      loadRunId,
+    };
+
+    await db
+      .insert(t.factCompany)
+      .values(values)
+      .onConflictDoUpdate({ target: t.factCompany.companyId, set: values });
+
+    written += 1;
+  }
+
+  return written;
+}
+
+/** Stage ids and the names behind them. Loaded before deals, and read by them. */
+async function conformDealStages(
+  db: Database,
+  loadRunId: string,
+  records: unknown[],
+): Promise<number> {
+  let written = 0;
+
+  for (const record of records) {
+    const pipeline = record as {
+      id?: string;
+      label?: string;
+      stages?: Array<{
+        id?: string;
+        label?: string;
+        displayOrder?: number;
+        metadata?: { isClosed?: string | boolean; probability?: string };
+      }>;
+    };
+    if (!pipeline.id) continue;
+
+    for (const stage of pipeline.stages ?? []) {
+      if (!stage.id || !stage.label) continue;
+
+      const isClosed =
+        stage.metadata?.isClosed === true || String(stage.metadata?.isClosed) === 'true';
+      // HubSpot marks a won stage with probability 1 and a lost one with 0.
+      const isWon = isClosed && Number(stage.metadata?.probability ?? 0) === 1;
+
+      const values = {
+        stageId: stage.id,
+        label: stage.label,
+        pipelineId: pipeline.id,
+        pipelineLabel: pipeline.label ?? pipeline.id,
+        displayOrder: stage.displayOrder ?? 0,
+        isClosed,
+        isWon,
+        loadRunId,
+      };
+
+      await db
+        .insert(t.dimDealStage)
+        .values(values)
+        .onConflictDoUpdate({ target: t.dimDealStage.stageId, set: values });
+
+      written += 1;
+    }
   }
 
   return written;
@@ -1303,6 +1445,17 @@ async function conformInTransaction(
               'attribution rule.',
           );
         }
+        break;
+      case 'deal_stages':
+        rowsWritten = await conformDealStages(db, loadRunId, batch.records.map((r) => r.payload));
+        notes.push(
+          rowsWritten
+            ? `${rowsWritten} deal stages named. Stage ids are opaque, so "reached Proposal" cannot be evaluated without these.`
+            : 'HubSpot returned no pipelines, so stage names are unknown and proposal counts will be empty.',
+        );
+        break;
+      case 'companies':
+        rowsWritten = await conformCompanies(db, loadRunId, records);
         break;
       case 'contacts':
         rowsWritten = await conformContacts(db, loadRunId, records);

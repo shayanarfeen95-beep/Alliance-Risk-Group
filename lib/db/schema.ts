@@ -549,6 +549,17 @@ export const factDeal = pgTable(
      * this, so it is carried on the deal rather than inferred from a contact.
      */
     sourceLabel: text('source_label'),
+    /**
+     * HubSpot's Deal Type — `newbusiness` or `existingbusiness`.
+     *
+     * What leadership means by "new business": revenue from a customer ARG did
+     * not have before, as opposed to renewal and expansion. It is the filter the
+     * booked-versus-actual comparison hangs on, because the two answer different
+     * questions for a new logo and for an existing account.
+     */
+    dealType: text('deal_type'),
+    /** The company the deal is against, for ICP tiering and revenue matching. */
+    companyId: text('company_id'),
     contactId: text('contact_id'),
     loadRunId: uuid('load_run_id').references(() => loadRun.id),
   },
@@ -587,6 +598,17 @@ export const factContact = pgTable(
     createdate: timestamp('createdate', { withTimezone: true }),
     /** §6 Marketing: leads counted by the date the contact became a lead. */
     becameLeadDate: timestamp('became_lead_date', { withTimezone: true }),
+    /**
+     * When the contact entered Marketing Qualified Lead and Sales Qualified Lead.
+     *
+     * Derived from HubSpot's property history for `lifecyclestage`, not from the
+     * `hs_lifecyclestage_*_date` fields — those exist in HubSpot's documentation
+     * but return empty for every contact in ARG's portal, which is why lead
+     * counts by month read as nothing. History is the only place the transition
+     * is actually recorded.
+     */
+    becameMqlDate: timestamp('became_mql_date', { withTimezone: true }),
+    becameSqlDate: timestamp('became_sql_date', { withTimezone: true }),
     becameCustomerDate: timestamp('became_customer_date', { withTimezone: true }),
     loadRunId: uuid('load_run_id').references(() => loadRun.id),
   },
@@ -937,6 +959,46 @@ export const savedView = pgTable(
   },
   (t) => [index('saved_view_pinned_idx').on(t.pinnedTo)],
 );
+
+/**
+ * Deal stages, as this portal actually defines them.
+ *
+ * Stage ids are opaque and portal-specific: ARG's "Proposal" stage has the id
+ * `presentationscheduled`, and its "Compliance Review" stage is `1383067404`.
+ * Code that recognised a stage by matching words against the id therefore found
+ * nothing — New Proposals Sent was null for every live deal while looking
+ * perfectly healthy on seeded data, where the ids happen to read like words.
+ *
+ * So the labels are loaded as reference data and everything downstream matches
+ * on those. A portal that renames a stage keeps working; a portal that invents
+ * one is described correctly rather than dropped.
+ */
+export const dimDealStage = pgTable('dim_deal_stage', {
+  stageId: text('stage_id').primaryKey(),
+  label: text('label').notNull(),
+  pipelineId: text('pipeline_id').notNull(),
+  pipelineLabel: text('pipeline_label').notNull(),
+  displayOrder: integer('display_order').notNull().default(0),
+  /** HubSpot's own closed-won / closed-lost marking for the stage. */
+  isClosed: boolean('is_closed').notNull().default(false),
+  isWon: boolean('is_won').notNull().default(false),
+  loadRunId: uuid('load_run_id').references(() => loadRun.id),
+});
+
+/**
+ * Companies, for the two questions that cannot be answered from a deal alone:
+ * which tier of customer this is, and whether the revenue QuickBooks recorded
+ * belongs to the same customer HubSpot booked.
+ */
+export const factCompany = pgTable('fact_company', {
+  companyId: text('company_id').primaryKey(),
+  name: text('name'),
+  /** HubSpot's Ideal Customer Profile Tier — Tier 1 / 2 / 3. */
+  icpTier: text('icp_tier'),
+  domain: text('domain'),
+  divisionCode: text('division_code').references(() => dimDivision.divisionCode),
+  loadRunId: uuid('load_run_id').references(() => loadRun.id),
+});
 
 /**
  * Open items that are Westport decisions, not developer guesses (§14.3). They

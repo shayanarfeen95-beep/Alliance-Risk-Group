@@ -76,6 +76,9 @@ export interface DealRecord {
   ownerName: string | null;
   /** How the business says the deal was sourced. Null when nobody recorded it. */
   sourceLabel: string | null;
+  /** HubSpot's newbusiness / existingbusiness. */
+  dealType: string | null;
+  companyId: string | null;
 }
 
 export interface ContactRecord {
@@ -85,6 +88,24 @@ export interface ContactRecord {
   originalSource: string | null;
   becameLeadDate: Date | null;
   becameCustomerDate: Date | null;
+  becameMqlDate: Date | null;
+  becameSqlDate: Date | null;
+}
+
+export interface CompanyRecord {
+  companyId: string;
+  name: string | null;
+  icpTier: string | null;
+}
+
+export interface DealStageRecord {
+  stageId: string;
+  label: string;
+  pipelineId: string;
+  pipelineLabel: string;
+  displayOrder: number;
+  isClosed: boolean;
+  isWon: boolean;
 }
 
 export interface MeetingRecord {
@@ -131,6 +152,9 @@ export interface FactBundle {
   stageEntries: Array<{ dealId: string; stage: string; divisionCode: string | null; enteredAt: Date }>;
   contacts: ContactRecord[];
   meetings: MeetingRecord[];
+  companies: CompanyRecord[];
+  /** Stage ids and the names behind them, so a stage can be matched by name. */
+  dealStages: DealStageRecord[];
   config: Map<string, ConfigValue>;
   /**
    * Source systems that have completed at least one successful load.
@@ -216,6 +240,8 @@ export async function loadFactBundle(
       stageEntries: [],
       contacts: [],
       meetings: [],
+      companies: [],
+      dealStages: [],
       config: new Map(),
       loadedSources: new Set(),
       lastRefreshedAt: null,
@@ -346,7 +372,8 @@ export async function loadFactBundle(
   const hubspotFrom = monthBounds(addMonths(period.month, -23)).start;
   const hubspotTo = monthBounds(period.month).endExclusive;
 
-  const [dealRows, proposalRows, stageRows, contactRows, meetingRows] = await Promise.all([
+  const [dealRows, proposalRows, stageRows, contactRows, meetingRows, companyRows, dealStageRows] =
+    await Promise.all([
     db.select().from(t.factDeal).where(excludeSeed(t.factDeal.loadRunId as never)),
     db
       .select({
@@ -392,6 +419,10 @@ export async function loadFactBundle(
           excludeSeed(t.factMeeting.loadRunId as never),
         ),
       ),
+    db.select().from(t.factCompany).where(excludeSeed(t.factCompany.loadRunId as never)),
+    // Reference data, not a fact: stages describe the pipeline itself and carry
+    // no period, so they are read whole rather than windowed.
+    db.select().from(t.dimDealStage),
   ]);
 
   // --- Shape into lookup maps ---------------------------------------------
@@ -522,6 +553,8 @@ export async function loadFactBundle(
       ownerId: row.ownerId,
       ownerName: row.ownerName,
       sourceLabel: row.sourceLabel,
+      dealType: row.dealType,
+      companyId: row.companyId,
     })),
     proposalEntries: proposalRows.filter((row) => inScope(row.divisionCode)),
     stageEntries: stageRows.filter((row) => inScope(row.divisionCode)),
@@ -532,6 +565,8 @@ export async function loadFactBundle(
       originalSource: row.originalSource,
       becameLeadDate: row.becameLeadDate,
       becameCustomerDate: row.becameCustomerDate,
+      becameMqlDate: row.becameMqlDate,
+      becameSqlDate: row.becameSqlDate,
     })),
     meetings: meetingRows.filter((row) => inScope(row.divisionCode)).map((row) => ({
       meetingId: row.meetingId,
@@ -542,6 +577,20 @@ export async function loadFactBundle(
       ownerId: row.ownerId,
       ownerName: row.ownerName,
       associatedDealId: row.associatedDealId,
+    })),
+    companies: companyRows.map((row) => ({
+      companyId: row.companyId,
+      name: row.name,
+      icpTier: row.icpTier,
+    })),
+    dealStages: dealStageRows.map((row) => ({
+      stageId: row.stageId,
+      label: row.label,
+      pipelineId: row.pipelineId,
+      pipelineLabel: row.pipelineLabel,
+      displayOrder: row.displayOrder,
+      isClosed: row.isClosed,
+      isWon: row.isWon,
     })),
     config,
     loadedSources: new Set(loadedSourceRows.map((row) => row.sourceSystem)),

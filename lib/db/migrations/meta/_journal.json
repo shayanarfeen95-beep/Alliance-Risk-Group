@@ -71,6 +71,13 @@
       "when": 1789045000000,
       "tag": "0009_saved_views",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1789050000000,
+      "tag": "0010_leadership_2026",
+      "breakpoints": true
     }
   ]
 }
