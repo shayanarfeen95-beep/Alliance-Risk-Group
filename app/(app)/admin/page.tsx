@@ -15,6 +15,8 @@ import { syncableSources } from '@/lib/etl/ingest';
 import { Card, CardHeader, Chip, DataTable, SectionTitle, Td, Th } from '@/components/ui/primitives';
 import { ClassMapping } from '@/components/admin/class-mapping';
 import { listClassMap } from '@/lib/etl/class-map';
+import { DataHealthPanel } from '@/components/admin/data-health';
+import { loadDataHealth } from '@/lib/etl/health';
 
 export const metadata: Metadata = { title: 'Admin' };
 export const dynamic = 'force-dynamic';
@@ -40,7 +42,7 @@ export default async function AdminPage({
 
   const db = await getDb();
 
-  const [config, recentRuns, reconSummary, failingChecks, auditTrail, userRows, accessRows, divisionRows, classMap] = await Promise.all([
+  const [config, recentRuns, reconSummary, failingChecks, auditTrail, userRows, accessRows, divisionRows, classMap, dataHealth] = await Promise.all([
     db.select().from(t.appConfig).orderBy(t.appConfig.key),
     db.select().from(t.loadRun).orderBy(desc(t.loadRun.startedAt)).limit(10),
     db
@@ -62,6 +64,7 @@ export default async function AdminPage({
     db.select().from(t.userDivisionAccess),
     db.select().from(t.dimDivision).where(eq(t.dimDivision.isActive, true)).orderBy(t.dimDivision.sortOrder),
     listClassMap(db),
+    loadDataHealth(db),
   ]);
 
   const managedUsers = userRows.map((row) => ({
@@ -147,7 +150,18 @@ export default async function AdminPage({
         />
       </section>
 
-      {/* --- What each QuickBooks class means ----------------------------- */}
+      {/* --- What is actually loaded -------------------------------------- */}
+      <section id="data-health" className="scroll-mt-6 space-y-3">
+        <SectionTitle hint="Start here when a dashboard looks empty — this says which of the three reasons it is">
+          Data health
+        </SectionTitle>
+        <DataHealthPanel health={dataHealth} canManage={can(user, 'RUN_INGESTION')} />
+      </section>
+
+      {/* --- What each QuickBooks class means -----------------------------
+          Hidden until QuickBooks has actually reported a class. A heading with
+          nothing under it reads as something that failed to load. */}
+      {classMap.length > 0 && (
       <section className="space-y-3">
         <SectionTitle hint="Class is how QuickBooks separates divisions — a class nobody has placed blocks the month it appears in">
           Class mapping
@@ -161,6 +175,7 @@ export default async function AdminPage({
           canEdit={can(user, 'EDIT_MAPPINGS')}
         />
       </section>
+      )}
 
       {/* --- Connectors --------------------------------------------------- */}
       <section>

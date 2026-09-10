@@ -1,3 +1,4 @@
+import Link from 'next/link';
 import type { ReactNode } from 'react';
 import { AlertTriangle, CircleAlert, CircleCheck, Info, Lock, LockOpen } from 'lucide-react';
 
@@ -178,11 +179,36 @@ export function Unavailable({ reason, detail }: { reason: string; detail: string
   );
 }
 
-export function EmptyState({ title, detail }: { title: string; detail: string }) {
+/**
+ * A view with nothing to show.
+ *
+ * Always offers a way to find out why. An empty dashboard has three possible
+ * causes that look identical from here — nothing fetched, something fetched and
+ * refused, or data loaded into months this view is not on — and the reader
+ * cannot distinguish them. Data health can, so every dead end points at it.
+ */
+export function EmptyState({
+  title,
+  detail,
+  showDiagnosis = true,
+}: {
+  title: string;
+  detail: string;
+  showDiagnosis?: boolean;
+}) {
   return (
     <div className="flex flex-col items-center justify-center gap-1.5 px-6 py-12 text-center">
       <p className="text-[13px] font-medium">{title}</p>
       <p className="max-w-md text-[12px] leading-relaxed text-[var(--text-muted)]">{detail}</p>
+      {showDiagnosis && (
+        <Link
+          href="/admin#data-health"
+          className="mt-1.5 text-[11.5px] font-medium underline underline-offset-2"
+          style={{ color: 'var(--text-secondary)' }}
+        >
+          See what is loaded and what is blocking it
+        </Link>
+      )}
     </div>
   );
 }

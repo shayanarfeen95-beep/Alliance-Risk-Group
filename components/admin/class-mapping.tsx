@@ -13,6 +13,10 @@
  * consequence on the record, rather than leaving somebody to guess a division
  * for a bucket that has none.
  */
+'use client';
+
+import { useActionState } from 'react';
+import { useFormStatus } from 'react-dom';
 import { CircleAlert, CircleCheck, MinusCircle } from 'lucide-react';
 import { Card, CardHeader, DataTable, Td, Th } from '@/components/ui/primitives';
 import { decideClassAction } from '@/app/(app)/admin/class-actions';
@@ -67,35 +71,18 @@ export function ClassMapping({
                 {row.classId && (
                   <span className="ml-1.5 text-[10px] text-[var(--text-muted)]">{row.classId}</span>
                 )}
+                {row.blockingMonths.length > 0 && (
+                  <span
+                    className="mt-0.5 block text-[10px]"
+                    style={{ color: 'var(--status-warning)' }}
+                  >
+                    Blocking {row.blockingMonths.join(', ')}
+                  </span>
+                )}
               </Td>
               <Td align="left" numeric={false}>
                 {canEdit ? (
-                  <form action={decideClassAction} className="flex items-center gap-1.5">
-                    <input type="hidden" name="classKey" value={row.classKey} />
-                    <select
-                      name="divisionCode"
-                      defaultValue={
-                        row.decision === 'EXCLUDED' ? '__excluded__' : (row.divisionCode ?? '')
-                      }
-                      className="h-7 rounded-[5px] border px-1.5 text-[11px] outline-none"
-                      style={{ borderColor: 'var(--border)', background: 'var(--surface-2)' }}
-                    >
-                      <option value="">Undecided</option>
-                      {divisions.map((division) => (
-                        <option key={division.divisionCode} value={division.divisionCode}>
-                          {division.divisionName}
-                        </option>
-                      ))}
-                      <option value="__excluded__">Not a division — leave it out</option>
-                    </select>
-                    <button
-                      type="submit"
-                      className="rounded-[5px] border px-2 py-0.5 text-[10.5px] font-medium"
-                      style={{ borderColor: 'var(--border)' }}
-                    >
-                      Save
-                    </button>
-                  </form>
+                  <ClassDecisionForm row={row} divisions={divisions} />
                 ) : (
                   <span className="text-[11.5px]">
                     {row.decision === 'EXCLUDED' ? 'Not a division' : (row.divisionCode ?? '—')}
@@ -117,6 +104,72 @@ export function ClassMapping({
         the person who made it, because it changes what the divisional P&amp;Ls say.
       </p>
     </Card>
+  );
+}
+
+
+/**
+ * One class, one decision, and the outcome said in place.
+ *
+ * Per row rather than one form for the table: a mapping that is rejected has to
+ * say so beside the class it was rejected for. A single shared message would
+ * leave the operator matching an error to a row by memory.
+ */
+function ClassDecisionForm({
+  row,
+  divisions,
+}: {
+  row: ClassMapRow;
+  divisions: Array<{ divisionCode: string; divisionName: string }>;
+}) {
+  const [state, action] = useActionState(decideClassAction, null);
+
+  return (
+    <form action={action} className="space-y-1">
+      <div className="flex items-center gap-1.5">
+        <input type="hidden" name="classKey" value={row.classKey} />
+        <select
+          name="divisionCode"
+          defaultValue={row.decision === 'EXCLUDED' ? '__excluded__' : (row.divisionCode ?? '')}
+          className="h-7 rounded-[5px] border px-1.5 text-[11px] outline-none"
+          style={{ borderColor: 'var(--border)', background: 'var(--surface-2)' }}
+        >
+          <option value="">Undecided</option>
+          {divisions.map((division) => (
+            <option key={division.divisionCode} value={division.divisionCode}>
+              {division.divisionName}
+            </option>
+          ))}
+          <option value="__excluded__">Not a division — leave it out</option>
+        </select>
+        <SaveButton />
+      </div>
+
+      {state?.error && (
+        <p className="text-[10px] leading-snug" style={{ color: 'var(--status-critical)' }}>
+          {state.error}
+        </p>
+      )}
+      {state?.ok && (
+        <p className="text-[10px]" style={{ color: 'var(--status-good)' }}>
+          {state.ok}
+        </p>
+      )}
+    </form>
+  );
+}
+
+function SaveButton() {
+  const { pending } = useFormStatus();
+  return (
+    <button
+      type="submit"
+      disabled={pending}
+      className="rounded-[5px] border px-2 py-0.5 text-[10.5px] font-medium disabled:opacity-50"
+      style={{ borderColor: 'var(--border)' }}
+    >
+      {pending ? 'Saving…' : 'Save'}
+    </button>
   );
 }
 

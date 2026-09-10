@@ -1,5 +1,5 @@
 import 'server-only';
-import { and, desc, eq, gte, inArray, lte, sql } from 'drizzle-orm';
+import { and, desc, eq, gte, inArray, lt, lte, sql } from 'drizzle-orm';
 import type { Database } from '@/lib/db/client';
 import * as t from '@/lib/db/schema';
 import type { SessionUser } from '@/lib/auth/session';
@@ -149,6 +149,27 @@ export const SLICE_FETCH_BUDGET_MS = 20_000;
 export const SLICE_MAX_RECORDS = 1_000;
 
 /**
+ * The only entities whose raw payloads are kept.
+ *
+ * Keyed `SOURCE:entity`. HubSpot owners are here because conform's
+ * `ownerNameMap` reads them back to put a salesperson's name on a deal; there is
+ * no second reader anywhere in this codebase. Adding an entity here is a
+ * commitment to store every record of it on every pull, forever, so it needs a
+ * reader to justify it.
+ */
+export const LANDS_RAW = new Set(['HUBSPOT:owners']);
+
+/**
+ * How long a landed payload is kept.
+ *
+ * Even the entities that are read do not need their history: the owner lookup
+ * wants the current owners, not every version of them a pull has ever seen. A
+ * sweep after each completed entity keeps the table proportional to the source
+ * rather than to the number of times anybody has pressed Pull.
+ */
+export const RAW_RETENTION_DAYS = 30;
+
+/**
  * Executes one load run that is already recorded and RUNNING.
  *
  * Split out so the caller owns how the run came to exist — confirmed from a
@@ -200,20 +221,32 @@ export async function executeLoadRun(
       },
     );
 
-    // Raw landing first, so conform can be re-run without re-hitting the API.
-    for (let i = 0; i < batch.records.length; i += 200) {
-      await db.insert(t.rawPayload).values(
-        batch.records.slice(i, i + 200).map((record) => ({
-          loadRunId: run.id,
-          sourceSystem: batch.sourceSystem,
-          entity: record.entity,
-          payload: record.payload as object,
-        })),
-      );
+    // Raw landing, for the entities something actually reads.
+    //
+    // This used to store every record from every pull, on the stated principle
+    // that conform could then be re-run without re-hitting the API. Nothing ever
+    // implemented that: the only reader of raw_payload in this codebase is the
+    // owner-name lookup in conform. So sixty-four thousand contact payloads,
+    // each carrying full lifecycle history, were being written and kept for
+    // nothing — twice over, once per pull — and it filled the database.
+    //
+    // Owners are landed because they are genuinely read. Everything else goes
+    // straight to conform, which is where it was going anyway.
+    if (LANDS_RAW.has(`${batch.sourceSystem}:${run.entity}`)) {
+      for (let i = 0; i < batch.records.length; i += 200) {
+        await db.insert(t.rawPayload).values(
+          batch.records.slice(i, i + 200).map((record) => ({
+            loadRunId: run.id,
+            sourceSystem: batch.sourceSystem,
+            entity: record.entity,
+            payload: record.payload as object,
+          })),
+        );
+      }
     }
 
-    // Then conform, in the same run. Landing raw data and stopping was the gap
-    // that let a connected source and a seeded dashboard coexist with nothing
+    // Then conform, in the same run. Landing data and stopping was the gap that
+    // let a connected source and a seeded dashboard coexist with nothing
     // anywhere saying the two were unrelated.
     const conformed = await conformBatch(db, run.id, batch);
 
@@ -240,6 +273,7 @@ export async function executeLoadRun(
     // records permanently the first time a slice failed, which is the one
     // outcome nobody would notice.
     if (done) {
+      await sweepRawPayloads(db);
       await advanceWatermark(
         db,
         run.sourceSystem as SourceSystemCode,
@@ -486,6 +520,56 @@ async function unfinishedRun(
   return row;
 }
 
+
+
+/**
+ * Deletes landed payloads that nothing will read again.
+ *
+ * Two rules: anything from an entity that is no longer landed at all, and
+ * anything older than the retention window. Both are safe because the single
+ * reader — the owner-name lookup — wants the current owners, and a pull that
+ * needs owners has just landed them.
+ *
+ * Failures are swallowed. Reclaiming space is housekeeping; a pull that
+ * succeeded must not be reported as failed because the sweep could not run.
+ */
+async function sweepRawPayloads(db: Database): Promise<void> {
+  const cutoff = new Date(Date.now() - RAW_RETENTION_DAYS * 86_400_000);
+  try {
+    await db.delete(t.rawPayload).where(lt(t.rawPayload.fetchedAt, cutoff));
+  } catch {
+    // Housekeeping only.
+  }
+}
+
+/**
+ * Removes every landed payload that no code path reads.
+ *
+ * The one-time counterpart to the sweep: the space already consumed by pulls
+ * made before landing became selective. Returns what it removed so the operator
+ * sees the reclaim rather than being told it happened.
+ */
+export async function reclaimRawPayloads(
+  db: Database,
+): Promise<{ deleted: number; kept: number }> {
+  const rows = await db
+    .select({ sourceSystem: t.rawPayload.sourceSystem, entity: t.rawPayload.entity })
+    .from(t.rawPayload);
+
+  // The stored `entity` is the connector's own path — `/crm/v3/owners` — rather
+  // than the entity name, so keeping is decided on what the reader looks for.
+  const keep = (entity: string) => entity.includes('owners');
+
+  const deletable = [...new Set(rows.map((row) => row.entity).filter((e) => !keep(e)))];
+  if (deletable.length === 0) {
+    return { deleted: 0, kept: rows.length };
+  }
+
+  await db.delete(t.rawPayload).where(inArray(t.rawPayload.entity, deletable));
+
+  const deleted = rows.filter((row) => !keep(row.entity)).length;
+  return { deleted, kept: rows.length - deleted };
+}
 
 /**
  * The first month in the window that is still open.

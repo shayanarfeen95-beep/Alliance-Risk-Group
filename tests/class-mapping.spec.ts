@@ -218,6 +218,55 @@ describe('once the decision is made', () => {
     expect(audit).toHaveLength(1);
   });
 
+  it('keeps ONE row per class however it was first noticed', async () => {
+    // A report column carries a class TITLE; the class list carries an ID. Each
+    // route used to insert its own row, so the screen offered two entries for
+    // one class and mapping the one it showed left the other UNMAPPED — the
+    // pull refused anyway. That is "I mapped it and it still did not work".
+    await conformBatch(harness.db, runId, profitAndLoss()).catch(() => {});
+    await conformBatch(harness.db, runId, classList());
+
+    const rows = await listClassMap(harness.db);
+    const zAlloc = rows.filter((row) => /z alloc/i.test(row.className));
+    expect(zAlloc).toHaveLength(1);
+  });
+
+  it('can be decided by the name the screen shows, not just the id', async () => {
+    await conformBatch(harness.db, runId, profitAndLoss()).catch(() => {});
+
+    // The blocking class was recorded under its name. Deciding it must work
+    // without the operator knowing QuickBooks' internal id for it.
+    await decideClass(harness.db, user, { classKey: 'z alloc', divisionCode: null });
+
+    const rows = await listClassMap(harness.db);
+    expect(rows.find((row) => /z alloc/i.test(row.className))?.decision).toBe('EXCLUDED');
+  });
+
+  it('says which months a class is blocking', async () => {
+    await conformBatch(harness.db, runId, profitAndLoss()).catch(() => {});
+
+    // Recorded against a FAILED run so the screen can show the consequence of
+    // the decision before it is made.
+    await harness.db.insert(t.loadRun).values({
+      sourceSystem: 'QBO',
+      entity: 'profit_and_loss',
+      windowStart: MONTH,
+      windowEnd: MONTH,
+      status: 'FAILED',
+      errorMessage: 'classes that map to no division: Z Alloc. Nothing was written.',
+    });
+
+    const rows = await listClassMap(harness.db);
+    const zAlloc = rows.find((row) => /z alloc/i.test(row.className));
+    expect(zAlloc?.blockingMonths).toContain(MONTH.slice(0, 7));
+  });
+
+  it('refuses a class nobody has reported, by name', async () => {
+    await expect(
+      decideClass(harness.db, user, { classKey: 'not a real class', divisionCode: null }),
+    ).rejects.toThrow(/No class called/i);
+  });
+
   it('refuses a division that does not exist', async () => {
     await conformBatch(harness.db, runId, classList());
     await expect(

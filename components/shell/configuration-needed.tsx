@@ -43,11 +43,25 @@ export function ConfigurationNeeded({
               has to use the same one.
             </>
           ) : unreachable ? (
-            <>
-              <code className="font-[var(--font-mono)]">DATABASE_URL</code> is set, but connecting to
-              it failed. The usual causes are a paused Neon project, a rotated password, or the
-              direct connection string being used where the pooled one is needed.
-            </>
+            // Two genuinely different failures. Telling somebody DATABASE_URL is
+            // set when it is not sends them auditing a variable that does not
+            // exist — the same wasted hunt a misleading message about a missing
+            // signing key already cost this deployment once.
+            process.env.DATABASE_URL ? (
+              <>
+                <code className="font-[var(--font-mono)]">DATABASE_URL</code> is set, but connecting
+                to it failed. The usual causes are a paused Neon project, a rotated password, or the
+                direct connection string being used where the pooled one is needed.
+              </>
+            ) : (
+              <>
+                No <code className="font-[var(--font-mono)]">DATABASE_URL</code> is set, so this is
+                running on the embedded database — and that failed to open. Usually a second copy of
+                the app is already holding it, or <code className="font-[var(--font-mono)]">.pgdata</code>{' '}
+                was left locked by a process that did not shut down. Stop the other copy, or delete{' '}
+                <code className="font-[var(--font-mono)]">.pgdata</code> and re-seed.
+              </>
+            )
           ) : (
             <>
               This deployment has no database. Sign-ins, the authorisations for QuickBooks, HubSpot

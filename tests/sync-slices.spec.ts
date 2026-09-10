@@ -146,14 +146,42 @@ describe('a pull that does not fit in one request', () => {
     // fetched twice, none skipped.
     expect(fetchCalls).toEqual([null, '1', '2']);
 
+    // Every record reached the warehouse, exactly once.
+    //
+    // Asserted on the fact table rather than on raw_payload: bulk entities no
+    // longer keep a copy of every record, because nothing ever read it back and
+    // storing sixty thousand contacts twice per pull is what filled the
+    // database. The conformed row is the evidence that matters anyway — it is
+    // what the dashboards read.
+    const total = PAGES.reduce((sum, page) => sum + page.length, 0);
+    const conformed = await harness.db
+      .select()
+      .from(t.factContact)
+      .where(eq(t.factContact.loadRunId, loadRunId));
+
+    expect(conformed).toHaveLength(total);
+    expect(new Set(conformed.map((row) => row.contactId)).size).toBe(total);
+  });
+
+  it('does not store a copy of every record it pulls', async () => {
+    const { runSlice } = await import('@/lib/etl/ingest');
+    fetchCalls = [];
+
+    const outcome = await runSlice(harness.db, user, {
+      source: 'HUBSPOT',
+      entity: 'contacts',
+      ...WINDOW,
+    });
+
     const landed = await harness.db
       .select()
       .from(t.rawPayload)
-      .where(eq(t.rawPayload.loadRunId, loadRunId));
+      .where(eq(t.rawPayload.loadRunId, outcome.loadRunId));
 
-    const total = PAGES.reduce((sum, page) => sum + page.length, 0);
-    expect(landed).toHaveLength(total);
-    expect(new Set(landed.map((row) => (row.payload as { id: string }).id)).size).toBe(total);
+    // raw_payload is written for exactly one entity — owners, which conform
+    // reads back to put a salesperson's name on a deal. Contacts had no reader
+    // at all, so every stored payload was pure cost, paid again on every pull.
+    expect(landed).toHaveLength(0);
   });
 
   it('keeps the run RUNNING until the source says it is finished', async () => {

@@ -291,11 +291,41 @@ function reportingLineForSection(group: string | undefined): ReportingLine | nul
  */
 async function noteUnmappedClasses(db: Database, names: string[]): Promise<void> {
   for (const name of names) {
+    // Look for the class under its NAME and under any id already recorded for
+    // it. A report column carries a title; the class list carries an id. Keying
+    // one row by each produced two rows for one class, so mapping the one the
+    // screen offered left the other UNMAPPED and the pull refused anyway —
+    // which is exactly the "I mapped it and it still did not work" failure.
+    const existing = await findClassRow(db, name);
+    if (existing) continue;
+
     await db
       .insert(t.dimClassMap)
       .values({ classKey: name.trim().toLowerCase(), className: name, decision: 'UNMAPPED' })
       .onConflictDoNothing();
   }
+}
+
+/** The row for a class, found by key or by the name it displays under. */
+export async function findClassRow(
+  db: Database,
+  identifier: string,
+): Promise<{ classKey: string; className: string; decision: string } | null> {
+  const key = identifier.trim().toLowerCase();
+
+  const [byKey] = await db
+    .select()
+    .from(t.dimClassMap)
+    .where(eq(t.dimClassMap.classKey, key))
+    .limit(1);
+  if (byKey) return byKey;
+
+  const [byName] = await db
+    .select()
+    .from(t.dimClassMap)
+    .where(sql`lower(${t.dimClassMap.className}) = ${key}`)
+    .limit(1);
+  return byName ?? null;
 }
 
 async function conformProfitAndLoss(
@@ -669,7 +699,11 @@ async function checkClasses(db: Database, payload: QboQueryResponse): Promise<st
     if (entry.Active === false) continue;
 
     const name = entry.Name ?? entry.Id ?? 'unnamed';
-    const key = (entry.Id ?? name).trim().toLowerCase();
+    // If a refused load already recorded this class under its name, keep that
+    // row rather than creating a second one under the id. One class, one row,
+    // one decision — whichever route noticed it first.
+    const already = await findClassRow(db, entry.Id ?? name) ?? await findClassRow(db, name);
+    const key = already?.classKey ?? (entry.Id ?? name).trim().toLowerCase();
 
     // Every class QuickBooks holds is recorded, whether or not it is mapped, so
     // the admin screen can list them all rather than only the ones that have
@@ -684,6 +718,9 @@ async function checkClasses(db: Database, payload: QboQueryResponse): Promise<st
         decision: resolveDivision(lookup, entry.Id, entry.Name) ? 'MAPPED' : 'UNMAPPED',
         divisionCode: resolveDivision(lookup, entry.Id, entry.Name),
       })
+      // Only the identifying fields are refreshed. A decision somebody made is
+      // never overwritten by a later class-list load — this notices classes, it
+      // does not overrule people.
       .onConflictDoUpdate({
         target: t.dimClassMap.classKey,
         set: { className: name, classId: entry.Id ?? null },

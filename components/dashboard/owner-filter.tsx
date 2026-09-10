@@ -17,7 +17,10 @@ export function OwnerFilter({ owners, selected }: { owners: string[]; selected: 
   const searchParams = useSearchParams();
   const [pending, startTransition] = useTransition();
 
-  if (owners.length === 0) return null;
+  // A single salesperson is not a choice, and a dropdown implying one is a
+  // control people open, learn nothing from, and stop trusting. Same rule the
+  // pipeline filter already follows.
+  if (owners.length < 2) return null;
 
   return (
     <div className="flex items-center gap-1.5">

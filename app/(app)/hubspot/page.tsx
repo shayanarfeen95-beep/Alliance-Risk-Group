@@ -73,7 +73,11 @@ export default async function HubspotPage({
       </header>
 
       {/* The filter strip. Every panel below obeys all of it — a filter that
-          applies to some cards and not others is worse than no filter. */}
+          applies to some cards and not others is worse than no filter.
+
+          Each control hides itself when it has nothing to choose between, so a
+          portal with one pipeline and one salesperson shows a count and no
+          dropdowns rather than two controls that do nothing. */}
       <div
         className="flex flex-wrap items-center gap-3 rounded-[var(--radius)] border px-3 py-2"
         style={{ borderColor: 'var(--border)', background: 'var(--surface-1)' }}
