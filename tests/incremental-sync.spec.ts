@@ -118,6 +118,15 @@ beforeEach(async () => {
   asked = [];
   failNextConform = false;
   await harness.db.delete(t.syncState);
+
+  // Runs are resumable ACROSS runs now, so an unfinished one left by the
+  // previous test would be picked up by the next. They cannot be deleted —
+  // conformed rows reference them, which is the point of provenance — so they
+  // are closed instead, which is also what a finished run looks like.
+  await harness.db
+    .update(t.loadRun)
+    .set({ status: 'SUCCEEDED', plan: { startedFrom: 'test-reset' } })
+    .where(eq(t.loadRun.entity, 'contacts'));
 });
 
 async function watermark(): Promise<Date | null> {
@@ -220,6 +229,73 @@ describe('incremental sync', () => {
     expect(outcome.ok).toBe(false);
     // A failed pull must be safe to simply run again.
     expect(await watermark()).toBeNull();
+  });
+
+  it('continues an interrupted entity instead of starting it again', async () => {
+    const { runSlice } = await import('@/lib/etl/ingest');
+
+    // A pull that stops partway — the tab closed, the connection went. The run
+    // is left RUNNING with a cursor and no watermark.
+    const partial = await runSlice(
+      harness.db,
+      user,
+      { source: 'HUBSPOT', entity: 'contacts', ...WINDOW },
+      { maxRecords: 1 },
+    );
+    expect(partial.done).toBe(false);
+    expect(await watermark()).toBeNull();
+
+    // Now somebody presses Pull again. WITHOUT passing a run id — which is what
+    // the button does, and what used to throw the position away and restart at
+    // record one. For an entity of sixty thousand contacts that meant it could
+    // never finish, and so could never become incremental.
+    const resumed = await runSlice(
+      harness.db,
+      user,
+      { source: 'HUBSPOT', entity: 'contacts', ...WINDOW },
+      { maxRecords: 1 },
+    );
+
+    expect(resumed.loadRunId).toBe(partial.loadRunId);
+    expect(resumed.slices).toBe(2);
+    expect(resumed.notes.join(' ')).toMatch(/continued from where the last pull stopped/i);
+  });
+
+  it('carries the position out of a run that failed partway', async () => {
+    const { runSlice } = await import('@/lib/etl/ingest');
+
+    const partial = await runSlice(
+      harness.db,
+      user,
+      { source: 'HUBSPOT', entity: 'contacts', ...WINDOW },
+      { maxRecords: 1 },
+    );
+    expect(partial.done).toBe(false);
+
+    // The next slice dies. Its run is closed as FAILED — but everything before
+    // the cursor was landed and conformed, so the position is still good.
+    failNextConform = true;
+    const failed = await runSlice(
+      harness.db,
+      user,
+      { source: 'HUBSPOT', entity: 'contacts', ...WINDOW, loadRunId: partial.loadRunId },
+      { maxRecords: 1 },
+    );
+    expect(failed.ok).toBe(false);
+
+    // A fresh pull picks the position up rather than paying for it twice.
+    const next = await runSlice(harness.db, user, {
+      source: 'HUBSPOT',
+      entity: 'contacts',
+      ...WINDOW,
+    });
+
+    expect(next.loadRunId).not.toBe(partial.loadRunId);
+    expect(next.notes.join(' ')).toMatch(/continued from where the last pull stopped/i);
+    // It finished the remaining two rather than re-reading all three.
+    expect(next.recordsRead).toBe(2);
+    expect(next.done).toBe(true);
+    expect(await watermark()).toEqual(new Date('2026-08-03T00:00:00Z'));
   });
 
   it('re-reads everything when asked for a full refresh', async () => {

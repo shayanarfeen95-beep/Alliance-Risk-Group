@@ -1,5 +1,5 @@
 import 'server-only';
-import { and, eq, gte, lte, sql } from 'drizzle-orm';
+import { and, desc, eq, gte, inArray, lte, sql } from 'drizzle-orm';
 import type { Database } from '@/lib/db/client';
 import * as t from '@/lib/db/schema';
 import type { SessionUser } from '@/lib/auth/session';
@@ -160,7 +160,10 @@ export async function executeLoadRun(
   user: SessionUser,
   run: { id: string; sourceSystem: string; entity: string; windowStart: string | null; windowEnd: string | null; plan?: unknown },
   auditAction: string,
-  options: SliceBudget = {},
+  options: SliceBudget & {
+    /** Set when this slice is picking up a pull that stopped earlier. */
+    continuation?: boolean;
+  } = {},
 ): Promise<LoadOutcome> {
   const connector = getConnector(run.sourceSystem as SourceSystemCode);
   const priorPlan = (run.plan ?? {}) as RunPlan;
@@ -213,6 +216,19 @@ export async function executeLoadRun(
     // that let a connected source and a seeded dashboard coexist with nothing
     // anywhere saying the two were unrelated.
     const conformed = await conformBatch(db, run.id, batch);
+
+    // Say so when a pull is continuing rather than starting over. Without this
+    // a resumed pull and a restarted one look identical from the outside, which
+    // is exactly the doubt this whole mechanism exists to remove.
+    const notes = [...conformed.notes];
+    if (options.continuation) {
+      notes.unshift('Continued from where the last pull stopped, rather than starting again.');
+    }
+    if (slices === 1 && !priorPlan.cursor && since) {
+      notes.unshift(
+        `Only what changed since ${since.toISOString().slice(0, 16).replace('T', ' ')} was fetched.`,
+      );
+    }
 
     const done = !batch.nextCursor;
 
@@ -276,7 +292,7 @@ export async function executeLoadRun(
           records: totals?.rowsRead ?? batch.records.length,
           rowsWritten: totals?.rowsWritten ?? conformed.rowsWritten,
           slices,
-          notes: conformed.notes,
+          notes,
         },
       });
     }
@@ -287,7 +303,7 @@ export async function executeLoadRun(
       done,
       recordsRead: batch.records.length,
       rowsWritten: conformed.rowsWritten,
-      notes: conformed.notes,
+      notes,
     };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -357,6 +373,55 @@ export async function runLoad(
     };
   }
 
+  // An entity that did not finish last time is CONTINUED, not restarted.
+  //
+  // This is the difference between a sync that converges and one that never
+  // does. HubSpot caps a page at fifty objects when property history is asked
+  // for, so sixty thousand contacts is over a thousand round trips — long
+  // enough that a pull is routinely interrupted by a closed tab or a lost
+  // connection. The watermark only moves when an entity completes, so an
+  // interrupted pass left nothing behind and the next pull began again at zero.
+  // Forever, for the one entity big enough to need this most.
+  //
+  // The position was already being kept, on the run — it was simply thrown away
+  // when a new run started. Now the newest unfinished run for this entity hands
+  // its cursor over.
+  if (!options.fullRefresh) {
+    const resumable = await unfinishedRun(db, input.source, input.entity);
+
+    // Still RUNNING: continue it, so one pass over an entity stays one run and
+    // the row counts keep accumulating rather than fragmenting per attempt.
+    if (resumable?.status === 'RUNNING') {
+      return executeLoadRun(db, user, resumable, 'SOURCE_SYNCED', {
+        ...options,
+        continuation: true,
+      });
+    }
+
+    // Failed partway: its run is closed, but the position it reached is good —
+    // everything before it was landed and conformed. Carry it into a new run.
+    if (resumable?.plan) {
+      const cursor = (resumable.plan as RunPlan).cursor;
+      if (cursor) {
+        return startRun(db, user, input, options, {
+          cursor,
+          watermark: (resumable.plan as RunPlan).watermark ?? null,
+          resumedFrom: resumable.id,
+        });
+      }
+    }
+  }
+
+  return startRun(db, user, input, options, null);
+}
+
+async function startRun(
+  db: Database,
+  user: SessionUser,
+  input: { source: SourceSystemCode; entity: string; windowStart: string; windowEnd: string },
+  options: SliceBudget,
+  resume: { cursor: string; watermark: string | null; resumedFrom: string } | null,
+): Promise<LoadOutcome> {
   // Closed months do not change, and conform refuses to write them anyway — so
   // fetching them is a report call per month for a result that is discarded.
   // The window starts at the first month still open.
@@ -374,11 +439,51 @@ export async function runLoad(
       status: 'RUNNING',
       requestedByUserId: user.id,
       confirmedAt: new Date(),
-      plan: { startedFrom: 'admin_sync' },
+      plan: {
+        startedFrom: 'admin_sync',
+        ...(resume
+          ? { cursor: resume.cursor, watermark: resume.watermark, resumedFrom: resume.resumedFrom }
+          : {}),
+      },
     })
     .returning();
 
-  return executeLoadRun(db, user, run!, 'SOURCE_SYNCED', options);
+  return executeLoadRun(db, user, run!, 'SOURCE_SYNCED', {
+    ...options,
+    continuation: resume !== null,
+  });
+}
+
+/**
+ * The newest run for this entity that stopped before it was finished.
+ *
+ * RUNNING means a pass is genuinely still open — the browser went away
+ * mid-pull. FAILED with a cursor means a pass died partway; everything before
+ * the cursor was landed and conformed, so the position is still good even
+ * though the run is not.
+ */
+async function unfinishedRun(
+  db: Database,
+  source: SourceSystemCode,
+  entity: string,
+): Promise<{ id: string; sourceSystem: string; entity: string; windowStart: string | null; windowEnd: string | null; plan: unknown; status: string } | null> {
+  const [row] = await db
+    .select()
+    .from(t.loadRun)
+    .where(
+      and(
+        eq(t.loadRun.sourceSystem, source),
+        eq(t.loadRun.entity, entity),
+        inArray(t.loadRun.status, ['RUNNING', 'FAILED']),
+      ),
+    )
+    .orderBy(desc(t.loadRun.startedAt))
+    .limit(1);
+
+  if (!row) return null;
+  // A failed run with no cursor has nothing to offer; starting fresh is right.
+  if (row.status === 'FAILED' && !(row.plan as RunPlan | null)?.cursor) return null;
+  return row;
 }
 
 
