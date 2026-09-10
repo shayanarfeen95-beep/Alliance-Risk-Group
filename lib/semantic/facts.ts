@@ -74,6 +74,8 @@ export interface DealRecord {
   enteredProposalAt: Date | null;
   ownerId: string | null;
   ownerName: string | null;
+  /** How the business says the deal was sourced. Null when nobody recorded it. */
+  sourceLabel: string | null;
 }
 
 export interface ContactRecord {
@@ -90,7 +92,10 @@ export interface MeetingRecord {
   divisionCode: string | null;
   meetingDate: Date;
   outcome: string | null;
+  /** HubSpot's "Call and meeting type". Null when the meeting was logged without one. */
+  activityType: string | null;
   ownerId: string | null;
+  ownerName: string | null;
   associatedDealId: string | null;
 }
 
@@ -516,6 +521,7 @@ export async function loadFactBundle(
       enteredProposalAt: row.enteredProposalAt,
       ownerId: row.ownerId,
       ownerName: row.ownerName,
+      sourceLabel: row.sourceLabel,
     })),
     proposalEntries: proposalRows.filter((row) => inScope(row.divisionCode)),
     stageEntries: stageRows.filter((row) => inScope(row.divisionCode)),
@@ -532,7 +538,9 @@ export async function loadFactBundle(
       divisionCode: row.divisionCode,
       meetingDate: row.meetingDate,
       outcome: row.outcome,
+      activityType: row.activityType,
       ownerId: row.ownerId,
+      ownerName: row.ownerName,
       associatedDealId: row.associatedDealId,
     })),
     config,

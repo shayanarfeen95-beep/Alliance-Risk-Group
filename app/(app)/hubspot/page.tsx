@@ -1,6 +1,7 @@
 import type { Metadata } from 'next';
 import { loadDashboardContext, type SearchParams } from '@/lib/dashboards/context';
 import { loadHubspotDashboard } from '@/lib/dashboards/hubspot';
+import { loadEosPanel } from '@/lib/dashboards/hubspot-eos';
 import { buildDivisionColorMap } from '@/lib/charts/colors';
 import { formatMonth } from '@/lib/semantic/periods';
 import { formatNumber } from '@/lib/format';
@@ -17,6 +18,8 @@ import {
 } from '@/components/ui/primitives';
 import { OwnerFilter } from '@/components/dashboard/owner-filter';
 import { PipelineFilter } from '@/components/dashboard/pipeline-filter';
+import { EosPanel } from '@/components/dashboard/eos-panel';
+import { SectionTitle } from '@/components/ui/primitives';
 
 export const metadata: Metadata = { title: 'HubSpot Leadership' };
 export const dynamic = 'force-dynamic';
@@ -39,14 +42,17 @@ export default async function HubspotPage({
   const { session, divisionCode, range, owners, ownerName, pipelines, pipeline } = context;
   const colors = buildDivisionColorMap(session.bundle.divisions);
   const model = loadHubspotDashboard(session, divisionCode, colors, { range, ownerName, pipeline });
+  const eos = loadEosPanel(session, divisionCode, { range, ownerName, pipeline });
 
   return (
     <div className="space-y-6">
       <header>
         <h1 className="text-[19px] font-semibold tracking-tight">HubSpot Leadership</h1>
         <p className="mt-1 max-w-2xl text-[12.5px] leading-relaxed text-[var(--text-secondary)]">
-          The pipeline as HubSpot shows it — funnel, board, leaderboard and sources — with ARG&rsquo;s
-          own definitions behind every figure.
+          The monthly leadership review, in the order ARG already reads it — activity, discovery
+          calls and demos, pipeline added and closed, attribution, then the same split by rep —
+          followed by the funnel, board and leaderboard. Every figure carries ARG&rsquo;s own
+          definitions.
         </p>
         <p className="mt-0.5 text-[12px] text-[var(--text-muted)]">
           {model.scope.divisionLabel} · {formatMonth(session.period.month)} · deals scoped to{' '}
@@ -84,6 +90,19 @@ export default async function HubspotPage({
           <KpiTile key={tile.name} {...tile} />
         ))}
       </div>
+
+      <section className="space-y-3">
+        <SectionTitle hint="Counted over the selected date range, not the reporting month">
+          Leadership review
+        </SectionTitle>
+        <EosPanel model={eos} rangeLabel={model.scope.rangeLabel} />
+      </section>
+
+      <section className="space-y-3">
+        <SectionTitle hint="Where every deal stands, and how it got there">
+          Pipeline detail
+        </SectionTitle>
+      </section>
 
       <div className="grid gap-4 xl:grid-cols-2">
         <Card>

@@ -57,6 +57,13 @@
       "when": 1786531130000,
       "tag": "0007_live_by_default",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1789032047983,
+      "tag": "0008_hubspot_leadership_fields",
+      "breakpoints": true
     }
   ]
 }

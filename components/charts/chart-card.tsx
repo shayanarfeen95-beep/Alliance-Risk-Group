@@ -46,7 +46,7 @@ export interface ChartSeries {
 
 export type ChartDatum = { x: string; xLabel: string } & Record<string, string | number | null>;
 
-export type ChartForm = 'bar' | 'stackedBar' | 'line' | 'area';
+export type ChartForm = 'bar' | 'stackedBar' | 'horizontalBar' | 'line' | 'area';
 
 export interface ChartCardProps {
   title: string;
@@ -165,7 +165,49 @@ function renderChart({
   hasNegative: boolean;
   showZeroLine: boolean;
 }) {
-  const axes = (
+  /**
+   * Categories on the vertical axis instead of the horizontal one.
+   *
+   * Not a style choice. A category axis carrying names like "Meeting -
+   * Compliance Review" cannot fit them side by side, and Recharts responds by
+   * dropping every other label — so a chart of eight bars arrives labelled with
+   * four, and the reader cannot tell which bar is which. Turning the chart on
+   * its side gives each label a whole line to itself. Use it whenever the
+   * categories are words rather than dates.
+   */
+  const horizontal = form === 'horizontalBar';
+
+  const axes = horizontal ? (
+    <>
+      <CartesianGrid strokeDasharray="0" horizontal={false} stroke="var(--grid)" strokeWidth={1} />
+      <XAxis
+        type="number"
+        tickLine={false}
+        axisLine={{ stroke: 'var(--axis)', strokeWidth: 1 }}
+        tick={{ fontSize: 11, fill: 'var(--text-muted)' }}
+        tickFormatter={(value: number) => formatAxisTick(value, valueFormat)}
+      />
+      <YAxis
+        type="category"
+        dataKey="xLabel"
+        tickLine={false}
+        axisLine={false}
+        // Wide enough for a real category name, capped so the plot keeps most
+        // of the width. Longer names are truncated with an ellipsis by the tick
+        // renderer rather than overlapping the bars.
+        width={148}
+        tick={{ fontSize: 11, fill: 'var(--text-muted)' }}
+        interval={0}
+      />
+      <Tooltip
+        cursor={{ fill: 'var(--surface-2)', stroke: 'var(--axis)', strokeWidth: 1 }}
+        content={<ChartTooltip series={series} valueFormat={valueFormat} />}
+      />
+      {showZeroLine && hasNegative ? (
+        <ReferenceLine x={0} stroke="var(--axis)" strokeWidth={1} />
+      ) : null}
+    </>
+  ) : (
     <>
       <CartesianGrid
         strokeDasharray="0"
@@ -252,7 +294,12 @@ function renderChart({
 
   const stacked = form === 'stackedBar';
   return (
-    <BarChart data={data} margin={{ top: 8, right: 8, bottom: 0, left: 0 }} barCategoryGap="22%">
+    <BarChart
+      data={data}
+      layout={horizontal ? 'vertical' : 'horizontal'}
+      margin={{ top: 8, right: 8, bottom: 0, left: 0 }}
+      barCategoryGap={horizontal ? '18%' : '22%'}
+    >
       {axes}
       {series.map((s) => (
         <Bar
@@ -261,25 +308,28 @@ function renderChart({
           name={s.label}
           stackId={stacked ? 'stack' : undefined}
           fill={s.color}
-          // 4px rounded data-end, square against the baseline.
-          radius={[4, 4, 0, 0]}
+          // 4px rounded data-end, square against the baseline — which is the
+          // left edge once the chart is on its side.
+          radius={horizontal ? [0, 4, 4, 0] : [4, 4, 0, 0]}
           // A 2px surface gap keeps adjacent and stacked fills legibly separate.
           stroke="var(--surface-1)"
           strokeWidth={stacked ? 2 : 0}
           isAnimationActive={false}
-          maxBarSize={54}
+          maxBarSize={horizontal ? 22 : 54}
         >
           {/* Negative values flip the rounded end to the other side so the
               radius always sits at the data end, never at the baseline. */}
           {data.map((row) => {
             const value = row[s.id];
             const negative = typeof value === 'number' && value < 0;
-            return (
-              <Cell
-                key={`${s.id}-${row.x}`}
-                radius={(negative ? [0, 0, 4, 4] : [4, 4, 0, 0]) as unknown as number}
-              />
-            );
+            const radius = horizontal
+              ? negative
+                ? [4, 0, 0, 4]
+                : [0, 4, 4, 0]
+              : negative
+                ? [0, 0, 4, 4]
+                : [4, 4, 0, 0];
+            return <Cell key={`${s.id}-${row.x}`} radius={radius as unknown as number} />;
           })}
         </Bar>
       ))}

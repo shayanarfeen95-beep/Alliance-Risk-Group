@@ -540,6 +540,15 @@ export const factDeal = pgTable(
      * must read as "unassigned" rather than vanishing from a filtered view.
      */
     ownerName: text('owner_name'),
+    /**
+     * How the deal was sourced, as the business records it.
+     *
+     * Distinct from a contact's original traffic source: "Employee Referral" and
+     * "Trade Show/Conference" are not things HubSpot's analytics can observe,
+     * they are things a salesperson states. Pipeline attribution is read off
+     * this, so it is carried on the deal rather than inferred from a contact.
+     */
+    sourceLabel: text('source_label'),
     contactId: text('contact_id'),
     loadRunId: uuid('load_run_id').references(() => loadRun.id),
   },
@@ -547,6 +556,7 @@ export const factDeal = pgTable(
     index('fact_deal_closedate_idx').on(t.closedate),
     index('fact_deal_division_idx').on(t.divisionCode),
     index('fact_deal_owner_idx').on(t.ownerName),
+    index('fact_deal_source_idx').on(t.sourceLabel),
   ],
 );
 
@@ -590,11 +600,26 @@ export const factMeeting = pgTable(
     divisionCode: text('division_code').references(() => dimDivision.divisionCode),
     meetingDate: timestamp('meeting_date', { withTimezone: true }).notNull(),
     outcome: text('outcome'),
+    /**
+     * HubSpot's "Call and meeting type" (`hs_activity_type`).
+     *
+     * The axis a leadership review is actually read along — Discovery Calls,
+     * Demos and Compliance Reviews are not separate objects, they are values of
+     * this one field. Nullable because HubSpot does not require it, and a
+     * meeting logged without a type is a real meeting that has to keep counting
+     * in the total rather than disappearing from it.
+     */
+    activityType: text('activity_type'),
     ownerId: text('owner_id'),
+    /** The salesperson's name, resolved at load exactly as it is on a deal. */
+    ownerName: text('owner_name'),
     associatedDealId: text('associated_deal_id'),
     loadRunId: uuid('load_run_id').references(() => loadRun.id),
   },
-  (t) => [index('fact_meeting_date_idx').on(t.meetingDate)],
+  (t) => [
+    index('fact_meeting_date_idx').on(t.meetingDate),
+    index('fact_meeting_type_idx').on(t.activityType),
+  ],
 );
 
 /** §6 Operations: headcount arrives monthly. Sheets import or file upload. */

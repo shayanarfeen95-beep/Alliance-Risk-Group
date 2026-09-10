@@ -25,6 +25,16 @@ import { proxy } from './composio';
 
 const API = 'https://api.hubapi.com';
 
+/**
+ * Candidate property names for "how did this deal come to us".
+ *
+ * There is no standard HubSpot field for it. ARG records it on `zoho_lead_source`
+ * — carried over from the CRM they migrated from — while a portal set up inside
+ * HubSpot would use `deal_source`. Asking for all of them costs nothing: HubSpot
+ * omits properties a portal does not have rather than failing the request.
+ */
+const DEAL_SOURCE_PROPERTIES = ['zoho_lead_source', 'deal_source', 'lead_source'];
+
 const DEAL_PROPERTIES = [
   'dealname',
   'amount',
@@ -35,6 +45,10 @@ const DEAL_PROPERTIES = [
   'createdate',
   'closedate',
   'hubspot_owner_id',
+  // How the business says the deal was sourced. Portals name this field
+  // differently, so the candidates are tried in order and the first one present
+  // on the record wins — see sourceLabel() in the conform step.
+  ...DEAL_SOURCE_PROPERTIES,
 ];
 
 const CONTACT_PROPERTIES = [
@@ -50,6 +64,9 @@ const MEETING_PROPERTIES = [
   'hs_meeting_outcome',
   'hs_meeting_title',
   'hubspot_owner_id',
+  // "Call and meeting type" — the axis the leadership review is read along.
+  // Discovery calls and demos are values of this field, not separate objects.
+  'hs_activity_type',
 ];
 
 /**

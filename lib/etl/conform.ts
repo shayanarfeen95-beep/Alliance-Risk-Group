@@ -699,6 +699,29 @@ async function ownerNameMap(db: Database): Promise<Map<string, string>> {
   return map;
 }
 
+
+/**
+ * Where a deal came from, from whichever property this portal records it on.
+ *
+ * HubSpot has no standard field for it. ARG uses `zoho_lead_source`, carried
+ * over from the CRM they migrated off; a portal built inside HubSpot would use
+ * `deal_source`. The candidates are tried in a fixed order and the first one
+ * actually present on the record wins, so a portal that later adds the native
+ * field does not silently change what the attribution panel is reading —
+ * whichever it finds, it finds the same one for every deal in the same load.
+ *
+ * Null when none is set, which the dashboard shows as "Not recorded" rather
+ * than folding into Other. Unattributed pipeline is a thing leadership needs to
+ * see the size of.
+ */
+function sourceLabel(properties: Record<string, string | null | undefined>): string | null {
+  for (const candidate of ['zoho_lead_source', 'deal_source', 'lead_source']) {
+    const value = properties[candidate]?.trim();
+    if (value) return value;
+  }
+  return null;
+}
+
 async function conformDeals(
   db: Database,
   loadRunId: string,
@@ -725,6 +748,7 @@ async function conformDeals(
       enteredProposalAt: proposalEntry(record),
       ownerId: p.hubspot_owner_id ?? null,
       ownerName: ownerNames.get(p.hubspot_owner_id ?? '') ?? null,
+      sourceLabel: sourceLabel(p),
       contactId: null,
       loadRunId,
     };
@@ -820,6 +844,7 @@ async function conformMeetings(
   loadRunId: string,
   records: HubspotObject[],
 ): Promise<number> {
+  const ownerNames = await ownerNameMap(db);
   let written = 0;
 
   for (const record of records) {
@@ -834,7 +859,13 @@ async function conformMeetings(
       divisionCode: null,
       meetingDate,
       outcome: p.hs_meeting_outcome ?? null,
+      // Left null rather than bucketed into "Other": a meeting HubSpot has no
+      // type for is a gap in how the team logs meetings, and the dashboard says
+      // so. Folding it into a named category would hide the gap and inflate
+      // whichever category absorbed it.
+      activityType: p.hs_activity_type?.trim() || null,
       ownerId: p.hubspot_owner_id ?? null,
+      ownerName: ownerNames.get(p.hubspot_owner_id ?? '') ?? null,
       associatedDealId: record.associations?.deals?.results?.[0]?.id ?? null,
       loadRunId,
     };
