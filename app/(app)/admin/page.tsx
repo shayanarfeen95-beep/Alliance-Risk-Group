@@ -198,6 +198,7 @@ export default async function AdminPage({
               signInLabel={connector.signInLabel}
               supportsManual={connector.supportsManual}
               needsSpreadsheet={connector.needsSpreadsheet}
+              needsCompanyId={connector.needsCompanyId}
               canManage={can(user, 'EDIT_MAPPINGS')}
             />
           ))}

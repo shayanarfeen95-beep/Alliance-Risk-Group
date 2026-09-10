@@ -431,6 +431,18 @@ export interface ConnectionIdentity {
   accountId: string | null;
 }
 
+/**
+ * Values Composio substitutes for something it will not hand back.
+ *
+ * Composio redacts credentials by design, and it does so by replacing the value
+ * with a placeholder STRING rather than by omitting the key. So a lookup that
+ * only checks for a non-empty string finds "REDACTED" and treats it as the
+ * answer — which is how the admin screen came to say "Portal REDACTED", and how
+ * a QuickBooks realm could have been stored as the word REDACTED and every
+ * request sent to /v3/company/REDACTED/. A placeholder is an absence.
+ */
+const PLACEHOLDERS = new Set(['redacted', 'null', 'undefined', 'none', 'n/a', '']);
+
 /** Scans Composio's non-secret connection metadata for a known key. */
 function metadataValue(
   metadata: Record<string, unknown>,
@@ -439,7 +451,10 @@ function metadataValue(
   for (const candidate of candidates) {
     for (const [key, value] of Object.entries(metadata)) {
       if (key.toLowerCase() !== candidate.toLowerCase()) continue;
-      if (typeof value === 'string' && value.trim()) return value.trim();
+      if (typeof value === 'string' && value.trim()) {
+        if (PLACEHOLDERS.has(value.trim().toLowerCase())) continue;
+        return value.trim();
+      }
       if (typeof value === 'number') return String(value);
     }
   }
@@ -473,6 +488,11 @@ export async function describeConnection(
     let resolvedRealm = realm;
 
     try {
+      // Composio's QuickBooks toolkit does not publish a company-info tool —
+      // its slugs are CREATE/READ/QUERY over accounts, customers and vendors —
+      // so this resolves nothing on a managed connection and is kept only for a
+      // deployment using its own Intuit app, where it does. The company id is
+      // otherwise supplied by the operator; see the admin screen.
       const info = await executeTool<Record<string, unknown>>('QUICKBOOKS_GET_COMPANY_INFO', {
         connectedAccountId: account.id,
       });

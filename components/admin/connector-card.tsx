@@ -36,6 +36,7 @@ export interface ConnectorCardProps {
   signInLabel: string;
   supportsManual: boolean;
   needsSpreadsheet: boolean;
+  needsCompanyId: boolean;
   canManage: boolean;
 }
 
@@ -105,7 +106,7 @@ export function ConnectorCard(props: ConnectorCardProps) {
         <StatusChip
           connected={c.connected}
           hasError={Boolean(c.lastError)}
-          incomplete={props.needsSpreadsheet}
+          incomplete={props.needsSpreadsheet || props.needsCompanyId}
         />
       </div>
 
@@ -147,6 +148,37 @@ export function ConnectorCard(props: ConnectorCardProps) {
 
       {error && (
         <p className="mt-3 text-[11px] leading-relaxed text-[var(--status-critical)]">{error}</p>
+      )}
+
+      {props.needsCompanyId && (
+        <div className="mt-3 space-y-2">
+          <p className="text-[11px] leading-relaxed text-[var(--text-secondary)]">
+            Signed in. Intuit grants access to a <em>user</em> rather than to a company, and the
+            company id it returns is not kept by the sign-in broker — so QuickBooks still needs to
+            be told which books to open. In QuickBooks: the gear icon &rarr; Account and settings
+            &rarr; Billing &amp; subscription. The Company ID is the number at the top.
+          </p>
+          <Field
+            label="QuickBooks Company ID"
+            placeholder="1234567890123456"
+            value={fields.realmId ?? ''}
+            onChange={(v) => setFields((f) => ({ ...f, realmId: v }))}
+          />
+          <button
+            type="button"
+            onClick={submitManual}
+            disabled={busy || !fields.realmId?.trim()}
+            className="flex items-center gap-1.5 rounded-[5px] px-3 py-1.5 text-[11.5px] font-medium disabled:opacity-40"
+            style={{ background: 'var(--text-primary)', color: 'var(--text-inverse)' }}
+          >
+            {busy && <Loader2 size={12} className="animate-spin" aria-hidden />}
+            {busy ? 'Checking the books…' : 'Use this company'}
+          </button>
+          <p className="text-[10.5px] leading-relaxed text-[var(--text-muted)]">
+            It is checked against QuickBooks before it is saved — an id that does not open these
+            books is refused here rather than failing at the next refresh.
+          </p>
+        </div>
       )}
 
       {props.needsSpreadsheet && (

@@ -55,6 +55,85 @@ export async function POST(request: Request, context: { params: Promise<{ source
   // connection still needs to be told which spreadsheet holds the budget. This
   // is a document identifier, not a credential — pasting a link is the whole
   // step, and nothing here asks for a key.
+  /**
+   * Naming the company on an authorised QuickBooks connection.
+   *
+   * The mirror of the Sheets case below. Intuit grants access to a user, not to
+   * a company, and Composio does not keep the realm the callback carried — so a
+   * genuinely authorised connection can still not know which books it opens.
+   * The Company ID is the one fact that resolves it, and the operator can read
+   * it off their own QuickBooks account in under a minute.
+   *
+   * It is verified before it is stored. An id that does not open these books
+   * produces a connection that says "connected" and fails at the next refresh,
+   * which surfaces at 3am rather than while somebody is looking at the screen.
+   */
+  if (sourceSystem === 'QBO' && existing?.authMethod === 'COMPOSIO') {
+    const realmId = (body.realmId ?? '').trim().replace(/\s+/g, '');
+
+    if (!/^\d{6,20}$/.test(realmId)) {
+      return NextResponse.json({
+        ok: false,
+        error:
+          'A QuickBooks Company ID is a number, usually 15 or 16 digits. Find it in QuickBooks ' +
+          'under the gear icon → Account and settings → Billing & subscription.',
+      });
+    }
+
+    // Save first, because the connector reads the realm from the stored
+    // credential — then prove it works, and undo if it does not.
+    const previous = existing.data.realmId ?? null;
+    await saveCredential(
+      {
+        sourceSystem,
+        authMethod: 'COMPOSIO',
+        data: { ...existing.data, realmId },
+        isReference: true,
+        accountLabel: `Company ${realmId}`,
+        accountId: realmId,
+        scopes: existing.scopes ?? 'read-only, managed by Composio',
+        connectedByUserId: user.id,
+      },
+      db,
+    );
+
+    try {
+      const { qboConnector } = await import('@/lib/connectors/qbo');
+      await qboConnector.fetch('classes', { start: '2026-01-01', end: '2026-01-01' });
+    } catch (error) {
+      await saveCredential(
+        {
+          sourceSystem,
+          authMethod: 'COMPOSIO',
+          data: previous ? { ...existing.data, realmId: previous } : { ...existing.data },
+          isReference: true,
+          accountLabel: previous ? `Company ${previous}` : null,
+          accountId: previous,
+          scopes: existing.scopes ?? 'read-only, managed by Composio',
+          connectedByUserId: user.id,
+        },
+        db,
+      );
+
+      return NextResponse.json({
+        ok: false,
+        error:
+          `QuickBooks refused a request for company ${realmId}, so that is not the right id for ` +
+          `this sign-in — nothing was changed. ${error instanceof Error ? error.message.slice(0, 200) : ''}`,
+      });
+    }
+
+    await db.insert(t.auditEvent).values({
+      userId: user.id,
+      action: 'SOURCE_CONNECTED',
+      entity: 'connector_credential',
+      entityId: sourceSystem,
+      detail: { authMethod: 'COMPOSIO', realmId },
+    });
+
+    return NextResponse.json({ ok: true, accountLabel: `Company ${realmId}` });
+  }
+
   if (sourceSystem === 'SHEETS' && existing?.authMethod === 'COMPOSIO') {
     const spreadsheetId = extractSpreadsheetId(body.spreadsheetId ?? '');
     if (!spreadsheetId) {

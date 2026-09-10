@@ -51,6 +51,17 @@ export interface ConnectorStatus {
    * told which spreadsheet holds the budget.
    */
   needsSpreadsheet: boolean;
+  /**
+   * Set when QuickBooks is authorised but no company is named.
+   *
+   * Intuit grants access to a user, not to a company: the "realm" arrives only
+   * as a callback parameter, and Composio does not keep it — its own QuickBooks
+   * calls go to `/v3/company/None/…`. So a signed-in QuickBooks connection can
+   * be genuinely authorised and still not know which books it opens, and the
+   * only thing that resolves it is somebody reading the Company ID off their
+   * own QuickBooks account.
+   */
+  needsCompanyId: boolean;
 }
 
 /**
@@ -111,6 +122,8 @@ export async function connectorStatuses(): Promise<ConnectorStatus[]> {
           credential.connected &&
           credential.authMethod === 'COMPOSIO' &&
           !(await c.isConfigured()),
+        needsCompanyId:
+          c.sourceSystem === 'QBO' && credential.connected && credential.accountId === null,
       };
     }),
   );

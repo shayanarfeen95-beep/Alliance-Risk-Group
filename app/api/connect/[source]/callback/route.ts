@@ -119,13 +119,25 @@ export async function GET(request: Request, context: { params: Promise<{ source:
 
     const identity = await describeConnection(sourceSystem, account);
 
-    if (sourceSystem === 'QBO' && !identity.accountId) {
-      return fail(
-        request,
-        'QuickBooks authorised, but the company id could not be established, so there is no way ' +
-          'to tell which books this connection opens. Nothing was saved.',
-      );
-    }
+    /**
+     * Intuit's realm id, if anybody has told us what it is.
+     *
+     * Intuit grants access to a USER, not to a company, and returns the company
+     * — the "realm" — only as a query parameter on the OAuth callback. Composio
+     * does not keep it: its stored connection has no realm anywhere, and its own
+     * QuickBooks tools consequently call `/v3/company/None/...`. So the value is
+     * taken from the redirect if it survives the round trip, and otherwise has
+     * to be supplied.
+     *
+     * This used to refuse the whole connection at that point, which threw away a
+     * perfectly good authorisation and left the operator with a red banner and
+     * nothing to do about it. A connection missing its company id is now saved
+     * as authorised-but-incomplete, exactly as a Google account with no
+     * spreadsheet named is — the admin screen then asks for the one fact it
+     * needs.
+     */
+    const realmFromRedirect = new URL(request.url).searchParams.get('realmId');
+    const accountId = identity.accountId ?? realmFromRedirect;
 
     await saveCredential(
       {
@@ -136,11 +148,12 @@ export async function GET(request: Request, context: { params: Promise<{ source:
         data: {
           connectedAccountId: account.id,
           toolkit: account.toolkitSlug ?? COMPOSIO_TOOLKITS[sourceSystem].slug,
-          ...(identity.accountId ? { realmId: identity.accountId } : {}),
+          ...(accountId ? { realmId: accountId } : {}),
         },
         isReference: true,
-        accountLabel: identity.accountLabel,
-        accountId: identity.accountId,
+        accountLabel:
+          identity.accountLabel ?? (accountId ? `Company ${accountId}` : null),
+        accountId,
         scopes: 'read-only, managed by Composio',
         connectedByUserId: user.id,
       },
