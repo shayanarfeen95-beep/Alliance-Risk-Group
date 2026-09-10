@@ -13,6 +13,8 @@ import { connectorStatuses } from '@/lib/connectors';
 import { seedLoadRunIds } from '@/lib/data-mode';
 import { syncableSources } from '@/lib/etl/ingest';
 import { Card, CardHeader, Chip, DataTable, SectionTitle, Td, Th } from '@/components/ui/primitives';
+import { ClassMapping } from '@/components/admin/class-mapping';
+import { listClassMap } from '@/lib/etl/class-map';
 
 export const metadata: Metadata = { title: 'Admin' };
 export const dynamic = 'force-dynamic';
@@ -38,7 +40,7 @@ export default async function AdminPage({
 
   const db = await getDb();
 
-  const [config, recentRuns, reconSummary, failingChecks, auditTrail, userRows, accessRows, divisionRows] = await Promise.all([
+  const [config, recentRuns, reconSummary, failingChecks, auditTrail, userRows, accessRows, divisionRows, classMap] = await Promise.all([
     db.select().from(t.appConfig).orderBy(t.appConfig.key),
     db.select().from(t.loadRun).orderBy(desc(t.loadRun.startedAt)).limit(10),
     db
@@ -59,6 +61,7 @@ export default async function AdminPage({
     db.select().from(t.users).orderBy(t.users.name),
     db.select().from(t.userDivisionAccess),
     db.select().from(t.dimDivision).where(eq(t.dimDivision.isActive, true)).orderBy(t.dimDivision.sortOrder),
+    listClassMap(db),
   ]);
 
   const managedUsers = userRows.map((row) => ({
@@ -141,6 +144,21 @@ export default async function AdminPage({
           connectedSources={sources}
           loadedRowCount={loadedRowCount}
           canManage={can(user, 'RUN_INGESTION')}
+        />
+      </section>
+
+      {/* --- What each QuickBooks class means ----------------------------- */}
+      <section className="space-y-3">
+        <SectionTitle hint="Class is how QuickBooks separates divisions — a class nobody has placed blocks the month it appears in">
+          Class mapping
+        </SectionTitle>
+        <ClassMapping
+          rows={classMap}
+          divisions={divisionRows.map((division) => ({
+            divisionCode: division.divisionCode,
+            divisionName: division.divisionName,
+          }))}
+          canEdit={can(user, 'EDIT_MAPPINGS')}
         />
       </section>
 

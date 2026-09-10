@@ -1031,6 +1031,42 @@ export const syncState = pgTable(
 );
 
 /**
+ * What each QuickBooks class means.
+ *
+ * Class is how ARG separates divisions in QuickBooks, and the mapping used to
+ * live only in seeded arrays on dim_division — so a class the seed had never
+ * heard of could not be mapped at all. Conform refuses a month containing one,
+ * which is right: loading it against the wrong division, or dropping it, moves
+ * revenue between two divisional P&Ls invisibly. But with nowhere to record the
+ * decision, "refuses" meant "nothing ever loads", and the first real QuickBooks
+ * pull wrote zero rows.
+ *
+ * Three states, and the third is the one that was missing:
+ *
+ *   UNMAPPED  Nobody has said what this is. A month containing it is refused.
+ *             This is the safe default and it is deliberately obstructive.
+ *   MAPPED    It belongs to a division. Its figures load against that division.
+ *   EXCLUDED  It is deliberately not a division — an allocation bucket, an
+ *             unclassified catch-all, a class kept for a purpose that is not
+ *             divisional reporting. Its figures are left out, the month loads,
+ *             and every affected view says so rather than quietly under-reporting.
+ *
+ * A decision is recorded with who made it and when, because it changes what the
+ * divisional P&Ls say and is exactly the kind of thing an auditor asks about.
+ */
+export const dimClassMap = pgTable('dim_class_map', {
+  /** Normalised class id or name — whichever the report column carries. */
+  classKey: text('class_key').primaryKey(),
+  classId: text('class_id'),
+  className: text('class_name').notNull(),
+  divisionCode: text('division_code').references(() => dimDivision.divisionCode),
+  decision: text('decision').notNull().default('UNMAPPED'),
+  decidedByUserId: uuid('decided_by_user_id').references(() => users.id),
+  decidedAt: timestamp('decided_at', { withTimezone: true }),
+  firstSeenAt: timestamp('first_seen_at', { withTimezone: true }).notNull().defaultNow(),
+});
+
+/**
  * Open items that are Westport decisions, not developer guesses (§14.3). They
  * live as data and are visible in the admin area rather than silently assumed.
  * e.g. BALANCE_SHEET_CLASSED, HUBSPOT_DIVISION_ATTRIBUTION.

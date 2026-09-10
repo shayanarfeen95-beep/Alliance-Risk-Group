@@ -85,6 +85,13 @@
       "when": 1789060000000,
       "tag": "0011_incremental_sync",
       "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "7",
+      "when": 1789070000000,
+      "tag": "0012_class_mapping",
+      "breakpoints": true
     }
   ]
 }

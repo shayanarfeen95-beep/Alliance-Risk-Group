@@ -39,7 +39,11 @@ export interface ConformOutcome {
 
 /** Raised when the data cannot be conformed without inventing a mapping. */
 export class UnmappedSourceDataError extends Error {
-  constructor(message: string) {
+  constructor(
+    message: string,
+    /** The classes that caused it, carried so they can be offered for mapping. */
+    public readonly classNames: string[] = [],
+  ) {
     super(message);
     this.name = 'UnmappedSourceDataError';
   }
@@ -54,6 +58,8 @@ const n = (value: Decimal) => value.toFixed(4);
 interface DivisionLookup {
   /** Class id, class name, division name and legacy code, all lowercased. */
   byKey: Map<string, string>;
+  /** Classes an administrator has decided are deliberately not a division. */
+  excluded: Set<string>;
   codes: string[];
 }
 
@@ -73,7 +79,21 @@ async function divisionLookup(db: Database): Promise<DivisionLookup> {
     }
   }
 
-  return { byKey, codes: rows.map((row) => row.divisionCode) };
+  // Decisions an administrator has recorded, which override nothing but extend
+  // everything: a class mapped here reaches its division, and one deliberately
+  // excluded stops blocking the month it appears in.
+  const excluded = new Set<string>();
+  for (const row of await db.select().from(t.dimClassMap)) {
+    const keys = [row.classKey, row.classId, row.className];
+    for (const key of keys) {
+      if (!key) continue;
+      const normalised = key.trim().toLowerCase();
+      if (row.decision === 'MAPPED' && row.divisionCode) byKey.set(normalised, row.divisionCode);
+      if (row.decision === 'EXCLUDED') excluded.add(normalised);
+    }
+  }
+
+  return { byKey, excluded, codes: rows.map((row) => row.divisionCode) };
 }
 
 /**
@@ -94,6 +114,15 @@ function resolveDivision(
     if (key && lookup.byKey.has(key)) return lookup.byKey.get(key)!;
   }
   return null;
+}
+
+/** True when somebody has decided this class is deliberately not a division. */
+function isExcluded(lookup: DivisionLookup, classId: string | undefined, title: string | undefined): boolean {
+  const candidates = [classId, title, title?.split(':').pop()];
+  return candidates.some((candidate) => {
+    const key = candidate?.trim().toLowerCase();
+    return Boolean(key && lookup.excluded.has(key));
+  });
 }
 
 /** Periods are a dimension with a foreign key; a month must exist to be written. */
@@ -190,10 +219,15 @@ function* leafRows(
 function divisionColumns(
   report: QboReport,
   lookup: DivisionLookup,
-): { columns: Array<{ index: number; divisionCode: string }>; unmapped: string[] } {
+): {
+  columns: Array<{ index: number; divisionCode: string }>;
+  unmapped: string[];
+  excluded: string[];
+} {
   const all = report.Columns?.Column ?? [];
   const columns: Array<{ index: number; divisionCode: string }> = [];
   const unmapped: string[] = [];
+  const excluded: string[] = [];
 
   all.forEach((column, index) => {
     if (column.ColType !== 'Money') return;
@@ -207,12 +241,17 @@ function divisionColumns(
     // row of its own, and taking it as one would double the consolidated figure.
     if (!title || /^total$/i.test(title) || meta.ColKey === 'total') return;
 
-    const divisionCode = resolveDivision(lookup, meta.ClassRef ?? meta.ClassId, title);
+    const classRef = meta.ClassRef ?? meta.ClassId;
+    const divisionCode = resolveDivision(lookup, classRef, title);
     if (divisionCode) columns.push({ index, divisionCode });
+    // Deliberately excluded: left out of every divisional figure and out of ARG
+    // Total, which is what an allocation or unclassified bucket should do. The
+    // caller reports it so under-reporting is stated rather than discovered.
+    else if (isExcluded(lookup, classRef, title)) excluded.push(title);
     else unmapped.push(title);
   });
 
-  return { columns, unmapped };
+  return { columns, unmapped, excluded };
 }
 
 /** QuickBooks' P&L sections, translated to the five reporting lines. */
@@ -243,6 +282,22 @@ function reportingLineForSection(group: string | undefined): ReportingLine | nul
  * makes drill-down possible and what guarantees the two agree: the summary is
  * derived from the detail rather than being loaded alongside it.
  */
+/**
+ * Notes a class that blocked a load, so the mapping screen can offer it.
+ *
+ * The class list is loaded weekly and a P&L daily, so a class can appear on a
+ * report before the list next runs. Recording it here means the screen offers
+ * the thing that actually failed rather than a list that is a week old.
+ */
+async function noteUnmappedClasses(db: Database, names: string[]): Promise<void> {
+  for (const name of names) {
+    await db
+      .insert(t.dimClassMap)
+      .values({ classKey: name.trim().toLowerCase(), className: name, decision: 'UNMAPPED' })
+      .onConflictDoNothing();
+  }
+}
+
 async function conformProfitAndLoss(
   db: Database,
   loadRunId: string,
@@ -255,9 +310,11 @@ async function conformProfitAndLoss(
   if (unmapped.length) {
     throw new UnmappedSourceDataError(
       `The QuickBooks profit-and-loss for ${month.slice(0, 7)} has classes that map to no ` +
-        `division: ${unmapped.join(', ')}. Nothing was written. Add the class to the division in ` +
-        `dim_division.qbo_class_ids — loading it against the wrong division, or dropping it, ` +
-        `would move revenue between two divisional P&Ls invisibly.`,
+        `division: ${unmapped.join(', ')}. Nothing was written — loading them against the wrong ` +
+        `division, or dropping them, would move revenue between two divisional P&Ls invisibly. ` +
+        `Go to Admin → Class mapping and either assign each one to a division or mark it as not ` +
+        `belonging to one, then pull again.`,
+      unmapped,
     );
   }
 
@@ -420,7 +477,9 @@ async function conformBalanceSheet(
   if (unmapped.length) {
     throw new UnmappedSourceDataError(
       `The ${month.slice(0, 7)} balance sheet has classes that map to no division: ` +
-        `${unmapped.join(', ')}. Nothing was written.`,
+        `${unmapped.join(', ')}. Nothing was written. Map them in Admin → Class mapping, or ` +
+        `mark them as not belonging to a division.`,
+      unmapped,
     );
   }
   if (!columns.length) {
@@ -604,10 +663,36 @@ async function checkClasses(db: Database, payload: QboQueryResponse): Promise<st
   if (!classes.length) return [];
 
   const lookup = await divisionLookup(db);
-  const unmapped = classes
-    .filter((entry) => entry.Active !== false)
-    .filter((entry) => !resolveDivision(lookup, entry.Id, entry.Name))
-    .map((entry) => entry.Name ?? entry.Id ?? 'unnamed');
+  const unmapped: string[] = [];
+
+  for (const entry of classes) {
+    if (entry.Active === false) continue;
+
+    const name = entry.Name ?? entry.Id ?? 'unnamed';
+    const key = (entry.Id ?? name).trim().toLowerCase();
+
+    // Every class QuickBooks holds is recorded, whether or not it is mapped, so
+    // the admin screen can list them all rather than only the ones that have
+    // already caused a failure. A class already decided keeps its decision:
+    // this notices classes, it does not overrule people.
+    await db
+      .insert(t.dimClassMap)
+      .values({
+        classKey: key,
+        classId: entry.Id ?? null,
+        className: name,
+        decision: resolveDivision(lookup, entry.Id, entry.Name) ? 'MAPPED' : 'UNMAPPED',
+        divisionCode: resolveDivision(lookup, entry.Id, entry.Name),
+      })
+      .onConflictDoUpdate({
+        target: t.dimClassMap.classKey,
+        set: { className: name, classId: entry.Id ?? null },
+      });
+
+    if (!resolveDivision(lookup, entry.Id, entry.Name) && !isExcluded(lookup, entry.Id, entry.Name)) {
+      unmapped.push(name);
+    }
+  }
 
   return unmapped;
 }
@@ -1312,9 +1397,24 @@ export async function conformBatch(
   // balances, so a failure partway through would otherwise leave that month
   // holding some of the new figures and none of the old ones — a month that
   // silently reads low, which is worse than a month that failed to load.
-  return db.transaction(async (tx) =>
-    conformInTransaction(tx as unknown as Database, loadRunId, batch),
-  );
+  try {
+    return await db.transaction(async (tx) =>
+      conformInTransaction(tx as unknown as Database, loadRunId, batch),
+    );
+  } catch (error) {
+    // A refusal rolls the transaction back, and that has to include the fact
+    // tables — but NOT the record of which class caused it. Written here, on
+    // the outer connection, so the class survives the rollback and reaches the
+    // mapping screen. Otherwise the pull fails, names a class, and offers
+    // nowhere to decide it: the exact dead end this was built to remove.
+    if (error instanceof UnmappedSourceDataError && error.classNames.length) {
+      await noteUnmappedClasses(db, error.classNames).catch(() => {
+        // Recording the class is a convenience; the refusal is the point, and
+        // it must not be replaced by a failure to write a hint about it.
+      });
+    }
+    throw error;
+  }
 }
 
 
