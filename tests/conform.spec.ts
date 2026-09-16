@@ -20,8 +20,10 @@ import {
   balanceSheetLineFor,
   bucketForDaysPastDue,
   conformBatch,
+  daysBetween,
   findSheetTable,
   parseMonthHeader,
+  transactionClass,
 } from '@/lib/etl/conform';
 import * as t from '@/lib/db/schema';
 import type { RawBatch } from '@/lib/connectors/types';
@@ -393,23 +395,68 @@ describe('the chart of accounts', () => {
 });
 
 describe('QuickBooks aging', () => {
-  it('buckets open transactions by days past due, per division', async () => {
+  /**
+   * Aging is built from the open transactions, not from an aging report.
+   *
+   * No QuickBooks aging report carries a class — Intuit's documented column list
+   * for the DETAIL report has no klass_name, and the SUMMARY report is grouped
+   * by customer or vendor. fact_aging is keyed on division, so while the aging
+   * came from those reports it could never be filled. That is what twelve
+   * identical "came back without a class column" notes and a row count of zero
+   * were saying.
+   *
+   * An invoice carries its own ClassRef, Balance and DueDate.
+   */
+  function invoices(
+    rows: Array<{ klass?: string; lineClasses?: string[]; due: string; balance: number }>,
+  ) {
+    return {
+      QueryResponse: {
+        Invoice: rows.map((row, index) => ({
+          Id: `INV-${index}`,
+          Balance: row.balance,
+          DueDate: row.due,
+          ...(row.klass ? { ClassRef: { value: `c-${row.klass}`, name: row.klass } } : {}),
+          ...(row.lineClasses
+            ? {
+                Line: row.lineClasses.map((name) => ({
+                  Amount: 1,
+                  SalesItemLineDetail: { ClassRef: { value: `c-${name}`, name } },
+                })),
+              }
+            : {}),
+        })),
+      },
+    };
+  }
+
+  /** The aging snapshot lands on the window's end month, not on each month. */
+  function agingBatch(payload: unknown): RawBatch {
+    return {
+      sourceSystem: 'QBO',
+      entity: 'ar_aging',
+      window: { start: MONTH, end: MONTH },
+      records: [{ entity: 'ar_aging', key: 'page-1', payload }],
+      fetchedAt: new Date(),
+    };
+  }
+
+  it('buckets open invoices by days past due, per division', async () => {
+    // MONTH is 2026-05, so the snapshot ages against 2026-05-31.
     const outcome = await conformBatch(
       harness.db,
       null as never,
-      batch(
-        'ar_aging',
-        agingDetailReport([
-          { klass: 'SHRC', pastDue: '0', balance: '10000.00' },
-          { klass: 'SHRC', pastDue: '15', balance: '4000.00' },
-          { klass: 'SHRC', pastDue: '95', balance: '2500.00' },
-          { klass: 'Claims', pastDue: '45', balance: '7000.00' },
+      agingBatch(
+        invoices([
+          { klass: 'SHRC', due: '2026-06-30', balance: 10_000 },
+          { klass: 'SHRC', due: '2026-05-20', balance: 4_000 },
+          { klass: 'SHRC', due: '2026-01-15', balance: 2_500 },
+          { klass: 'Claims', due: '2026-04-10', balance: 7_000 },
         ]),
       ),
     );
 
-    // Five buckets for each of two divisions.
-    expect(outcome.rowsWritten).toBe(10);
+    expect(outcome.rowsWritten).toBe(10); // five buckets × two divisions
 
     const rows = await harness.db
       .select()
@@ -419,12 +466,14 @@ describe('QuickBooks aging', () => {
     const shrc = new Map(
       rows.filter((row) => row.divisionCode === 'SHRC').map((row) => [row.bucket, row.amount]),
     );
+    // Due after the as-of date: not yet due.
     expect(new Decimal(shrc.get('current')!).toFixed(2)).toBe('10000.00');
+    // 11 days past due.
     expect(new Decimal(shrc.get('1_30')!).toFixed(2)).toBe('4000.00');
+    // 136 days past due.
     expect(new Decimal(shrc.get('over_90')!).toFixed(2)).toBe('2500.00');
-
-    // Written as an explicit zero. Omitting the row would leave whatever the
-    // previous pull wrote standing, which reads as ageing debt that is gone.
+    // Written as an explicit zero: omitting it would leave last pull's figure
+    // standing, which reads as ageing debt that has actually gone.
     expect(new Decimal(shrc.get('61_90')!).toFixed(2)).toBe('0.00');
 
     const claims = rows.filter((row) => row.divisionCode === 'CLAIMS');
@@ -433,15 +482,36 @@ describe('QuickBooks aging', () => {
     );
   });
 
-  it('reports unclassed A/R as a gap rather than spreading it across divisions', async () => {
+  it('reads the class off the lines when it is not on the transaction', async () => {
+    // Which of the two places the class lives in is a company preference, so
+    // both are read rather than one being assumed.
+    await conformBatch(
+      harness.db,
+      null as never,
+      agingBatch(invoices([{ lineClasses: ['SHRC', 'SHRC'], due: '2026-05-01', balance: 3_000 }])),
+    );
+
+    const rows = await harness.db
+      .select()
+      .from(t.factAging)
+      .where(and(eq(t.factAging.periodMonth, MONTH), eq(t.factAging.kind, 'AR')));
+
+    const total = rows.reduce((acc, row) => acc.plus(row.amount), new Decimal(0));
+    expect(total.toFixed(2)).toBe('3000.00');
+    expect(rows.every((row) => row.divisionCode === 'SHRC')).toBe(true);
+  });
+
+  it('reports a split-class invoice rather than dividing its balance', async () => {
+    // The line amounts would make a split look principled, but a part-paid
+    // invoice's remaining balance does not belong to its lines in any
+    // proportion QuickBooks knows — the payment was against the invoice.
     const outcome = await conformBatch(
       harness.db,
       null as never,
-      batch(
-        'ar_aging',
-        agingDetailReport([
-          { klass: 'SHRC', pastDue: '10', balance: '5000.00' },
-          { klass: '', pastDue: '20', balance: '3300.00' },
+      agingBatch(
+        invoices([
+          { klass: 'SHRC', due: '2026-05-10', balance: 5_000 },
+          { lineClasses: ['SHRC', 'Claims'], due: '2026-05-10', balance: 3_300 },
         ]),
       ),
     );
@@ -461,21 +531,21 @@ describe('QuickBooks aging', () => {
       conformBatch(
         harness.db,
         null as never,
-        batch('ar_aging', agingDetailReport([{ klass: 'Marine Salvage', pastDue: '5', balance: '900.00' }])),
+        agingBatch(invoices([{ klass: 'Marine Salvage', due: '2026-05-10', balance: 900 }])),
       ),
     ).rejects.toThrow(/Marine Salvage/);
   });
 
-  it('replaces a month wholesale, so a bucket that emptied reads as zero', async () => {
+  it('replaces the snapshot wholesale, so a bucket that emptied reads as zero', async () => {
     await conformBatch(
       harness.db,
       null as never,
-      batch('ar_aging', agingDetailReport([{ klass: 'SHRC', pastDue: '95', balance: '8000.00' }])),
+      agingBatch(invoices([{ klass: 'SHRC', due: '2026-01-01', balance: 8_000 }])),
     );
     await conformBatch(
       harness.db,
       null as never,
-      batch('ar_aging', agingDetailReport([{ klass: 'SHRC', pastDue: '5', balance: '1000.00' }])),
+      agingBatch(invoices([{ klass: 'SHRC', due: '2026-05-20', balance: 1_000 }])),
     );
 
     const rows = await harness.db
@@ -488,6 +558,13 @@ describe('QuickBooks aging', () => {
     expect(new Decimal(byBucket.get('1_30')!).toFixed(2)).toBe('1000.00');
   });
 
+  it('calls no open transactions a real zero, not a failure', async () => {
+    const outcome = await conformBatch(harness.db, null as never, agingBatch(invoices([])));
+
+    expect(outcome.rowsWritten).toBe(0);
+    expect(outcome.notes.some((note) => note.includes('real zero'))).toBe(true);
+  });
+
   it('puts each day count in the bucket a person would expect', () => {
     expect(bucketForDaysPastDue(0)).toBe('current');
     expect(bucketForDaysPastDue(-3)).toBe('current');
@@ -496,6 +573,47 @@ describe('QuickBooks aging', () => {
     expect(bucketForDaysPastDue(31)).toBe('31_60');
     expect(bucketForDaysPastDue(90)).toBe('61_90');
     expect(bucketForDaysPastDue(91)).toBe('over_90');
+  });
+
+  it('counts days across a month and a year boundary', () => {
+    expect(daysBetween('2026-05-31', '2026-05-20')).toBe(11);
+    expect(daysBetween('2026-01-05', '2025-12-31')).toBe(5);
+    expect(daysBetween('2026-05-01', '2026-05-31')).toBe(-30);
+  });
+
+  it('finds the class wherever the company preference puts it', () => {
+    expect(transactionClass({ ClassRef: { value: 'c1', name: 'SHRC' } })).toBe('SHRC');
+    expect(
+      transactionClass({
+        Line: [{ SalesItemLineDetail: { ClassRef: { value: 'c1', name: 'SHRC' } } }],
+      }),
+    ).toBe('SHRC');
+    expect(
+      transactionClass({
+        Line: [{ AccountBasedExpenseLineDetail: { ClassRef: { value: 'c2', name: 'Claims' } } }],
+      }),
+    ).toBe('Claims');
+
+    // The transaction-level class wins: when a company is set to one class per
+    // whole transaction, that is the answer, not whatever a line happens to say.
+    expect(
+      transactionClass({
+        ClassRef: { value: 'c1', name: 'SHRC' },
+        Line: [{ SalesItemLineDetail: { ClassRef: { value: 'c2', name: 'Claims' } } }],
+      }),
+    ).toBe('SHRC');
+
+    // Two different classes, and nothing at transaction level: no single answer.
+    expect(
+      transactionClass({
+        Line: [
+          { SalesItemLineDetail: { ClassRef: { value: 'c1', name: 'SHRC' } } },
+          { SalesItemLineDetail: { ClassRef: { value: 'c2', name: 'Claims' } } },
+        ],
+      }),
+    ).toBeNull();
+
+    expect(transactionClass({})).toBeNull();
   });
 });
 

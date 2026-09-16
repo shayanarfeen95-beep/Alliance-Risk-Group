@@ -4,7 +4,7 @@ import { eq, sql } from 'drizzle-orm';
 import type { Database } from '@/lib/db/client';
 import * as t from '@/lib/db/schema';
 import { rollUpGl, type ReportingLine } from './rollup';
-import type { RawBatch } from '@/lib/connectors/types';
+import { lastDayOfMonth, type RawBatch } from '@/lib/connectors/types';
 
 /**
  * Landed data -> the warehouse the dashboards read.
@@ -627,9 +627,8 @@ async function conformBalanceSheet(
 /**
  * Days past due -> the five buckets fact_aging carries.
  *
- * The detail report gives an exact day count per transaction, so the bucket is
- * arithmetic rather than a match against a column heading that changes with the
- * company's aging settings.
+ * Arithmetic on a real due date, not a match against a report's column heading —
+ * those headings move with the company's aging settings.
  */
 export function bucketForDaysPastDue(daysPastDue: number): string {
   if (daysPastDue <= 0) return 'current';
@@ -641,64 +640,104 @@ export function bucketForDaysPastDue(daysPastDue: number): string {
 
 const AGING_BUCKETS = ['current', '1_30', '31_60', '61_90', 'over_90'] as const;
 
-/** Locates a detail-report column by role, since the fetch chose the order. */
-function columnIndexByTitle(report: QboReport, candidates: string[]): number | null {
-  const columns = report.Columns?.Column ?? [];
-  const index = columns.findIndex((column) =>
-    candidates.some((candidate) => (column.ColTitle ?? '').trim().toLowerCase().includes(candidate)),
-  );
-  return index === -1 ? null : index;
+/** Whole days between two dates, positive when the first is later. */
+export function daysBetween(later: string, earlier: string): number {
+  const a = Date.parse(`${later}T00:00:00Z`);
+  const b = Date.parse(`${earlier}T00:00:00Z`);
+  if (Number.isNaN(a) || Number.isNaN(b)) return 0;
+  return Math.floor((a - b) / 86_400_000);
+}
+
+interface QboTransaction {
+  Id?: string;
+  DocNumber?: string;
+  Balance?: number | string;
+  DueDate?: string;
+  TxnDate?: string;
+  ClassRef?: { value?: string; name?: string };
+  Line?: Array<{
+    Amount?: number | string;
+    SalesItemLineDetail?: { ClassRef?: { value?: string; name?: string } };
+    AccountBasedExpenseLineDetail?: { ClassRef?: { value?: string; name?: string } };
+    ItemBasedExpenseLineDetail?: { ClassRef?: { value?: string; name?: string } };
+  }>;
 }
 
 /**
- * The aging detail -> A/R and A/P by division and bucket.
+ * The single class a transaction belongs to, or null.
  *
- * The aging SUMMARY report is by customer or vendor and carries no class at all,
- * which is why this was previously landed and left unconformed and the aging
- * view had nothing in it. The detail report returns one open transaction per
- * row, each with its own class, so the division split is QuickBooks' own
- * attribution rather than an allocation invented here.
+ * QuickBooks puts the class in one of two places depending on a company
+ * preference: on the transaction itself when it is set to one class per whole
+ * transaction, or on each line when it is set to one class per line. Both are
+ * read, transaction first.
  *
- * A transaction with no class is counted and reported, never spread across
- * divisions: A/R that belongs to nobody in particular is a bookkeeping fact ARG
- * needs to see, and splitting it would make the "A/R ties to aging" control pass
- * on a fiction.
+ * A transaction whose lines carry DIFFERENT classes returns null rather than
+ * picking one or splitting the balance across them. The line amounts would make
+ * a split look principled, but a part-paid invoice's remaining balance does not
+ * belong to its lines in any proportion QuickBooks knows — the payment was
+ * against the invoice, not against a line. Reporting it beats inventing it.
+ */
+export function transactionClass(transaction: QboTransaction): string | null {
+  const direct = transaction.ClassRef?.name ?? transaction.ClassRef?.value;
+  if (direct) return direct;
+
+  const fromLines = new Set<string>();
+  for (const line of transaction.Line ?? []) {
+    const reference =
+      line.SalesItemLineDetail?.ClassRef ??
+      line.AccountBasedExpenseLineDetail?.ClassRef ??
+      line.ItemBasedExpenseLineDetail?.ClassRef;
+    const name = reference?.name ?? reference?.value;
+    if (name) fromLines.add(name);
+  }
+
+  return fromLines.size === 1 ? [...fromLines][0]! : null;
+}
+
+/**
+ * Open invoices and bills -> A/R and A/P by division and bucket.
+ *
+ * This does not read an aging report, and that is the point. No QuickBooks aging
+ * report carries a class: Intuit's documented column list for the DETAIL report
+ * has no klass_name, and the SUMMARY report is grouped by customer or vendor.
+ * fact_aging is keyed on division, so for as long as the aging came from those
+ * reports it could never be filled — which is exactly what "0 rows" and "came
+ * back without a class column" were saying, twelve months in a row.
+ *
+ * An open transaction carries its own ClassRef, Balance and DueDate, so the
+ * division is QuickBooks' own attribution and the bucket is arithmetic.
+ *
+ * One honest limitation, stated on the run rather than buried: open balances are
+ * as they stand NOW. A past month's aging cannot be reconstructed from them,
+ * because a since-paid invoice no longer has a balance to age. The snapshot is
+ * therefore written against one month — the latest in the window — and not
+ * spread backwards across months it cannot describe.
  */
 async function conformAging(
   db: Database,
   loadRunId: string,
   month: string,
-  report: QboReport,
+  transactions: QboTransaction[],
   lookup: DivisionLookup,
   kind: 'AR' | 'AP',
   notes: string[],
 ): Promise<number> {
   const label = kind === 'AR' ? 'A/R' : 'A/P';
-
-  const classIndex = columnIndexByTitle(report, ['class']);
-  const balanceIndex = columnIndexByTitle(report, ['open balance', 'amount', 'balance']);
-  const pastDueIndex = columnIndexByTitle(report, ['past due', 'days']);
-
-  if (classIndex === null || balanceIndex === null) {
-    notes.push(
-      `The ${label} aging for ${month.slice(0, 7)} came back without a class or an open-balance ` +
-        `column, so it cannot be split by division. It is landed in full and ` +
-        `${kind === 'AR' ? 'DSO' : 'DPO'} reconciles at ARG Total for that month.`,
-    );
-    return 0;
-  }
+  const asOf = lastDayOfMonth(month);
 
   const totals = new Map<string, Map<string, Decimal>>();
   const unmapped = new Set<string>();
   let unclassified = new Decimal(0);
+  let counted = 0;
 
-  for (const { cells } of leafRows(report.Rows?.Row, undefined)) {
-    const value = amount(cells[balanceIndex]);
-    if (value.isZero()) continue;
+  for (const transaction of transactions) {
+    const balance = new Decimal(String(transaction.Balance ?? 0));
+    if (balance.isZero()) continue;
+    counted += 1;
 
-    const className = cells[classIndex]?.value?.trim() ?? '';
+    const className = transactionClass(transaction);
     if (!className) {
-      unclassified = unclassified.plus(value);
+      unclassified = unclassified.plus(balance);
       continue;
     }
 
@@ -708,17 +747,19 @@ async function conformAging(
       continue;
     }
 
-    const parsedDays = Number.parseInt(cells[pastDueIndex ?? -1]?.value ?? '', 10);
-    const bucket = bucketForDaysPastDue(Number.isFinite(parsedDays) ? parsedDays : 0);
+    // A bill with no due date is due on receipt, which is what QuickBooks shows
+    // in its own aging. A missing date is not a reason to call it current.
+    const due = transaction.DueDate ?? transaction.TxnDate ?? asOf;
+    const bucket = bucketForDaysPastDue(daysBetween(asOf, due));
 
     const buckets = totals.get(divisionCode) ?? new Map<string, Decimal>();
-    buckets.set(bucket, (buckets.get(bucket) ?? new Decimal(0)).plus(value));
+    buckets.set(bucket, (buckets.get(bucket) ?? new Decimal(0)).plus(balance));
     totals.set(divisionCode, buckets);
   }
 
   if (unmapped.size) {
     throw new UnmappedSourceDataError(
-      `The ${month.slice(0, 7)} ${label} aging carries classes that map to no division: ` +
+      `Open ${label} transactions carry classes that map to no division: ` +
         `${[...unmapped].join(', ')}. Nothing was written — dropping them would understate ` +
         `${label} for whichever division they belong to. Map them in Admin → Class mapping, or ` +
         `mark them as not belonging to a division.`,
@@ -726,11 +767,18 @@ async function conformAging(
     );
   }
 
+  if (counted === 0) {
+    notes.push(`No open ${label} transactions, so there is nothing to age. That is a real zero.`);
+    return 0;
+  }
+
   if (!unclassified.isZero()) {
     notes.push(
-      `${unclassified.toFixed(2)} of ${label} at ${month.slice(0, 7)} sits on transactions with ` +
-        `no class, so it is absent from the divisional aging and will read as a gap against the ` +
-        `balance sheet. Classing those transactions in QuickBooks closes it.`,
+      `${unclassified.toFixed(2)} of open ${label} sits on transactions with no single class — ` +
+        `either unclassed, or split across classes on their lines. It is absent from the ` +
+        `divisional aging and will read as a gap against the balance sheet. It is never spread ` +
+        `across divisions: the remaining balance of a part-paid invoice does not belong to its ` +
+        `lines in any proportion QuickBooks knows.`,
     );
   }
 
@@ -1726,6 +1774,52 @@ async function conformInTransaction(
   let rowsWritten = 0;
 
   if (batch.sourceSystem === 'QBO') {
+    /**
+     * Aging is a SNAPSHOT, so it is handled before the per-month loop.
+     *
+     * Open balances are as they stand now. A past month's aging cannot be
+     * reconstructed from them — a since-paid invoice has no balance left to age
+     * — so the snapshot is written against one month rather than repeated into
+     * every month of the window, which would state twelve different months of
+     * history that all happen to be today.
+     */
+    if (batch.entity === 'ar_aging' || batch.entity === 'ap_aging') {
+      const kind = batch.entity === 'ar_aging' ? 'AR' : 'AP';
+      const entityName = kind === 'AR' ? 'Invoice' : 'Bill';
+
+      const transactions = batch.records.flatMap((record) => {
+        const payload = record.payload as { QueryResponse?: Record<string, unknown[]> };
+        return (payload.QueryResponse?.[entityName] ?? []) as QboTransaction[];
+      });
+
+      const snapshotMonth = `${batch.window.end.slice(0, 7)}-01`;
+      const closedSnapshot = await ensurePeriods(db, [snapshotMonth]);
+
+      if (closedSnapshot.has(snapshotMonth)) {
+        notes.push(
+          `${snapshotMonth.slice(0, 7)} is closed, so the ${kind === 'AR' ? 'A/R' : 'A/P'} aging ` +
+            `snapshot was not written into it.`,
+        );
+        return { rowsWritten, notes };
+      }
+
+      rowsWritten += await conformAging(
+        db,
+        loadRunId,
+        snapshotMonth,
+        transactions,
+        lookup,
+        kind,
+        notes,
+      );
+      notes.push(
+        `Aged against ${lastDayOfMonth(snapshotMonth)} from ${transactions.length.toLocaleString()} ` +
+          `open ${entityName.toLowerCase()}${transactions.length === 1 ? '' : 's'}. This is today's ` +
+          `position, not a reconstruction of that month.`,
+      );
+      return { rowsWritten, notes };
+    }
+
     // One record per month for the report entities; the month is the record key.
     const months = batch.records.map((record) => record.key).filter((key) => /^\d{4}-\d{2}-\d{2}$/.test(key));
     const closed = months.length ? await ensurePeriods(db, months) : new Set<string>();
@@ -1753,28 +1847,6 @@ async function conformInTransaction(
             record.key,
             record.payload as QboReport,
             lookup,
-          );
-          break;
-        case 'ar_aging':
-          rowsWritten += await conformAging(
-            db,
-            loadRunId,
-            record.key,
-            record.payload as QboReport,
-            lookup,
-            'AR',
-            notes,
-          );
-          break;
-        case 'ap_aging':
-          rowsWritten += await conformAging(
-            db,
-            loadRunId,
-            record.key,
-            record.payload as QboReport,
-            lookup,
-            'AP',
-            notes,
           );
           break;
         case 'accounts':

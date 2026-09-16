@@ -37,25 +37,18 @@ describe('QuickBooks report parameters', () => {
     expect(params.accounting_method).toBe('Accrual');
   });
 
-  it('asks the aging reports as at a date, not over a range', () => {
-    for (const entity of ['ar_aging', 'ap_aging'] as const) {
-      const params = reportParams(REPORT_SPECS[entity]!, '2026-04-01', true);
-
-      expect(params.report_date).toBe('2026-04-30');
-      expect(params.start_date).toBeUndefined();
-      expect(params.end_date).toBeUndefined();
-      // Aging is a position on the ledger; a basis does not apply to it.
-      expect(params.accounting_method).toBeUndefined();
-    }
-  });
-
-  it('asks the aging reports for the class column, since the division depends on it', () => {
-    // The summary aging report carries no class at all. Without this column the
-    // detail report is no better, and fact_aging stays empty.
-    expect(REPORT_SPECS.ar_aging!.report).toBe('AgedReceivableDetail');
-    expect(REPORT_SPECS.ap_aging!.report).toBe('AgedPayableDetail');
-    expect(reportParams(REPORT_SPECS.ar_aging!, '2026-04-01', true).columns).toContain('klass_name');
-    expect(reportParams(REPORT_SPECS.ap_aging!, '2026-04-01', true).columns).toContain('klass_name');
+  it('does not route the aging through a report at all', () => {
+    // No QuickBooks aging report carries a class: Intuit's documented column
+    // list for the DETAIL report has no klass_name, and the SUMMARY report is
+    // grouped by customer or vendor. fact_aging is keyed on division, so an
+    // aging report can never fill it — which is what twelve identical "came
+    // back without a class column" notes and a row count of zero were saying.
+    //
+    // Aging is built from open Invoice and Bill records instead, which do carry
+    // ClassRef. Keeping these out of the report table is what stops anybody
+    // reintroducing an aging report and wondering why the division is empty.
+    expect(REPORT_SPECS.ar_aging).toBeUndefined();
+    expect(REPORT_SPECS.ap_aging).toBeUndefined();
   });
 
   it('drops the class breakdown on the retry, so an unclassed report still loads', () => {

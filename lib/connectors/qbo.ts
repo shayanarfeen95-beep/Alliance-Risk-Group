@@ -34,6 +34,28 @@ function baseUrl(): string {
 }
 
 const ENTITIES: EntityDescriptor[] = [
+  // Reference data first, and that ordering is load-bearing.
+  //
+  // `syncPlan` walks this array in order, so the position of a descriptor IS
+  // the order it is pulled and conformed in. With accounts and classes last,
+  // a single "Pull everything" conformed the balance sheet against whatever
+  // chart of accounts the warehouse happened to be holding, THEN refreshed the
+  // chart — so a newly-seen account failed the balance sheet on every run and
+  // was present by the time anybody looked. That is why the balance sheet kept
+  // reporting accounts "not in the chart of accounts" while the chart itself
+  // showed a healthy row count two lines below it on the same screen.
+  {
+    entity: 'accounts',
+    label: 'Chart of Accounts',
+    cadence: 'WEEKLY',
+    description: 'Reference data. Alerts on new accounts so nothing lands unmapped.',
+  },
+  {
+    entity: 'classes',
+    label: 'Class list',
+    cadence: 'WEEKLY',
+    description: 'Reference data. Alerts on new classes so nothing lands unmapped.',
+  },
   {
     entity: 'profit_and_loss',
     label: 'Profit & Loss by Class, by month',
@@ -57,29 +79,17 @@ const ENTITIES: EntityDescriptor[] = [
   },
   {
     entity: 'ar_aging',
-    label: 'A/R Aging Detail',
+    label: 'A/R Aging (open invoices)',
     cadence: 'DAILY',
     description:
-      'One row per open invoice, with its class and days past due. The detail report is used rather than the summary because the summary is by customer and carries no class, so it can never be split by division.',
+      'Built from the open invoices themselves rather than an aging report: no QuickBooks aging report carries a class, so none of them can be split by division. An invoice carries its own class, balance and due date. A snapshot of today, not a reconstruction of a past month.',
   },
   {
     entity: 'ap_aging',
-    label: 'A/P Aging Detail',
+    label: 'A/P Aging (open bills)',
     cadence: 'DAILY',
     description:
-      'One row per open bill, with its class and days past due. Feeds the DPO reconciliation and the aging view.',
-  },
-  {
-    entity: 'accounts',
-    label: 'Chart of Accounts',
-    cadence: 'WEEKLY',
-    description: 'Reference data. Alerts on new accounts so nothing lands unmapped.',
-  },
-  {
-    entity: 'classes',
-    label: 'Class list',
-    cadence: 'WEEKLY',
-    description: 'Reference data. Alerts on new classes so nothing lands unmapped.',
+      'Built from the open bills themselves, for the same reason as A/R. Feeds the DPO reconciliation and the aging view.',
   },
 ];
 
@@ -116,24 +126,6 @@ const MONTHLY_REPORTS: Record<string, ReportSpec> = {
   // company level as the tie-out against the classed P&L and balance sheet;
   // asking it to summarise by class is what made it fail.
   trial_balance: { report: 'TrialBalance', period: 'range', acceptsBasis: true, acceptsClasses: false },
-  // The DETAIL aging reports, not the summary ones. The summary is by customer
-  // or vendor and carries no class, so it could never be split by division —
-  // which is why fact_aging stayed empty and conform declined to touch it. The
-  // detail report returns one row per open transaction and can carry a class.
-  ar_aging: {
-    report: 'AgedReceivableDetail',
-    period: 'as_of',
-    acceptsBasis: false,
-    acceptsClasses: false,
-    columns: 'klass_name,due_date,past_due,open_balance,txn_type,doc_num,cust_name',
-  },
-  ap_aging: {
-    report: 'AgedPayableDetail',
-    period: 'as_of',
-    acceptsBasis: false,
-    acceptsClasses: false,
-    columns: 'klass_name,due_date,past_due,open_balance,txn_type,doc_num,vend_name',
-  },
 };
 
 /** The query parameters one month of a report actually takes. */
@@ -326,20 +318,37 @@ async function fetchMonthlyReport(
  * losing its tail silently, which is the same class of failure as the active
  * filter and just as hard to notice.
  */
-async function queryAll(entityName: 'Account' | 'Class'): Promise<RawRecord[]> {
+type QueryEntity = 'Account' | 'Class' | 'Invoice' | 'Bill';
+
+const QUERY_ENTITY_TO_ENTITY: Record<QueryEntity, string> = {
+  Account: 'accounts',
+  Class: 'classes',
+  Invoice: 'ar_aging',
+  Bill: 'ap_aging',
+};
+
+async function queryAll(entityName: QueryEntity, where?: string): Promise<RawRecord[]> {
   const pageSize = 1000;
   const records: RawRecord[] = [];
   let startPosition = 1;
 
+  // Reference data must include INACTIVE rows; transactions must not be
+  // filtered on Active at all. A deleted account still carries every balance it
+  // held on earlier balance sheets, so omitting it does not remove it from the
+  // report — only our ability to read one.
+  const clause =
+    where ?? (entityName === 'Account' || entityName === 'Class' ? 'Active in (true, false)' : null);
+
   for (;;) {
     const payload = (await callApi('query', {
       query:
-        `select * from ${entityName} where Active in (true, false) ` +
-        `startposition ${startPosition} maxresults ${pageSize}`,
+        `select * from ${entityName}` +
+        (clause ? ` where ${clause}` : '') +
+        ` startposition ${startPosition} maxresults ${pageSize}`,
     })) as { QueryResponse?: Record<string, unknown[]> };
 
     records.push({
-      entity: entityName === 'Account' ? 'accounts' : 'classes',
+      entity: QUERY_ENTITY_TO_ENTITY[entityName],
       key: `page-${startPosition}`,
       payload,
     });
@@ -367,11 +376,23 @@ export const qboConnector: SourceConnector = {
     let nextCursor: string | null = null;
 
     switch (entity) {
+      // Aging comes from the open transactions themselves, not from an aging
+      // report. Neither AgedReceivables nor AgedReceivableDetail carries a class
+      // column — Intuit's documented column list for the detail report has no
+      // klass_name in it, and the summary report is grouped by customer or
+      // vendor — so no aging report can be split by division, which is what
+      // fact_aging is keyed on. Invoice and Bill both expose ClassRef, Balance
+      // and DueDate, so the division is QuickBooks' own attribution and the
+      // bucket is arithmetic on a real due date.
+      case 'ar_aging':
+        records = await queryAll('Invoice', "Balance > '0'");
+        break;
+      case 'ap_aging':
+        records = await queryAll('Bill', "Balance > '0'");
+        break;
       case 'profit_and_loss':
       case 'balance_sheet':
-      case 'trial_balance':
-      case 'ar_aging':
-      case 'ap_aging': {
+      case 'trial_balance': {
         const spec = MONTHLY_REPORTS[entity]!;
         ({ records, nextCursor } = await fetchMonthlyReport(spec, window, {}, options));
         break;
