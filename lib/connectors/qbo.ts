@@ -10,6 +10,7 @@
  */
 import {
   ConnectorNotConfiguredError,
+  ConnectorRequestError,
   budgetSpent,
   lastDayOfMonth,
   monthsInWindow,
@@ -80,14 +81,85 @@ const ENTITIES: EntityDescriptor[] = [
   },
 ];
 
-/** Which QBO report backs each monthly entity. */
-const MONTHLY_REPORTS: Record<string, string> = {
-  profit_and_loss: 'ProfitAndLoss',
-  balance_sheet: 'BalanceSheet',
-  trial_balance: 'TrialBalance',
-  ar_aging: 'AgedReceivables',
-  ap_aging: 'AgedPayables',
+/**
+ * Which QBO report backs each monthly entity, and the parameters it accepts.
+ *
+ * QuickBooks does NOT take the same query parameters on every report, and it
+ * answers an unsupported one with a 400 rather than ignoring it. Every monthly
+ * report was being sent `summarize_column_by=Classes` and a `start_date`, which
+ * only the P&L and Balance Sheet accept — that is why the balance sheet run
+ * FAILED outright and the trial balance and both aging pulls came back with
+ * nothing to conform. Each report's real parameter shape is declared here
+ * instead of being assumed uniform.
+ */
+interface ReportSpec {
+  report: string;
+  /** A range (P&L, TB) or a position at a date (aging). */
+  period: 'range' | 'as_of';
+  acceptsBasis: boolean;
+  /**
+   * Whether a per-class breakdown may be requested. Requesting one is not the
+   * same as getting one: a company that does not class this report answers with
+   * a single total column, which conform reports rather than mistaking for zero.
+   */
+  acceptsClasses: boolean;
+  /** Explicit column list, for the detail reports that take one. */
+  columns?: string;
+}
+
+const MONTHLY_REPORTS: Record<string, ReportSpec> = {
+  profit_and_loss: { report: 'ProfitAndLoss', period: 'range', acceptsBasis: true, acceptsClasses: true },
+  balance_sheet: { report: 'BalanceSheet', period: 'range', acceptsBasis: true, acceptsClasses: true },
+  // QuickBooks' Trial Balance has no class dimension at all. It is pulled at
+  // company level as the tie-out against the classed P&L and balance sheet;
+  // asking it to summarise by class is what made it fail.
+  trial_balance: { report: 'TrialBalance', period: 'range', acceptsBasis: true, acceptsClasses: false },
+  // The DETAIL aging reports, not the summary ones. The summary is by customer
+  // or vendor and carries no class, so it could never be split by division —
+  // which is why fact_aging stayed empty and conform declined to touch it. The
+  // detail report returns one row per open transaction and can carry a class.
+  ar_aging: {
+    report: 'AgedReceivableDetail',
+    period: 'as_of',
+    acceptsBasis: false,
+    acceptsClasses: false,
+    columns: 'klass_name,due_date,past_due,open_balance,txn_type,doc_num,cust_name',
+  },
+  ap_aging: {
+    report: 'AgedPayableDetail',
+    period: 'as_of',
+    acceptsBasis: false,
+    acceptsClasses: false,
+    columns: 'klass_name,due_date,past_due,open_balance,txn_type,doc_num,vend_name',
+  },
 };
+
+/** The query parameters one month of a report actually takes. */
+export function reportParams(
+  spec: ReportSpec,
+  month: string,
+  withClasses: boolean,
+): Record<string, string> {
+  const monthEnd = lastDayOfMonth(month);
+  const params: Record<string, string> = {};
+
+  if (spec.period === 'range') {
+    params.start_date = month;
+    params.end_date = monthEnd;
+  } else {
+    // Aging is as-at a single date, under a different parameter name entirely.
+    params.report_date = monthEnd;
+  }
+
+  if (spec.columns) params.columns = spec.columns;
+  // Rule 3: ARG reports on the accrual basis. Never mix silently.
+  if (spec.acceptsBasis) params.accounting_method = 'Accrual';
+  if (spec.acceptsClasses && withClasses) params.summarize_column_by = 'Classes';
+
+  return params;
+}
+
+export const REPORT_SPECS = MONTHLY_REPORTS;
 
 interface TokenCache {
   accessToken: string;
@@ -195,9 +267,14 @@ async function callApi(path: string, params: Record<string, string>): Promise<un
  * QBO's report API summarises by month OR by class, not both in one call, so
  * classed monthly figures come from one call per month. That is more requests
  * but it is the only shape that yields a division dimension.
+ *
+ * A classed request that fails is retried once, unclassed. That is open item 1
+ * behaving as documented rather than as an outage: a company that does not class
+ * its balance sheet gets ARG Total figures and a conform note, where before the
+ * entity simply FAILED and the balance sheet never loaded at all.
  */
 async function fetchMonthlyReport(
-  reportName: string,
+  spec: ReportSpec,
   window: FetchWindow,
   extraParams: Record<string, string> = {},
   options?: FetchOptions,
@@ -214,15 +291,22 @@ async function fetchMonthlyReport(
 
   for (let i = from; i < months.length; i++) {
     const month = months[i]!;
-    const payload = await callApi(`reports/${reportName}`, {
-      start_date: month,
-      end_date: lastDayOfMonth(month),
-      // Rule 3: ARG reports on the accrual basis. Never mix silently.
-      accounting_method: 'Accrual',
-      summarize_column_by: 'Classes',
-      ...extraParams,
-    });
-    records.push({ entity: reportName, key: month, payload });
+
+    let payload: unknown;
+    try {
+      payload = await callApi(`reports/${spec.report}`, {
+        ...reportParams(spec, month, true),
+        ...extraParams,
+      });
+    } catch (error) {
+      if (!spec.acceptsClasses || !(error instanceof ConnectorRequestError)) throw error;
+      payload = await callApi(`reports/${spec.report}`, {
+        ...reportParams(spec, month, false),
+        ...extraParams,
+      });
+    }
+
+    records.push({ entity: spec.report, key: month, payload });
 
     const next = months[i + 1];
     if (next && budgetSpent(options, records.length)) return { records, nextCursor: next };
@@ -251,8 +335,8 @@ export const qboConnector: SourceConnector = {
       case 'trial_balance':
       case 'ar_aging':
       case 'ap_aging': {
-        const report = MONTHLY_REPORTS[entity]!;
-        ({ records, nextCursor } = await fetchMonthlyReport(report, window, {}, options));
+        const spec = MONTHLY_REPORTS[entity]!;
+        ({ records, nextCursor } = await fetchMonthlyReport(spec, window, {}, options));
         break;
       }
       case 'accounts':

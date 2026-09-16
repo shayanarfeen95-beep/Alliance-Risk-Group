@@ -597,6 +597,141 @@ async function conformBalanceSheet(
 }
 
 // ---------------------------------------------------------------------------
+// QuickBooks — A/R and A/P aging
+// ---------------------------------------------------------------------------
+
+/**
+ * Days past due -> the five buckets fact_aging carries.
+ *
+ * The detail report gives an exact day count per transaction, so the bucket is
+ * arithmetic rather than a match against a column heading that changes with the
+ * company's aging settings.
+ */
+export function bucketForDaysPastDue(daysPastDue: number): string {
+  if (daysPastDue <= 0) return 'current';
+  if (daysPastDue <= 30) return '1_30';
+  if (daysPastDue <= 60) return '31_60';
+  if (daysPastDue <= 90) return '61_90';
+  return 'over_90';
+}
+
+const AGING_BUCKETS = ['current', '1_30', '31_60', '61_90', 'over_90'] as const;
+
+/** Locates a detail-report column by role, since the fetch chose the order. */
+function columnIndexByTitle(report: QboReport, candidates: string[]): number | null {
+  const columns = report.Columns?.Column ?? [];
+  const index = columns.findIndex((column) =>
+    candidates.some((candidate) => (column.ColTitle ?? '').trim().toLowerCase().includes(candidate)),
+  );
+  return index === -1 ? null : index;
+}
+
+/**
+ * The aging detail -> A/R and A/P by division and bucket.
+ *
+ * The aging SUMMARY report is by customer or vendor and carries no class at all,
+ * which is why this was previously landed and left unconformed and the aging
+ * view had nothing in it. The detail report returns one open transaction per
+ * row, each with its own class, so the division split is QuickBooks' own
+ * attribution rather than an allocation invented here.
+ *
+ * A transaction with no class is counted and reported, never spread across
+ * divisions: A/R that belongs to nobody in particular is a bookkeeping fact ARG
+ * needs to see, and splitting it would make the "A/R ties to aging" control pass
+ * on a fiction.
+ */
+async function conformAging(
+  db: Database,
+  loadRunId: string,
+  month: string,
+  report: QboReport,
+  lookup: DivisionLookup,
+  kind: 'AR' | 'AP',
+  notes: string[],
+): Promise<number> {
+  const label = kind === 'AR' ? 'A/R' : 'A/P';
+
+  const classIndex = columnIndexByTitle(report, ['class']);
+  const balanceIndex = columnIndexByTitle(report, ['open balance', 'amount', 'balance']);
+  const pastDueIndex = columnIndexByTitle(report, ['past due', 'days']);
+
+  if (classIndex === null || balanceIndex === null) {
+    notes.push(
+      `The ${label} aging for ${month.slice(0, 7)} came back without a class or an open-balance ` +
+        `column, so it cannot be split by division. It is landed in full and ` +
+        `${kind === 'AR' ? 'DSO' : 'DPO'} reconciles at ARG Total for that month.`,
+    );
+    return 0;
+  }
+
+  const totals = new Map<string, Map<string, Decimal>>();
+  const unmapped = new Set<string>();
+  let unclassified = new Decimal(0);
+
+  for (const { cells } of leafRows(report.Rows?.Row, undefined)) {
+    const value = amount(cells[balanceIndex]);
+    if (value.isZero()) continue;
+
+    const className = cells[classIndex]?.value?.trim() ?? '';
+    if (!className) {
+      unclassified = unclassified.plus(value);
+      continue;
+    }
+
+    const divisionCode = resolveDivision(lookup, undefined, className);
+    if (!divisionCode) {
+      if (!isExcluded(lookup, undefined, className)) unmapped.add(className);
+      continue;
+    }
+
+    const parsedDays = Number.parseInt(cells[pastDueIndex ?? -1]?.value ?? '', 10);
+    const bucket = bucketForDaysPastDue(Number.isFinite(parsedDays) ? parsedDays : 0);
+
+    const buckets = totals.get(divisionCode) ?? new Map<string, Decimal>();
+    buckets.set(bucket, (buckets.get(bucket) ?? new Decimal(0)).plus(value));
+    totals.set(divisionCode, buckets);
+  }
+
+  if (unmapped.size) {
+    throw new UnmappedSourceDataError(
+      `The ${month.slice(0, 7)} ${label} aging carries classes that map to no division: ` +
+        `${[...unmapped].join(', ')}. Nothing was written — dropping them would understate ` +
+        `${label} for whichever division they belong to. Map them in Admin → Class mapping, or ` +
+        `mark them as not belonging to a division.`,
+      [...unmapped],
+    );
+  }
+
+  if (!unclassified.isZero()) {
+    notes.push(
+      `${unclassified.toFixed(2)} of ${label} at ${month.slice(0, 7)} sits on transactions with ` +
+        `no class, so it is absent from the divisional aging and will read as a gap against the ` +
+        `balance sheet. Classing those transactions in QuickBooks closes it.`,
+    );
+  }
+
+  // The month is replaced wholesale for this kind, so a bucket that emptied
+  // since the last pull goes to zero rather than leaving its old figure standing.
+  await db
+    .delete(t.factAging)
+    .where(sql`${t.factAging.periodMonth} = ${month} and ${t.factAging.kind} = ${kind}`);
+
+  const rows = [...totals].flatMap(([divisionCode, buckets]) =>
+    AGING_BUCKETS.map((bucket) => ({
+      periodMonth: month,
+      divisionCode,
+      kind,
+      bucket,
+      amount: n(buckets.get(bucket) ?? new Decimal(0)),
+      loadRunId,
+    })),
+  );
+
+  if (rows.length) await db.insert(t.factAging).values(rows);
+  return rows.length;
+}
+
+// ---------------------------------------------------------------------------
 // QuickBooks — reference data
 // ---------------------------------------------------------------------------
 
@@ -1528,6 +1663,28 @@ async function conformInTransaction(
             lookup,
           );
           break;
+        case 'ar_aging':
+          rowsWritten += await conformAging(
+            db,
+            loadRunId,
+            record.key,
+            record.payload as QboReport,
+            lookup,
+            'AR',
+            notes,
+          );
+          break;
+        case 'ap_aging':
+          rowsWritten += await conformAging(
+            db,
+            loadRunId,
+            record.key,
+            record.payload as QboReport,
+            lookup,
+            'AP',
+            notes,
+          );
+          break;
         case 'accounts':
           rowsWritten += await conformAccounts(db, record.payload as QboQueryResponse);
           break;
@@ -1543,10 +1700,10 @@ async function conformInTransaction(
           break;
         }
         default:
-          // Trial balance and the aging reports are landed and kept, but they
-          // are not conformed: the aging reports carry no class dimension, and
-          // fact_aging is per division. Saying so is better than writing an
-          // ARG-Total row the schema forbids or splitting one on a guess.
+          // The trial balance is landed and kept but not conformed: QuickBooks
+          // gives it no class dimension at all, so it produces no divisional
+          // rows. It is the company-level tie-out against the classed P&L and
+          // balance sheet, which is what the audit pack uses it for.
           notes.push(
             `${batch.entity.replace(/_/g, ' ')} was landed in full and is available in the audit ` +
               `pack, but it is not yet conformed into a fact table.`,

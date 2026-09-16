@@ -81,6 +81,9 @@ that looks live is worse than no dashboard.
 | Load stuck in `RUNNING` | Process died mid-run | The run is not committed — facts are written in one transaction. Mark it failed and re-run. |
 | `division sums do not tie to ARG Total` | A division row is missing for the period | Check the load covered all four divisions. ARG Total is computed, so a missing division silently shrinks it — this control is what catches that. |
 | `balance sheet does not balance` | Equity moved without a matching entry | Equity is loaded from QBO and never plugged. This is a real accounting question for Westport, not a system fault. |
+| `came back with no class columns` on the balance sheet | ARG does not class its balance sheet (open item 1) | Turn on class tracking for the balance sheet in QuickBooks, or set `BALANCE_SHEET_CLASSED` to false so DSO, DPO, CCC and Cash Runway label themselves as ARG Total rather than showing empty division rows. The pull no longer fails outright over this — it retries unclassed and says what it got. |
+| `X of A/R sits on transactions with no class` | Invoices or bills booked without a class | Class them in QuickBooks. Until then that balance is absent from the divisional aging and reads as a gap against the balance sheet. It is never spread across divisions — that would make the "A/R ties to aging" control pass on a fiction. |
+| `trial balance … not yet conformed into a fact table` | Expected | QuickBooks gives the trial balance no class dimension, so it produces no divisional rows. It is landed in full and carried in the audit pack as the company-level tie-out. Not a fault. |
 
 ### Rolling back a load
 

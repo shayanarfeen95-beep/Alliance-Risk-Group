@@ -16,7 +16,12 @@ import Decimal from 'decimal.js';
 import { and, eq } from 'drizzle-orm';
 import { createTestDb, type TestDb } from './helpers/db';
 import { seedDatabase } from '@/lib/seed/load';
-import { conformBatch, findSheetTable, parseMonthHeader } from '@/lib/etl/conform';
+import {
+  bucketForDaysPastDue,
+  conformBatch,
+  findSheetTable,
+  parseMonthHeader,
+} from '@/lib/etl/conform';
 import * as t from '@/lib/db/schema';
 import type { RawBatch } from '@/lib/connectors/types';
 
@@ -192,6 +197,144 @@ describe('QuickBooks profit and loss', () => {
 
     expect(outcome.notes.join(' ')).toMatch(/closed/i);
     expect(after[0]?.revenue).toBe(before[0]?.revenue);
+  });
+});
+
+/**
+ * The aging DETAIL report: one row per open transaction, each carrying its own
+ * class and day count. The SUMMARY report ARG was pulling before is by customer
+ * or vendor and carries neither, which is why fact_aging stayed empty and
+ * conform declined to touch it.
+ */
+function agingDetailReport(rows: Array<{ klass: string; pastDue: string; balance: string }>) {
+  return {
+    Header: { ReportName: 'AgedReceivableDetail', StartPeriod: MONTH, EndPeriod: '2026-05-31' },
+    Columns: {
+      Column: [
+        { ColTitle: 'Transaction Type', ColType: 'String' },
+        { ColTitle: 'Class', ColType: 'String' },
+        { ColTitle: 'Past Due', ColType: 'String' },
+        { ColTitle: 'Open Balance', ColType: 'Money' },
+      ],
+    },
+    Rows: {
+      Row: rows.map((row) => ({
+        type: 'Data',
+        ColData: [
+          { value: 'Invoice' },
+          { value: row.klass },
+          { value: row.pastDue },
+          { value: row.balance },
+        ],
+      })),
+    },
+  };
+}
+
+describe('QuickBooks aging', () => {
+  it('buckets open transactions by days past due, per division', async () => {
+    const outcome = await conformBatch(
+      harness.db,
+      null as never,
+      batch(
+        'ar_aging',
+        agingDetailReport([
+          { klass: 'SHRC', pastDue: '0', balance: '10000.00' },
+          { klass: 'SHRC', pastDue: '15', balance: '4000.00' },
+          { klass: 'SHRC', pastDue: '95', balance: '2500.00' },
+          { klass: 'Claims', pastDue: '45', balance: '7000.00' },
+        ]),
+      ),
+    );
+
+    // Five buckets for each of two divisions.
+    expect(outcome.rowsWritten).toBe(10);
+
+    const rows = await harness.db
+      .select()
+      .from(t.factAging)
+      .where(and(eq(t.factAging.periodMonth, MONTH), eq(t.factAging.kind, 'AR')));
+
+    const shrc = new Map(
+      rows.filter((row) => row.divisionCode === 'SHRC').map((row) => [row.bucket, row.amount]),
+    );
+    expect(new Decimal(shrc.get('current')!).toFixed(2)).toBe('10000.00');
+    expect(new Decimal(shrc.get('1_30')!).toFixed(2)).toBe('4000.00');
+    expect(new Decimal(shrc.get('over_90')!).toFixed(2)).toBe('2500.00');
+
+    // Written as an explicit zero. Omitting the row would leave whatever the
+    // previous pull wrote standing, which reads as ageing debt that is gone.
+    expect(new Decimal(shrc.get('61_90')!).toFixed(2)).toBe('0.00');
+
+    const claims = rows.filter((row) => row.divisionCode === 'CLAIMS');
+    expect(new Decimal(claims.find((row) => row.bucket === '31_60')!.amount).toFixed(2)).toBe(
+      '7000.00',
+    );
+  });
+
+  it('reports unclassed A/R as a gap rather than spreading it across divisions', async () => {
+    const outcome = await conformBatch(
+      harness.db,
+      null as never,
+      batch(
+        'ar_aging',
+        agingDetailReport([
+          { klass: 'SHRC', pastDue: '10', balance: '5000.00' },
+          { klass: '', pastDue: '20', balance: '3300.00' },
+        ]),
+      ),
+    );
+
+    const rows = await harness.db
+      .select()
+      .from(t.factAging)
+      .where(and(eq(t.factAging.periodMonth, MONTH), eq(t.factAging.kind, 'AR')));
+
+    const total = rows.reduce((acc, row) => acc.plus(row.amount), new Decimal(0));
+    expect(total.toFixed(2)).toBe('5000.00');
+    expect(outcome.notes.some((note) => note.includes('3300.00'))).toBe(true);
+  });
+
+  it('refuses a class that maps to no division rather than dropping its balance', async () => {
+    await expect(
+      conformBatch(
+        harness.db,
+        null as never,
+        batch('ar_aging', agingDetailReport([{ klass: 'Marine Salvage', pastDue: '5', balance: '900.00' }])),
+      ),
+    ).rejects.toThrow(/Marine Salvage/);
+  });
+
+  it('replaces a month wholesale, so a bucket that emptied reads as zero', async () => {
+    await conformBatch(
+      harness.db,
+      null as never,
+      batch('ar_aging', agingDetailReport([{ klass: 'SHRC', pastDue: '95', balance: '8000.00' }])),
+    );
+    await conformBatch(
+      harness.db,
+      null as never,
+      batch('ar_aging', agingDetailReport([{ klass: 'SHRC', pastDue: '5', balance: '1000.00' }])),
+    );
+
+    const rows = await harness.db
+      .select()
+      .from(t.factAging)
+      .where(and(eq(t.factAging.periodMonth, MONTH), eq(t.factAging.kind, 'AR')));
+
+    const byBucket = new Map(rows.map((row) => [row.bucket, row.amount]));
+    expect(new Decimal(byBucket.get('over_90')!).toFixed(2)).toBe('0.00');
+    expect(new Decimal(byBucket.get('1_30')!).toFixed(2)).toBe('1000.00');
+  });
+
+  it('puts each day count in the bucket a person would expect', () => {
+    expect(bucketForDaysPastDue(0)).toBe('current');
+    expect(bucketForDaysPastDue(-3)).toBe('current');
+    expect(bucketForDaysPastDue(1)).toBe('1_30');
+    expect(bucketForDaysPastDue(30)).toBe('1_30');
+    expect(bucketForDaysPastDue(31)).toBe('31_60');
+    expect(bucketForDaysPastDue(90)).toBe('61_90');
+    expect(bucketForDaysPastDue(91)).toBe('over_90');
   });
 });
 
