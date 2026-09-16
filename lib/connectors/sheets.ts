@@ -90,12 +90,111 @@ async function accessToken(): Promise<string> {
   return json.access_token;
 }
 
-/** Named ranges, configurable so a sheet rename is not a deploy. */
-const RANGES: Record<string, string> = {
-  monthly_budget: process.env.SHEETS_RANGE_MONTHLY_BUDGET ?? 'Monthly Budget!A1:Z200',
-  tenx_budget: process.env.SHEETS_RANGE_TENX_BUDGET ?? '10X Budget!A1:Z200',
-  headcount: process.env.SHEETS_RANGE_HEADCOUNT ?? 'Headcount!A1:Z200',
+/**
+ * An explicit range per entity, when somebody has set one.
+ *
+ * Left unset — which is the normal case — the tab is FOUND rather than assumed.
+ * Assuming was the whole bug: all three entities returned nothing because the
+ * spreadsheet's tabs are not called "Monthly Budget", "10X Budget" and
+ * "Headcount", and a range naming a tab that does not exist comes back as an
+ * empty result rather than as an error. Three empty imports, no reason given,
+ * for months.
+ */
+const EXPLICIT_RANGES: Record<string, string | undefined> = {
+  monthly_budget: process.env.SHEETS_RANGE_MONTHLY_BUDGET,
+  tenx_budget: process.env.SHEETS_RANGE_TENX_BUDGET,
+  headcount: process.env.SHEETS_RANGE_HEADCOUNT,
 };
+
+/**
+ * What a tab has to look like to be the one, in order of confidence.
+ *
+ * Matched against the real tab names read from the spreadsheet, so a tab called
+ * "FY26 Budget", "Monthly budget " or "BUDGET" all land on the right entity
+ * without anybody editing an environment variable. The order matters: "10X"
+ * is checked before the generic budget terms, because a sheet containing both
+ * must not have its 10X plan loaded as the operating budget.
+ */
+const TAB_PATTERNS: Record<string, RegExp[]> = {
+  tenx_budget: [/\b10\s*x\b/i, /\bten\s*x\b/i, /growth\s*plan/i],
+  monthly_budget: [/monthly\s*budget/i, /\bbudget\b/i, /\bplan\b/i],
+  headcount: [/head\s*count/i, /\bfte\b/i, /employees?/i, /staff/i],
+};
+
+export interface SheetTab {
+  title: string;
+}
+
+/** The spreadsheet's real tab names. */
+export async function listTabs(spreadsheetId: string): Promise<string[]> {
+  const credential = await loadCredential('SHEETS');
+  if (!credential) throw new ConnectorNotConfiguredError('SHEETS');
+
+  const path = `/v4/spreadsheets/${spreadsheetId}`;
+  const query = { fields: 'sheets.properties.title' };
+
+  if (credential.authMethod === 'COMPOSIO') {
+    const connectedAccountId = credential.data.connectedAccountId;
+    if (!connectedAccountId) throw new ConnectorNotConfiguredError('SHEETS');
+
+    const json = await proxy<{ sheets?: Array<{ properties?: { title?: string } }> }>({
+      connectedAccountId,
+      endpoint: path,
+      method: 'GET',
+      query,
+      headers: { accept: 'application/json' },
+    });
+    return (json.sheets ?? []).map((sheet) => sheet.properties?.title ?? '').filter(Boolean);
+  }
+
+  const url = new URL(`https://sheets.googleapis.com${path}`);
+  url.searchParams.set('fields', query.fields);
+
+  const response = await requestWithRetry(
+    url.toString(),
+    { headers: { Authorization: `Bearer ${await accessToken()}` } },
+    'SHEETS',
+  );
+  const json = (await response.json()) as { sheets?: Array<{ properties?: { title?: string } }> };
+  return (json.sheets ?? []).map((sheet) => sheet.properties?.title ?? '').filter(Boolean);
+}
+
+/**
+ * The tab an entity should read, chosen from the tabs that actually exist.
+ *
+ * Returns null rather than falling back to a guess, so the caller can say which
+ * tabs it did find. "No tab matched, and here are the seven that exist" is a
+ * problem somebody can fix in a minute; "that range came back empty" is not.
+ */
+export function matchTab(entity: string, tabs: string[]): string | null {
+  const patterns = TAB_PATTERNS[entity] ?? [];
+
+  // Claimed by a more specific entity: a tab matching 10X must never also be
+  // taken as the monthly budget.
+  const claimedByOther = (tab: string) =>
+    Object.entries(TAB_PATTERNS).some(
+      ([other, otherPatterns]) =>
+        other !== entity &&
+        TAB_PRIORITY.indexOf(other) < TAB_PRIORITY.indexOf(entity) &&
+        otherPatterns.some((pattern) => pattern.test(tab)),
+    );
+
+  for (const pattern of patterns) {
+    const hit = tabs.find((tab) => pattern.test(tab) && !claimedByOther(tab));
+    if (hit) return hit;
+  }
+  return null;
+}
+
+/** Most specific first. A tab is offered to each entity in this order. */
+const TAB_PRIORITY = ['tenx_budget', 'headcount', 'monthly_budget'];
+
+/** A whole tab. Columns are bounded generously; empty ones cost nothing. */
+function rangeForTab(tab: string): string {
+  // Single quotes are the A1 escape for a tab name containing spaces, and a
+  // literal quote inside the name is escaped by doubling it.
+  return `'${tab.replace(/'/g, "''")}'!A1:ZZ2000`;
+}
 
 /**
  * One range, however the connection was authorised.
@@ -157,13 +256,49 @@ export const sheetsConnector: SourceConnector = {
 
   async fetch(entity: string, window: FetchWindow): Promise<RawBatch> {
     if (!(await sheetsConnector.isConfigured())) throw new ConnectorNotConfiguredError('SHEETS');
-
-    const range = RANGES[entity];
-    if (!range) throw new Error(`Unknown Sheets entity "${entity}".`);
+    if (!ENTITIES.some((descriptor) => descriptor.entity === entity)) {
+      throw new Error(`Unknown Sheets entity "${entity}".`);
+    }
 
     const spreadsheetId = (await loadCredential('SHEETS'))?.data.spreadsheetId;
     if (!spreadsheetId) throw new ConnectorNotConfiguredError('SHEETS');
+
+    let range = EXPLICIT_RANGES[entity];
+    let tabs: string[] = [];
+
+    if (!range) {
+      tabs = await listTabs(spreadsheetId);
+      const tab = matchTab(entity, tabs);
+
+      if (!tab) {
+        // Naming the tabs that DO exist is the whole point. Anybody can fix a
+        // wrong tab name in seconds once they can see the list.
+        throw new Error(
+          `No tab in the connected spreadsheet looks like "${entity.replace(/_/g, ' ')}". ` +
+            `The tabs it has are: ${tabs.length ? tabs.join(', ') : '(none)'}. ` +
+            `Rename the right one, or set ${
+              entity === 'monthly_budget'
+                ? 'SHEETS_RANGE_MONTHLY_BUDGET'
+                : entity === 'tenx_budget'
+                  ? 'SHEETS_RANGE_TENX_BUDGET'
+                  : 'SHEETS_RANGE_HEADCOUNT'
+            } to an explicit A1 range.`,
+        );
+      }
+      range = rangeForTab(tab);
+    }
+
     const values = await readRange(spreadsheetId, range);
+
+    if (values.length === 0) {
+      throw new Error(
+        `The range ${range} exists but holds no rows. ` +
+          (tabs.length ? `Tabs in this spreadsheet: ${tabs.join(', ')}. ` : '') +
+          `Nothing was written — an empty budget and a budget that failed to load must not look ` +
+          `the same on a variance chart.`,
+      );
+    }
+
     const records: RawRecord[] = [{ entity, key: range, payload: { range, values } }];
 
     // One range, one request. There is nothing here to slice, so a Sheets

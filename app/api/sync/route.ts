@@ -91,9 +91,25 @@ export async function POST(request: Request) {
 
 type Db = Awaited<ReturnType<typeof getDb>>;
 
+/** A YYYY-MM or YYYY-MM-DD the caller supplied, normalised to a first-of-month. */
+function asMonth(value: string | undefined): string | null {
+  if (!value) return null;
+  const match = /^(\d{4})-(\d{2})/.exec(value.trim());
+  if (!match) return null;
+  const month = Number(match[2]);
+  if (month < 1 || month > 12) return null;
+  return `${match[1]}-${match[2]}-01`;
+}
+
 async function plan(
   db: Db,
-  body: { sources?: SourceSystemCode[]; months?: number; fullRefresh?: boolean },
+  body: {
+    sources?: SourceSystemCode[];
+    months?: number;
+    fullRefresh?: boolean;
+    windowStart?: string;
+    windowEnd?: string;
+  },
 ) {
   /**
    * How far back to fetch, ending at the month we are actually in.
@@ -130,7 +146,49 @@ async function plan(
   // Twelve, not three. A first load of a year of books is the common case, and
   // three months was not enough to fill a single trailing-twelve chart.
   const months = Math.min(Math.max(body.months ?? 12, 1), 36);
-  const windowStart = shiftMonths(windowEnd, -(months - 1));
+  const trailingStart = shiftMonths(windowEnd, -(months - 1));
+
+  /**
+   * An explicit range wins over the trailing window.
+   *
+   * "The last twelve months" answers the routine case and nothing else. Loading
+   * 2024 to compare against 2025, re-pulling one month somebody restated, or
+   * reaching back further than the 36-month cap all need a start and an end,
+   * and none of them should require a redeploy or a config edit.
+   *
+   * Both ends are validated and ordered here rather than trusted: a reversed
+   * range would otherwise enumerate no months and report a successful pull that
+   * fetched nothing, which is the failure mode this whole screen exists to make
+   * impossible.
+   */
+  const explicitStart = asMonth(body.windowStart);
+  const explicitEnd = asMonth(body.windowEnd);
+
+  let rangeStart = trailingStart;
+  let rangeEnd = windowEnd;
+
+  if (explicitStart || explicitEnd) {
+    rangeStart = explicitStart ?? explicitEnd!;
+    rangeEnd = explicitEnd ?? explicitStart!;
+    if (rangeStart > rangeEnd) [rangeStart, rangeEnd] = [rangeEnd, rangeStart];
+
+    // The same 36-month ceiling the trailing window has. A pull of ten years of
+    // monthly reports is hundreds of QuickBooks calls and will not finish; a
+    // refusal that says so beats a run that dies part way with no explanation.
+    const span = monthSpan(rangeStart, rangeEnd);
+    if (span > 36) {
+      return {
+        ok: false,
+        error:
+          `That range covers ${span} months. The most that can be pulled in one run is 36 — ` +
+          `QuickBooks is fetched one report per month, and a longer run does not finish. ` +
+          `Pull it in a few passes; each one keeps what it loaded.`,
+      };
+    }
+  }
+
+  const windowStart = rangeStart;
+  const windowEndResolved = rangeEnd;
 
   // A full re-import is the watermarks being cleared, once, before the first
   // slice — not a flag every slice has to carry and could disagree about.
@@ -151,8 +209,8 @@ async function plan(
     ok: true,
     mode: 'plan' as const,
     windowStart,
-    windowEnd,
-    window: `${windowStart.slice(0, 7)} → ${windowEnd.slice(0, 7)}`,
+    windowEnd: windowEndResolved,
+    window: `${windowStart.slice(0, 7)} → ${windowEndResolved.slice(0, 7)}`,
     /**
      * What the window actually constrains, which is not the same for every
      * source. QuickBooks is fetched one report per month, so the window is a
@@ -234,4 +292,11 @@ function shiftMonths(month: string, delta: number): string {
   const [year, monthOfYear] = month.split('-').map(Number) as [number, number];
   const shifted = new Date(Date.UTC(year, monthOfYear - 1 + delta, 1));
   return `${shifted.getUTCFullYear()}-${String(shifted.getUTCMonth() + 1).padStart(2, '0')}-01`;
+}
+
+/** Months covered by an inclusive first-of-month range, counting both ends. */
+function monthSpan(start: string, end: string): number {
+  const [startYear, startMonth] = start.split('-').map(Number) as [number, number];
+  const [endYear, endMonth] = end.split('-').map(Number) as [number, number];
+  return (endYear - startYear) * 12 + (endMonth - startMonth) + 1;
 }

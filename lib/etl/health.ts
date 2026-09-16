@@ -45,10 +45,33 @@ export interface DataHealth {
   storedPayloads: number;
 }
 
-/** Which fact table each entity fills, so "did it land" is answerable. */
-const ROW_SOURCE: Record<string, () => { table: string; column?: string }> = {
+/**
+ * Entities that deliberately fill no fact table.
+ *
+ * Without this, the trial balance reads "the pull succeeded but wrote no rows —
+ * the source has nothing for this window", which is false twice over: the source
+ * has plenty, and nothing was ever going to be written. A panel that reports a
+ * design decision as a data problem sends somebody hunting for a bug that is not
+ * there, and it did.
+ */
+const REFERENCE_ONLY: Record<string, string> = {
+  'QBO:trial_balance':
+    'Landed in full and carried in the audit pack, but not conformed into a fact table: ' +
+    'QuickBooks gives the trial balance no class dimension, so it has no divisional rows to ' +
+    'write. It is the company-level tie-out against the classed P&L. Working as intended.',
+};
+
+/**
+ * Which fact table each entity fills, so "did it land" is answerable.
+ *
+ * `kind` narrows a table two entities share: A/R and A/P both write fact_aging,
+ * and counting the whole table would show A/P as loaded the moment A/R landed.
+ */
+const ROW_SOURCE: Record<string, () => { table: string; column?: string; kind?: string }> = {
   'QBO:profit_and_loss': () => ({ table: 'fact_pl_actual' }),
   'QBO:balance_sheet': () => ({ table: 'fact_bs_actual' }),
+  'QBO:ar_aging': () => ({ table: 'fact_aging', kind: 'AR' }),
+  'QBO:ap_aging': () => ({ table: 'fact_aging', kind: 'AP' }),
   'QBO:accounts': () => ({ table: 'dim_account' }),
   'QBO:classes': () => ({ table: 'dim_class_map' }),
   'HUBSPOT:deals': () => ({ table: 'fact_deal' }),
@@ -123,6 +146,11 @@ export async function loadDataHealth(db: Database): Promise<DataHealth> {
       } else if (run.status === 'FAILED') {
         state = 'BLOCKED';
         detail = run.error?.slice(0, 300) ?? 'The last pull failed and gave no reason.';
+      } else if (REFERENCE_ONLY[key]) {
+        // Reported against the entity's own purpose rather than against a row
+        // count it was never going to have.
+        state = 'LOADED';
+        detail = REFERENCE_ONLY[key]!;
       } else if (rows === 0) {
         state = 'EMPTY';
         detail =
@@ -162,7 +190,14 @@ async function countRows(db: Database, key: string): Promise<number> {
   if (!target) return 0;
 
   try {
-    const where = target.column ? sql` where ${sql.raw(target.column)} is not null` : sql``;
+    // The kind is a fixed literal from the table above, never user input, but it
+    // is still bound rather than interpolated so this cannot become an injection
+    // site if somebody later makes it dynamic.
+    const where = target.column
+      ? sql` where ${sql.raw(target.column)} is not null`
+      : target.kind
+        ? sql` where kind = ${target.kind}`
+        : sql``;
     const result = await db.execute(
       sql`select count(*)::int as n from ${sql.raw(target.table)}${where}`,
     );

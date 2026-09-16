@@ -528,6 +528,7 @@ async function conformBalanceSheet(
   );
 
   const totals = new Map<string, Record<string, Decimal>>();
+  const missing: string[] = [];
   const unclassified: string[] = [];
 
   for (const { cells } of leafRows(report.Rows?.Row, undefined)) {
@@ -535,10 +536,20 @@ async function conformBalanceSheet(
     if (!label) continue;
 
     const accountId = cells[0]?.id?.trim() || label;
-    const line = accounts.get(accountId)?.balanceSheetLine;
+    const known = accounts.get(accountId);
+    const line = known?.balanceSheetLine;
 
     if (!line || !(line in BALANCE_SHEET_FIELDS)) {
-      if (!accounts.has(accountId)) unclassified.push(label);
+      // Both cases carry money and both were losing it, but they have different
+      // fixes, so they are reported separately rather than as one count. An
+      // account present with no line used to be skipped in silence, which meant
+      // its balance simply left the building — the exact failure the account
+      // that IS missing is loudly protected against.
+      const balances = columns.map((column) => amount(cells[column.index]));
+      if (balances.every((value) => value.isZero())) continue;
+
+      if (!known) missing.push(`${label} (id ${accountId})`);
+      else unclassified.push(`${accountId} ${known.accountName}`);
       continue;
     }
 
@@ -553,13 +564,26 @@ async function conformBalanceSheet(
     }
   }
 
+  if (missing.length) {
+    throw new UnmappedSourceDataError(
+      `${missing.length} account${missing.length === 1 ? '' : 's'} carrying a balance in ` +
+        `${month.slice(0, 7)} ${missing.length === 1 ? 'is' : 'are'} not in the chart of accounts: ` +
+        `${missing.slice(0, 8).join('; ')}${missing.length > 8 ? '; …' : ''}. ` +
+        `Nothing was written. Pull "Chart of Accounts" first — it now includes deleted accounts, ` +
+        `which still carry the balances they held on earlier balance sheets.`,
+    );
+  }
+
   if (unclassified.length) {
     throw new UnmappedSourceDataError(
       `${unclassified.length} balance-sheet account${unclassified.length === 1 ? '' : 's'} in ` +
-        `${month.slice(0, 7)} have no balance_sheet_line in dim_account: ` +
+        `${month.slice(0, 7)} have no balance_sheet_line: ` +
         `${unclassified.slice(0, 8).join('; ')}${unclassified.length > 8 ? '; …' : ''}. ` +
         `Nothing was written — an unclassified balance would silently understate cash, ` +
-        `receivables or payables, and DSO, DPO, CCC and Cash Runway all read from them.`,
+        `receivables or payables, and DSO, DPO, CCC and Cash Runway all read from them. ` +
+        `Most accounts map themselves from their QuickBooks type on the next chart-of-accounts ` +
+        `pull; one that does not has an account type the mapping does not cover, and needs a line ` +
+        `set in dim_account.`,
     );
   }
 
@@ -757,16 +781,63 @@ interface QboQueryResponse {
  * Westport has deliberately tagged as a payroll memo line must stay that way
  * through every subsequent refresh.
  */
+/**
+ * QuickBooks' AccountType -> the balance-sheet grouping fact_bs_actual carries.
+ *
+ * This is not a guess and it is not a Westport decision. QuickBooks makes every
+ * account declare exactly one of these types, and each one has a single sensible
+ * home among the nine columns. Leaving them NULL and waiting for somebody to map
+ * 150 accounts by hand is what blocked the balance sheet for months: the P&L
+ * side has always derived its reporting line from QuickBooks' own classification
+ * in this very function, and holding the balance sheet to a stricter standard
+ * bought nothing except an empty Finance dashboard.
+ *
+ * What remains a real decision is still respected: a line somebody has set is
+ * never overwritten, so an account Westport deliberately regroups stays put.
+ */
+const ACCOUNT_TYPE_TO_BALANCE_SHEET_LINE: Record<string, string> = {
+  bank: 'cash',
+  'accounts receivable': 'accounts_receivable',
+  'other current asset': 'other_current_assets',
+  'fixed asset': 'fixed_assets',
+  // QuickBooks' "Other Asset" is non-current, and fixed_assets is the only
+  // non-current asset column the schema has. Grouping it there keeps total
+  // assets right, which is what the balance check and Cash Runway read.
+  'other asset': 'fixed_assets',
+  'accounts payable': 'accounts_payable',
+  'credit card': 'cc_liability',
+  'other current liability': 'other_current_liabilities',
+  'long term liability': 'lt_liabilities',
+  equity: 'shareholder_equity',
+};
+
+/** The balance-sheet line implied by an account's QuickBooks type, if any. */
+export function balanceSheetLineFor(accountType: string | undefined): string | null {
+  const key = (accountType ?? '').trim().toLowerCase();
+  return ACCOUNT_TYPE_TO_BALANCE_SHEET_LINE[key] ?? null;
+}
+
+/**
+ * The chart of accounts.
+ *
+ * New accounts land with both lines derived from QuickBooks' own classification.
+ * Existing accounts are left alone EXCEPT where a line is still NULL, which is
+ * filled in — that backfill is what unblocks a warehouse whose accounts were
+ * loaded before this mapping existed, without touching a single mapping anybody
+ * has actually made.
+ */
 async function conformAccounts(db: Database, payload: QboQueryResponse): Promise<number> {
   const accounts = payload.QueryResponse?.Account ?? [];
   if (!accounts.length) return 0;
 
-  const existing = new Set((await db.select({ id: t.dimAccount.accountId }).from(t.dimAccount)).map((row) => row.id));
+  const existing = new Map(
+    (await db.select().from(t.dimAccount)).map((row) => [row.accountId, row]),
+  );
 
   let written = 0;
   for (const account of accounts) {
     const accountId = account.Id?.trim();
-    if (!accountId || existing.has(accountId)) continue;
+    if (!accountId) continue;
 
     const classification = (account.Classification ?? '').toLowerCase();
     const accountType =
@@ -788,6 +859,32 @@ async function conformAccounts(db: Database, payload: QboQueryResponse): Promise
     // margin is wrong on every division, in every month.
     const isCogs = (account.AccountType ?? '').toLowerCase().includes('cost of goods');
 
+    const reportingLine =
+      accountType === 'INCOME'
+        ? 'revenue'
+        : isCogs
+          ? 'cogs'
+          : accountType === 'EXPENSE'
+            ? 'opex'
+            : null;
+
+    const balanceSheetLine = balanceSheetLineFor(account.AccountType);
+
+    const known = existing.get(accountId);
+
+    if (known) {
+      // Only ever fills a hole. A line already set — by Westport, by an earlier
+      // load, by hand — is left exactly as it is.
+      const fills: Record<string, unknown> = {};
+      if (!known.reportingLine && reportingLine) fills.reportingLine = reportingLine;
+      if (!known.balanceSheetLine && balanceSheetLine) fills.balanceSheetLine = balanceSheetLine;
+      if (Object.keys(fills).length === 0) continue;
+
+      await db.update(t.dimAccount).set(fills).where(eq(t.dimAccount.accountId, accountId));
+      written += 1;
+      continue;
+    }
+
     await db
       .insert(t.dimAccount)
       .values({
@@ -795,17 +892,12 @@ async function conformAccounts(db: Database, payload: QboQueryResponse): Promise
         accountNumber: account.AcctNum ?? null,
         accountName: account.Name ?? accountId,
         accountType: isCogs ? 'COGS' : accountType,
-        // Balance-sheet accounts are deliberately left unmapped: which grouping
-        // a given asset belongs to is a Westport decision, and the balance-sheet
-        // conform refuses to run rather than guessing it.
-        reportingLine:
-          accountType === 'INCOME'
-            ? 'revenue'
-            : isCogs
-              ? 'cogs'
-              : accountType === 'EXPENSE'
-                ? 'opex'
-                : null,
+        reportingLine,
+        balanceSheetLine,
+        // An inactive account still carries every balance it ever held, so it is
+        // loaded and marked inactive rather than skipped. Skipping it does not
+        // remove it from a prior balance sheet — it only removes our ability to
+        // read one.
         isActive: account.Active ?? true,
       })
       .onConflictDoNothing();
@@ -1789,9 +1881,12 @@ async function conformInTransaction(
     const values = payload?.values ?? [];
 
     if (!values.length) {
+      const range = (batch.records[0]?.payload as { range?: string } | undefined)?.range;
       throw new UnmappedSourceDataError(
-        'That range came back empty. Nothing was written — an empty budget and a budget that ' +
-          'failed to load look identical on a variance chart.',
+        `The range ${range ?? 'requested'} came back empty. Nothing was written — an empty budget ` +
+          `and a budget that failed to load look identical on a variance chart. The connector ` +
+          `picks the tab from the spreadsheet's real tab names, so an empty result here means the ` +
+          `tab it matched genuinely has no rows, not that the tab is missing.`,
       );
     }
 

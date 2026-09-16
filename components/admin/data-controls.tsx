@@ -82,6 +82,20 @@ export function DataControls(props: DataControlsProps) {
   const [windowApplies, setWindowApplies] = useState(false);
   const [reconciliation, setReconciliation] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+
+  /**
+   * How far the next pull reaches.
+   *
+   * "Last 12 months" answers the routine refresh and nothing else. Comparing
+   * 2024 against 2025, re-pulling a single month somebody restated, or reaching
+   * further back than a year all need a start and an end — and needing a
+   * redeploy for that is why months of books sat unfetched.
+   */
+  const [rangeMode, setRangeMode] = useState<'trailing' | 'year' | 'custom'>('trailing');
+  const [trailingMonths, setTrailingMonths] = useState(12);
+  const [year, setYear] = useState(() => new Date().getFullYear());
+  const [fromMonth, setFromMonth] = useState(() => currentMonth(-11));
+  const [toMonth, setToMonth] = useState(() => currentMonth(0));
   const cancelled = useRef(false);
 
   // A pull that is still running when the panel unmounts must stop driving, or
@@ -106,6 +120,19 @@ export function DataControls(props: DataControlsProps) {
 
   const connected = props.connectedSources.filter((source) => source.connected);
 
+  /** The window the plan step is asked for, in the shape the route expects. */
+  function requestedWindow(): Record<string, unknown> {
+    switch (rangeMode) {
+      case 'year':
+        return { windowStart: `${year}-01`, windowEnd: `${year}-12` };
+      case 'custom':
+        return { windowStart: fromMonth, windowEnd: toMonth };
+      case 'trailing':
+      default:
+        return { months: trailingMonths };
+    }
+  }
+
   async function sync(sources?: string[], fullRefresh = false) {
     cancelled.current = false;
     setBusy(true);
@@ -116,7 +143,12 @@ export function DataControls(props: DataControlsProps) {
 
     try {
       // --- What is there to pull? ----------------------------------------
-      const planned = (await post({ mode: 'plan', sources, fullRefresh })) as {
+      const planned = (await post({
+        mode: 'plan',
+        sources,
+        fullRefresh,
+        ...requestedWindow(),
+      })) as {
         ok: boolean;
         error?: string;
         window?: string;
@@ -311,6 +343,120 @@ export function DataControls(props: DataControlsProps) {
           )}
         </div>
 
+        {props.canManage && (
+          <div
+            className="mt-3 rounded-[5px] border p-3"
+            style={{ borderColor: 'var(--border)', background: 'var(--surface-2)' }}
+          >
+            <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+              <span className="text-[11.5px] font-medium">Months to pull</span>
+
+              <div className="flex flex-wrap gap-1">
+                {(
+                  [
+                    ['trailing', 'Recent'],
+                    ['year', 'A year'],
+                    ['custom', 'Custom range'],
+                  ] as const
+                ).map(([mode, label]) => (
+                  <button
+                    key={mode}
+                    type="button"
+                    onClick={() => setRangeMode(mode)}
+                    disabled={busy}
+                    className="rounded-[4px] border px-2 py-0.5 text-[11px] font-medium transition-colors disabled:opacity-40"
+                    style={{
+                      borderColor: rangeMode === mode ? 'var(--text-primary)' : 'var(--border)',
+                      background: rangeMode === mode ? 'var(--text-primary)' : 'transparent',
+                      color: rangeMode === mode ? 'var(--text-inverse)' : 'var(--text-secondary)',
+                    }}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+
+              {rangeMode === 'trailing' && (
+                <label className="flex items-center gap-1.5 text-[11px] text-[var(--text-secondary)]">
+                  Last
+                  <select
+                    value={trailingMonths}
+                    onChange={(event) => setTrailingMonths(Number(event.target.value))}
+                    disabled={busy}
+                    className="rounded-[4px] border px-1.5 py-0.5 text-[11px]"
+                    style={{ borderColor: 'var(--border)', background: 'var(--surface-1)' }}
+                  >
+                    {[3, 6, 12, 18, 24, 36].map((count) => (
+                      <option key={count} value={count}>
+                        {count}
+                      </option>
+                    ))}
+                  </select>
+                  months, ending this month
+                </label>
+              )}
+
+              {rangeMode === 'year' && (
+                <label className="flex items-center gap-1.5 text-[11px] text-[var(--text-secondary)]">
+                  Calendar year
+                  <select
+                    value={year}
+                    onChange={(event) => setYear(Number(event.target.value))}
+                    disabled={busy}
+                    className="rounded-[4px] border px-1.5 py-0.5 text-[11px]"
+                    style={{ borderColor: 'var(--border)', background: 'var(--surface-1)' }}
+                  >
+                    {Array.from({ length: 8 }, (_, index) => new Date().getFullYear() - index).map(
+                      (option) => (
+                        <option key={option} value={option}>
+                          {option}
+                        </option>
+                      ),
+                    )}
+                  </select>
+                  (January to December)
+                </label>
+              )}
+
+              {rangeMode === 'custom' && (
+                <div className="flex flex-wrap items-center gap-1.5 text-[11px] text-[var(--text-secondary)]">
+                  From
+                  <input
+                    type="month"
+                    value={fromMonth}
+                    max={toMonth}
+                    onChange={(event) => setFromMonth(event.target.value)}
+                    disabled={busy}
+                    className="rounded-[4px] border px-1.5 py-0.5 text-[11px]"
+                    style={{ borderColor: 'var(--border)', background: 'var(--surface-1)' }}
+                  />
+                  to
+                  <input
+                    type="month"
+                    value={toMonth}
+                    min={fromMonth}
+                    onChange={(event) => setToMonth(event.target.value)}
+                    disabled={busy}
+                    className="rounded-[4px] border px-1.5 py-0.5 text-[11px]"
+                    style={{ borderColor: 'var(--border)', background: 'var(--surface-1)' }}
+                  />
+                  <span className="text-[var(--text-muted)]">
+                    inclusive, up to 36 months in one run
+                  </span>
+                </div>
+              )}
+            </div>
+
+            {/* The same caveat the window label carries, said where the choice is
+                made rather than after the pull has already run. */}
+            <p className="mt-2 text-[10.5px] leading-relaxed text-[var(--text-muted)]">
+              This limits <strong>QuickBooks</strong>, which is fetched one report per month.
+              HubSpot is fetched by object and filtered on modification time, and Sheets reads whole
+              tabs, so neither is narrowed by these months.
+            </p>
+          </div>
+        )}
+
         <div className="mt-3 flex flex-wrap gap-2">
           {props.connectedSources.map((source) => (
             <button
@@ -449,4 +595,11 @@ function StepIcon({ state }: { state: StepState }) {
 
 function pause(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** A YYYY-MM string, offset from the current month. */
+function currentMonth(delta: number): string {
+  const now = new Date();
+  const shifted = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + delta, 1));
+  return `${shifted.getUTCFullYear()}-${String(shifted.getUTCMonth() + 1).padStart(2, '0')}`;
 }

@@ -17,6 +17,7 @@ import { and, eq } from 'drizzle-orm';
 import { createTestDb, type TestDb } from './helpers/db';
 import { seedDatabase } from '@/lib/seed/load';
 import {
+  balanceSheetLineFor,
   bucketForDaysPastDue,
   conformBatch,
   findSheetTable,
@@ -230,6 +231,166 @@ function agingDetailReport(rows: Array<{ klass: string; pastDue: string; balance
     },
   };
 }
+
+describe('the chart of accounts', () => {
+  /**
+   * The balance sheet was blocked for months, and this is why.
+   *
+   * Every asset, liability and equity account loaded with a NULL
+   * balance_sheet_line, on the principle that the grouping was a Westport
+   * decision. But the P&L side of this very function has always derived its
+   * reporting line from QuickBooks' own Classification — so the balance sheet
+   * was being held to a stricter standard, and the cost was an empty Finance
+   * dashboard and a reconciliation control listing 150 unmapped account ids.
+   *
+   * QuickBooks makes every account declare exactly one AccountType, and each has
+   * a single sensible home. Deriving it is reading the source, not guessing.
+   */
+  it('maps every QuickBooks balance-sheet type to a line', () => {
+    expect(balanceSheetLineFor('Bank')).toBe('cash');
+    expect(balanceSheetLineFor('Accounts Receivable')).toBe('accounts_receivable');
+    expect(balanceSheetLineFor('Other Current Asset')).toBe('other_current_assets');
+    expect(balanceSheetLineFor('Fixed Asset')).toBe('fixed_assets');
+    expect(balanceSheetLineFor('Accounts Payable')).toBe('accounts_payable');
+    expect(balanceSheetLineFor('Credit Card')).toBe('cc_liability');
+    expect(balanceSheetLineFor('Other Current Liability')).toBe('other_current_liabilities');
+    expect(balanceSheetLineFor('Long Term Liability')).toBe('lt_liabilities');
+    expect(balanceSheetLineFor('Equity')).toBe('shareholder_equity');
+  });
+
+  it('leaves profit-and-loss types without a balance-sheet line', () => {
+    // A revenue account on the balance sheet would be a real problem, and
+    // silently giving it a line is how that problem would stay hidden.
+    expect(balanceSheetLineFor('Income')).toBeNull();
+    expect(balanceSheetLineFor('Expense')).toBeNull();
+    expect(balanceSheetLineFor('Cost of Goods Sold')).toBeNull();
+    expect(balanceSheetLineFor(undefined)).toBeNull();
+    expect(balanceSheetLineFor('Something QuickBooks Invented Later')).toBeNull();
+  });
+
+  it('loads deleted accounts and fills a line they never had', async () => {
+    // A deleted account still carries every balance it ever held on prior
+    // balance sheets. Omitting it does not remove it from the report — it only
+    // removes our ability to read one, which is what
+    // "27 balance-sheet accounts … (deleted)" was.
+    const payload = {
+      QueryResponse: {
+        Account: [
+          {
+            Id: 'TEST-BANK-1',
+            Name: 'Avvocato Checking - 6544 (deleted)',
+            AcctNum: '1099',
+            Classification: 'Asset',
+            AccountType: 'Bank',
+            Active: false,
+          },
+          {
+            Id: 'TEST-CC-1',
+            Name: 'PS American Express (deleted)',
+            Classification: 'Liability',
+            AccountType: 'Credit Card',
+            Active: false,
+          },
+        ],
+      },
+    };
+
+    await conformBatch(harness.db, null as never, batch('accounts', payload, 'all'));
+
+    const rows = await harness.db
+      .select()
+      .from(t.dimAccount)
+      .where(eq(t.dimAccount.accountId, 'TEST-BANK-1'));
+
+    expect(rows[0]?.balanceSheetLine).toBe('cash');
+    expect(rows[0]?.accountType).toBe('ASSET');
+    expect(rows[0]?.isActive).toBe(false);
+
+    const card = await harness.db
+      .select()
+      .from(t.dimAccount)
+      .where(eq(t.dimAccount.accountId, 'TEST-CC-1'));
+    expect(card[0]?.balanceSheetLine).toBe('cc_liability');
+  });
+
+  it('backfills a line on an account already loaded without one', async () => {
+    // The warehouse is full of accounts loaded before this mapping existed.
+    // They have to heal on the next pull, or the fix only helps a fresh install.
+    await harness.db.insert(t.dimAccount).values({
+      accountId: 'TEST-STALE-1',
+      accountName: 'Operating Cash (loaded earlier)',
+      accountType: 'ASSET',
+      reportingLine: null,
+      balanceSheetLine: null,
+    });
+
+    await conformBatch(
+      harness.db,
+      null as never,
+      batch(
+        'accounts',
+        {
+          QueryResponse: {
+            Account: [
+              {
+                Id: 'TEST-STALE-1',
+                Name: 'Operating Cash (loaded earlier)',
+                Classification: 'Asset',
+                AccountType: 'Bank',
+              },
+            ],
+          },
+        },
+        'all',
+      ),
+    );
+
+    const [row] = await harness.db
+      .select()
+      .from(t.dimAccount)
+      .where(eq(t.dimAccount.accountId, 'TEST-STALE-1'));
+    expect(row?.balanceSheetLine).toBe('cash');
+  });
+
+  it('never overwrites a mapping somebody made', async () => {
+    // An account Westport deliberately regrouped must survive every later pull.
+    // A backfill that overwrites is worse than one that never runs.
+    await harness.db.insert(t.dimAccount).values({
+      accountId: 'TEST-DECIDED-1',
+      accountName: 'Escrow Holdings',
+      accountType: 'ASSET',
+      balanceSheetLine: 'other_current_assets',
+    });
+
+    await conformBatch(
+      harness.db,
+      null as never,
+      batch(
+        'accounts',
+        {
+          QueryResponse: {
+            Account: [
+              {
+                Id: 'TEST-DECIDED-1',
+                Name: 'Escrow Holdings',
+                Classification: 'Asset',
+                // QuickBooks says Bank; a person said otherwise, and wins.
+                AccountType: 'Bank',
+              },
+            ],
+          },
+        },
+        'all',
+      ),
+    );
+
+    const [row] = await harness.db
+      .select()
+      .from(t.dimAccount)
+      .where(eq(t.dimAccount.accountId, 'TEST-DECIDED-1'));
+    expect(row?.balanceSheetLine).toBe('other_current_assets');
+  });
+});
 
 describe('QuickBooks aging', () => {
   it('buckets open transactions by days past due, per division', async () => {

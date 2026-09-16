@@ -50,22 +50,24 @@ const ENTITIES: EntityDescriptor[] = [
   },
   {
     entity: 'trial_balance',
-    label: 'Trial Balance (account level)',
+    label: 'Trial Balance (company level)',
     cadence: 'ON_CLOSE',
     description:
-      'Account-level detail. Enables drill-down, the self-generating audit pack, and variance commentary that can say why a line moved.',
+      'QuickBooks gives the trial balance no class dimension, so it produces no divisional rows by design. It is landed in full as the company-level tie-out against the classed P&L and balance sheet, and carried in the audit pack. Account-level detail BY division comes from the classed P&L.',
   },
   {
     entity: 'ar_aging',
-    label: 'A/R Aging Summary',
+    label: 'A/R Aging Detail',
     cadence: 'DAILY',
-    description: 'Feeds the aging view and the DSO reconciliation.',
+    description:
+      'One row per open invoice, with its class and days past due. The detail report is used rather than the summary because the summary is by customer and carries no class, so it can never be split by division.',
   },
   {
     entity: 'ap_aging',
-    label: 'A/P Aging Summary',
+    label: 'A/P Aging Detail',
     cadence: 'DAILY',
-    description: 'Feeds the DPO reconciliation.',
+    description:
+      'One row per open bill, with its class and days past due. Feeds the DPO reconciliation and the aging view.',
   },
   {
     entity: 'accounts',
@@ -315,6 +317,41 @@ async function fetchMonthlyReport(
   return { records, nextCursor: null };
 }
 
+/**
+ * Every row of a QuickBooks entity, active and inactive, across all pages.
+ *
+ * `Active in (true, false)` is the documented way to stop QuickBooks filtering
+ * to active rows. Paging by STARTPOSITION matters at ARG's size: 314 accounts
+ * fits one page today, but a chart of accounts that grows past 1000 would start
+ * losing its tail silently, which is the same class of failure as the active
+ * filter and just as hard to notice.
+ */
+async function queryAll(entityName: 'Account' | 'Class'): Promise<RawRecord[]> {
+  const pageSize = 1000;
+  const records: RawRecord[] = [];
+  let startPosition = 1;
+
+  for (;;) {
+    const payload = (await callApi('query', {
+      query:
+        `select * from ${entityName} where Active in (true, false) ` +
+        `startposition ${startPosition} maxresults ${pageSize}`,
+    })) as { QueryResponse?: Record<string, unknown[]> };
+
+    records.push({
+      entity: entityName === 'Account' ? 'accounts' : 'classes',
+      key: `page-${startPosition}`,
+      payload,
+    });
+
+    const returned = (payload.QueryResponse?.[entityName] ?? []).length;
+    if (returned < pageSize) break;
+    startPosition += pageSize;
+  }
+
+  return records;
+}
+
 export const qboConnector: SourceConnector = {
   sourceSystem: 'QBO',
   label: 'QuickBooks Online',
@@ -339,23 +376,20 @@ export const qboConnector: SourceConnector = {
         ({ records, nextCursor } = await fetchMonthlyReport(spec, window, {}, options));
         break;
       }
+      // Reference data is paged and includes INACTIVE records.
+      //
+      // QuickBooks' query language filters to active rows unless told otherwise,
+      // and `maxresults 1000` silently truncates beyond the first page. Both
+      // defaults were wrong here in the same way: a deleted account still
+      // carries its historical balances on every prior balance sheet, so
+      // omitting it does not remove it from the report — it removes it from
+      // dim_account and blocks the month. That is what "27 balance-sheet
+      // accounts have no balance_sheet_line … (deleted)" was.
       case 'accounts':
-        records = [
-          {
-            entity: 'accounts',
-            key: 'all',
-            payload: await callApi('query', { query: 'select * from Account maxresults 1000' }),
-          },
-        ];
+        records = await queryAll('Account');
         break;
       case 'classes':
-        records = [
-          {
-            entity: 'classes',
-            key: 'all',
-            payload: await callApi('query', { query: 'select * from Class maxresults 1000' }),
-          },
-        ];
+        records = await queryAll('Class');
         break;
       default:
         throw new Error(`Unknown QBO entity "${entity}".`);
