@@ -1477,9 +1477,125 @@ export function parseMonthHeader(value: unknown): string | null {
   return null;
 }
 
+/**
+ * Is this row a HEADER, or a row of data that happens to contain a keyword?
+ *
+ * ARG's sheet is why this exists. Its layout is one row per month per division,
+ * with a "Row Type" column whose value is literally "Division". The old detector
+ * looked for any cell matching /^div(ision)?$/ and found it — in the DATA. It
+ * then scanned that data row for month columns, hit the Excel serial in "Month
+ * Start" and the raw figures, and read revenue and headcount numbers as dates.
+ *
+ * A header row is mostly words. Requiring that is what stops a data row being
+ * mistaken for one, and it is checked before anything else is believed.
+ */
+function looksLikeHeaderRow(row: string[]): boolean {
+  const filled = row.map((cell) => String(cell ?? '').trim()).filter(Boolean);
+  if (filled.length < 2) return false;
+
+  const numeric = filled.filter((cell) => /^[$(]?-?[\d,.]+%?\)?$/.test(cell)).length;
+  // A header may legitimately carry a year or a date as a column title, so this
+  // is a majority test rather than an absolute one.
+  return numeric * 2 < filled.length;
+}
+
+/** A column whose header names one of the five reporting concepts. */
+const LONG_VALUE_COLUMNS: Array<{ line: 'revenue' | 'cogs' | 'opex'; pattern: RegExp }> = [
+  { line: 'revenue', pattern: /^revenue\b/i },
+  { line: 'cogs', pattern: /^(cogs|cost of (goods|sales))\b/i },
+  { line: 'opex', pattern: /^(opex|operating expenses?)\b/i },
+];
+
+export interface LongSheetTable {
+  headerIndex: number;
+  monthColumn: number;
+  yearColumn: number | null;
+  divisionColumn: number;
+  rowTypeColumn: number | null;
+  /** Reporting line -> the column carrying its figure. */
+  valueColumns: Array<{ line: 'revenue' | 'cogs' | 'opex'; index: number }>;
+  headcountColumn: number | null;
+}
+
+/**
+ * The LONG layout: one row per month per division, values across the columns.
+ *
+ * This is the shape ARG's connector workbook actually uses, and the shape a
+ * spreadsheet ends up in whenever somebody maintains it as a list rather than a
+ * grid. It is detected before the wide layout because a long sheet also contains
+ * a Division column, so the wide detector would half-match it and read the wrong
+ * cells — which is exactly what happened.
+ */
+export function findLongSheetTable(values: string[][]): LongSheetTable | null {
+  for (let index = 0; index < Math.min(values.length, 15); index++) {
+    const row = (values[index] ?? []).map((cell) => String(cell ?? '').trim());
+    if (!looksLikeHeaderRow(row)) continue;
+
+    const lowered = row.map((cell) => cell.toLowerCase());
+
+    const divisionColumn = lowered.findIndex((cell) => /^div(ision)?$/.test(cell));
+    if (divisionColumn === -1) continue;
+
+    // A month column names the month, rather than being one month's figures.
+    const monthColumn = lowered.findIndex((cell) => /^(month|period|month name)$/.test(cell));
+    if (monthColumn === -1) continue;
+
+    const yearColumn = lowered.findIndex((cell) => /^(year|fiscal year|fy)$/.test(cell));
+    const rowTypeColumn = lowered.findIndex((cell) => /^(row ?type|type|level)$/.test(cell));
+
+    const valueColumns = LONG_VALUE_COLUMNS.flatMap(({ line, pattern }) => {
+      const column = row.findIndex((cell) => pattern.test(cell));
+      return column === -1 ? [] : [{ line, index: column }];
+    });
+
+    const headcountColumn = row.findIndex((cell) => /^head\s*count\b|^fte\b/i.test(cell));
+
+    if (!valueColumns.length && headcountColumn === -1) continue;
+
+    return {
+      headerIndex: index,
+      monthColumn,
+      yearColumn: yearColumn === -1 ? null : yearColumn,
+      divisionColumn,
+      rowTypeColumn: rowTypeColumn === -1 ? null : rowTypeColumn,
+      valueColumns,
+      headcountColumn: headcountColumn === -1 ? null : headcountColumn,
+    };
+  }
+
+  return null;
+}
+
+/**
+ * A month from a name plus a year held in a separate column.
+ *
+ * "JAN" alone is not a month — it is a month NAME. Pairing it with the Year
+ * column is what makes it one, and refusing to guess the year is what stops a
+ * 2026 budget quietly loading against the current calendar year.
+ */
+export function monthFromNameAndYear(name: unknown, year: unknown): string | null {
+  const text = String(name ?? '').trim();
+  const yearText = String(year ?? '').trim();
+  if (!text || !/^\d{4}$/.test(yearText)) return null;
+
+  const months = [
+    'jan', 'feb', 'mar', 'apr', 'may', 'jun',
+    'jul', 'aug', 'sep', 'oct', 'nov', 'dec',
+  ];
+  const index = months.indexOf(text.slice(0, 3).toLowerCase());
+  if (index === -1) return null;
+
+  return `${yearText}-${String(index + 1).padStart(2, '0')}-01`;
+}
+
 export function findSheetTable(values: string[][]): SheetTable | null {
   for (let index = 0; index < Math.min(values.length, 10); index++) {
     const row = values[index] ?? [];
+    // Checked first: a data row carrying the word "Division" in a Row Type
+    // column is not a header, and believing it was is what read ARG's revenue
+    // figures as dates.
+    if (!looksLikeHeaderRow(row.map((cell) => String(cell ?? '')))) continue;
+
     const lowered = row.map((cell) => String(cell ?? '').trim().toLowerCase());
 
     const divisionColumn = lowered.findIndex((cell) => /^div(ision)?$/.test(cell));
@@ -1494,7 +1610,9 @@ export function findSheetTable(values: string[][]): SheetTable | null {
       if (month) months.push({ index: columnIndex, month });
     });
 
-    if (months.length) {
+    // Two months, not one. A single "month" in a header row is far more often a
+    // stray year or an id than a genuine one-month report.
+    if (months.length >= 2) {
       return { headerIndex: index, divisionColumn, lineItemColumn, months };
     }
   }
@@ -1519,18 +1637,74 @@ async function conformBudget(
   values: string[][],
   lookup: DivisionLookup,
 ): Promise<{ written: number; notes: string[] }> {
-  const table = findSheetTable(values);
-  if (!table) {
-    throw new UnmappedSourceDataError(
-      'That sheet has no header row naming a Division column and at least one month column, so ' +
-        'it could not be read. Nothing was written. The expected shape is one row per division ' +
-        'and line item, with a column per month.',
-    );
-  }
-
   const rows: Array<{ periodMonth: string; divisionCode: string; lineItem: 'revenue' | 'cogs' | 'opex'; amount: Decimal }> = [];
   const unmappedDivisions = new Set<string>();
   const unmappedLines = new Set<string>();
+
+  /**
+   * The LONG layout is tried first, and ARG's workbook is in it: one row per
+   * month per division, Revenue / COGS / OpEx across the columns.
+   *
+   * Order matters. A long sheet also has a Division column, so the wide detector
+   * half-matches it and then reads whichever numeric cells happen to sit in the
+   * serial-date range as months — which is how revenue figures became dates.
+   */
+  const longTable = findLongSheetTable(values);
+
+  if (longTable) {
+    for (let index = longTable.headerIndex + 1; index < values.length; index++) {
+      const row = values[index] ?? [];
+
+      // A "Total" row is a rollup of the divisions beside it. Loading it would
+      // double every figure; §3 says ARG Total is computed, never stored.
+      const rowType =
+        longTable.rowTypeColumn === null
+          ? ''
+          : String(row[longTable.rowTypeColumn] ?? '').trim().toLowerCase();
+      if (rowType && rowType !== 'division') continue;
+
+      const divisionLabel = String(row[longTable.divisionColumn] ?? '').trim();
+      if (!divisionLabel) continue;
+
+      const divisionCode = lookup.byKey.get(divisionLabel.toLowerCase());
+      if (!divisionCode) {
+        if (!/^(arg[\s_-]*total|total|consolidated)$/i.test(divisionLabel)) {
+          unmappedDivisions.add(divisionLabel);
+        }
+        continue;
+      }
+
+      const periodMonth =
+        monthFromNameAndYear(
+          row[longTable.monthColumn],
+          longTable.yearColumn === null ? null : row[longTable.yearColumn],
+        ) ?? parseMonthHeader(row[longTable.monthColumn]);
+
+      if (!periodMonth) continue;
+
+      for (const column of longTable.valueColumns) {
+        const raw = String(row[column.index] ?? '').replace(/[$,\s]/g, '');
+        if (!raw) continue;
+        rows.push({
+          periodMonth,
+          divisionCode,
+          lineItem: column.line,
+          amount: new Decimal(raw || '0'),
+        });
+      }
+    }
+  }
+
+  const table = longTable ? null : findSheetTable(values);
+  if (!longTable && !table) {
+    throw new UnmappedSourceDataError(
+      'That sheet has no header row this can read. Nothing was written. Two shapes are ' +
+        'understood: one row per month per division with Revenue/COGS/OpEx columns, or a grid ' +
+        'with Division and Line Item columns and one column per month.',
+    );
+  }
+
+  if (table) {
 
   for (let index = table.headerIndex + 1; index < values.length; index++) {
     const row = values[index] ?? [];
@@ -1565,6 +1739,7 @@ async function conformBudget(
         amount: new Decimal(raw || '0'),
       });
     }
+  }
   }
 
   if (!rows.length) {
@@ -1640,27 +1815,63 @@ async function conformHeadcount(
   values: string[][],
   lookup: DivisionLookup,
 ): Promise<number> {
-  const table = findSheetTable(values);
-  if (!table) {
+  const rows: Array<{ periodMonth: string; divisionCode: string; headcount: string }> = [];
+
+  // The LONG layout first, for the same reason as the budget: a long sheet has a
+  // Division column too, so the wide detector half-matches it and then reads a
+  // headcount figure that happens to fall in the serial-date range as a month.
+  const longTable = findLongSheetTable(values);
+
+  if (longTable && longTable.headcountColumn !== null) {
+    for (let index = longTable.headerIndex + 1; index < values.length; index++) {
+      const row = values[index] ?? [];
+
+      const rowType =
+        longTable.rowTypeColumn === null
+          ? ''
+          : String(row[longTable.rowTypeColumn] ?? '').trim().toLowerCase();
+      if (rowType && rowType !== 'division') continue;
+
+      const divisionCode = lookup.byKey.get(
+        String(row[longTable.divisionColumn] ?? '').trim().toLowerCase(),
+      );
+      if (!divisionCode) continue;
+
+      const periodMonth =
+        monthFromNameAndYear(
+          row[longTable.monthColumn],
+          longTable.yearColumn === null ? null : row[longTable.yearColumn],
+        ) ?? parseMonthHeader(row[longTable.monthColumn]);
+      if (!periodMonth) continue;
+
+      const raw = String(row[longTable.headcountColumn] ?? '').replace(/[,\s]/g, '');
+      if (!raw) continue;
+      rows.push({ periodMonth, divisionCode, headcount: new Decimal(raw).toFixed(2) });
+    }
+  }
+
+  const table = longTable ? null : findSheetTable(values);
+  if (!longTable && !table) {
     throw new UnmappedSourceDataError(
-      'The headcount sheet has no header row naming a Division column and at least one month ' +
-        'column, so it could not be read. Nothing was written.',
+      'The headcount sheet has no header row this can read. Nothing was written. Two shapes are ' +
+        'understood: one row per month per division with a Headcount column, or a grid with a ' +
+        'Division column and one column per month.',
     );
   }
 
-  const rows: Array<{ periodMonth: string; divisionCode: string; headcount: string }> = [];
+  if (table) {
+    for (let index = table.headerIndex + 1; index < values.length; index++) {
+      const row = values[index] ?? [];
+      const divisionCode = lookup.byKey.get(
+        String(row[table.divisionColumn] ?? '').trim().toLowerCase(),
+      );
+      if (!divisionCode) continue;
 
-  for (let index = table.headerIndex + 1; index < values.length; index++) {
-    const row = values[index] ?? [];
-    const divisionCode = lookup.byKey.get(
-      String(row[table.divisionColumn] ?? '').trim().toLowerCase(),
-    );
-    if (!divisionCode) continue;
-
-    for (const month of table.months) {
-      const raw = String(row[month.index] ?? '').replace(/[,\s]/g, '');
-      if (!raw) continue;
-      rows.push({ periodMonth: month.month, divisionCode, headcount: new Decimal(raw).toFixed(2) });
+      for (const month of table.months) {
+        const raw = String(row[month.index] ?? '').replace(/[,\s]/g, '');
+        if (!raw) continue;
+        rows.push({ periodMonth: month.month, divisionCode, headcount: new Decimal(raw).toFixed(2) });
+      }
     }
   }
 

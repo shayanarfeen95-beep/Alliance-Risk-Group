@@ -144,7 +144,7 @@ export async function listTabs(spreadsheetId: string): Promise<string[]> {
       query,
       headers: { accept: 'application/json' },
     });
-    return (json.sheets ?? []).map((sheet) => sheet.properties?.title ?? '').filter(Boolean);
+    return tabTitles(json, 'the Composio proxy');
   }
 
   const url = new URL(`https://sheets.googleapis.com${path}`);
@@ -155,8 +155,38 @@ export async function listTabs(spreadsheetId: string): Promise<string[]> {
     { headers: { Authorization: `Bearer ${await accessToken()}` } },
     'SHEETS',
   );
-  const json = (await response.json()) as { sheets?: Array<{ properties?: { title?: string } }> };
-  return (json.sheets ?? []).map((sheet) => sheet.properties?.title ?? '').filter(Boolean);
+  return tabTitles(await response.json(), 'the Sheets API');
+}
+
+/**
+ * Tab titles, or a loud failure naming what actually came back.
+ *
+ * `?? []` here is what produced "the tabs it has are: (none)" for a spreadsheet
+ * that was connected and had four tabs. A response missing `sheets` entirely is
+ * not a spreadsheet with no tabs — a spreadsheet always has at least one — so
+ * reading it as an empty list states something that cannot be true, and points
+ * the reader at their tab names instead of at the response.
+ */
+function tabTitles(payload: unknown, via: string): string[] {
+  const json = payload as { sheets?: Array<{ properties?: { title?: string } }> } | null;
+
+  if (!json || typeof json !== 'object' || !Array.isArray(json.sheets)) {
+    const keys = json && typeof json === 'object' ? Object.keys(json).join(', ') : typeof json;
+    throw new Error(
+      `The spreadsheet metadata came back from ${via} without a "sheets" array, so its tabs ` +
+        `could not be read. The response carried: ${keys || '(nothing)'}. This is a transport ` +
+        `problem, not a naming one — the tabs are fine.`,
+    );
+  }
+
+  const titles = json.sheets.map((sheet) => sheet.properties?.title ?? '').filter(Boolean);
+  if (!titles.length) {
+    throw new Error(
+      `${via} returned ${json.sheets.length} sheet entr${json.sheets.length === 1 ? 'y' : 'ies'} ` +
+        `but none carried a title, so no tab could be named.`,
+    );
+  }
+  return titles;
 }
 
 /**
@@ -221,7 +251,7 @@ export async function readRange(spreadsheetId: string, range: string): Promise<s
       query: { valueRenderOption: 'UNFORMATTED_VALUE' },
       headers: { accept: 'application/json' },
     });
-    return json.values ?? [];
+    return rangeValues(json, range, 'the Composio proxy');
   }
 
   const url = new URL(`https://sheets.googleapis.com${path}`);
@@ -232,8 +262,35 @@ export async function readRange(spreadsheetId: string, range: string): Promise<s
     { headers: { Authorization: `Bearer ${await accessToken()}` } },
     'SHEETS',
   );
-  const json = (await response.json()) as { values?: string[][] };
-  return json.values ?? [];
+  return rangeValues(await response.json(), range, 'the Sheets API');
+}
+
+/**
+ * A range's rows, distinguishing "this range is empty" from "this is not a
+ * Sheets response".
+ *
+ * Google omits `values` for a genuinely empty range, so an absent key with an
+ * otherwise well-formed response is a real empty — returned as such. A response
+ * that is not shaped like a Sheets reply at all is a transport failure, and
+ * saying so is what stops it being read as an empty budget.
+ */
+function rangeValues(payload: unknown, range: string, via: string): string[][] {
+  const json = payload as { values?: unknown; range?: unknown; majorDimension?: unknown } | null;
+
+  if (!json || typeof json !== 'object') {
+    throw new Error(`${range} came back from ${via} as ${typeof json}, not as a Sheets response.`);
+  }
+
+  if (Array.isArray(json.values)) return json.values as string[][];
+
+  // A real Sheets reply for an empty range still identifies the range it read.
+  if (typeof json.range === 'string' || typeof json.majorDimension === 'string') return [];
+
+  throw new Error(
+    `${range} came back from ${via} without a "values" array and without naming the range it ` +
+      `read, so it cannot be told apart from a failed request. The response carried: ` +
+      `${Object.keys(json).join(', ') || '(nothing)'}.`,
+  );
 }
 
 export const sheetsConnector: SourceConnector = {

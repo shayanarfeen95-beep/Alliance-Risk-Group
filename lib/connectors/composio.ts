@@ -387,11 +387,28 @@ function unwrap<T>(response: Record<string, unknown>, what: string): T {
 
   const data = (response.data ?? response.response_data ?? response) as Record<string, unknown>;
 
-  // The proxy nests the provider's own body one level deeper.
+  // The proxy nests the provider's own body one level deeper, inside an
+  // HTTP-shaped envelope: { data, status, headers, … }.
+  //
+  // This used to unwrap only when that envelope had three keys or fewer, which
+  // is a guess about a shape Composio is free to add a field to — and when it
+  // did, the unwrap stopped happening and every caller read its field off the
+  // ENVELOPE instead of the body. `json.values` and `json.sheets` came back
+  // undefined, the callers' `?? []` turned that into an empty result, and Google
+  // Sheets reported "the range came back empty" and "the tabs it has are:
+  // (none)" for a spreadsheet that was connected and full.
+  //
+  // Recognising the envelope by its shape rather than by counting its keys is
+  // what makes that impossible: an envelope is a `data` key sitting beside a
+  // status or headers key, however many other fields ride along with it.
   let body = data;
-  if (data && typeof data === 'object' && 'data' in data && Object.keys(data).length <= 3) {
+  if (data && typeof data === 'object' && 'data' in data) {
+    const looksLikeEnvelope =
+      'status' in data || 'status_code' in data || 'statusCode' in data || 'headers' in data;
     const inner = (data as { data?: unknown }).data;
-    if (inner && typeof inner === 'object') body = inner as Record<string, unknown>;
+    if (looksLikeEnvelope && inner && typeof inner === 'object') {
+      body = inner as Record<string, unknown>;
+    }
   }
 
   // A provider error that the proxy reports as a successful call.

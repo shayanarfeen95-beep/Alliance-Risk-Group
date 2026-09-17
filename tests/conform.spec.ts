@@ -722,6 +722,59 @@ describe('Google Sheets budget', () => {
   });
 });
 
+describe('ARG\'s connector workbook, end to end', () => {
+  /** The real long-format shape, straight from FPA_Connector_Source_FY2026. */
+  const budgetSheet = {
+    range: "'Monthly Budget'!A1:ZZ2000",
+    values: [
+      ['Month', 'Month Start', 'Year', 'Division', 'Row Type', 'Revenue ($)', 'COGS ($)', 'Gross Profit ($)'],
+      ['JAN', '46023', '2026', 'SHRC', 'Division', '202973.70', '145988.71', '56984.99'],
+      ['JAN', '46023', '2026', 'Claims', 'Division', '105840.00', '72442.98', '33397.02'],
+      ['JAN', '46023', '2026', 'ARG Total', 'Total', '469640.00', '313252.74', '156387.26'],
+    ],
+  };
+
+  it('loads the budget by month and division, and skips the Total row', async () => {
+    const outcome = await conformBatch(harness.db, null as never, {
+      sourceSystem: 'SHEETS',
+      entity: 'monthly_budget',
+      window: { start: MONTH, end: MONTH },
+      records: [{ entity: 'monthly_budget', key: budgetSheet.range, payload: budgetSheet }],
+      fetchedAt: new Date(),
+    });
+
+    expect(outcome.rowsWritten).toBeGreaterThan(0);
+
+    const rows = await harness.db
+      .select()
+      .from(t.factBudget)
+      .where(eq(t.factBudget.periodMonth, '2026-01-01'));
+
+    const shrcRevenue = rows.find(
+      (row) => row.divisionCode === 'SHRC' && row.lineItem === 'revenue',
+    );
+    // The figure, not a date. 202973.70 sits outside the serial range, but
+    // 46023 in "Month Start" does not — and that column is never read as a value.
+    expect(new Decimal(shrcRevenue!.amount).toFixed(2)).toBe('202973.70');
+
+    const shrcCogs = rows.find((row) => row.divisionCode === 'SHRC' && row.lineItem === 'cogs');
+    expect(new Decimal(shrcCogs!.amount).toFixed(2)).toBe('145988.71');
+
+    // §3: ARG Total is a rollup, never a row. Loading the Total line would
+    // double every figure on every variance chart.
+    expect(rows.some((row) => row.divisionCode === 'ARG_TOTAL')).toBe(false);
+  });
+
+  it('does not write Gross Profit, which is derived', async () => {
+    const rows = await harness.db
+      .select()
+      .from(t.factBudget)
+      .where(eq(t.factBudget.periodMonth, '2026-01-01'));
+
+    expect(rows.every((row) => ['revenue', 'cogs', 'opex'].includes(row.lineItem))).toBe(true);
+  });
+});
+
 describe('sheet header parsing', () => {
   it('recognises the ways a month is written in a spreadsheet', () => {
     expect(parseMonthHeader('2026-05')).toBe('2026-05-01');
