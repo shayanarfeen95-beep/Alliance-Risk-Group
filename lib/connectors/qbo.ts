@@ -10,6 +10,7 @@
  */
 import {
   ConnectorNotConfiguredError,
+  ConnectorRequestError,
   budgetSpent,
   lastDayOfMonth,
   monthsInWindow,
@@ -33,6 +34,28 @@ function baseUrl(): string {
 }
 
 const ENTITIES: EntityDescriptor[] = [
+  // Reference data first, and that ordering is load-bearing.
+  //
+  // `syncPlan` walks this array in order, so the position of a descriptor IS
+  // the order it is pulled and conformed in. With accounts and classes last,
+  // a single "Pull everything" conformed the balance sheet against whatever
+  // chart of accounts the warehouse happened to be holding, THEN refreshed the
+  // chart — so a newly-seen account failed the balance sheet on every run and
+  // was present by the time anybody looked. That is why the balance sheet kept
+  // reporting accounts "not in the chart of accounts" while the chart itself
+  // showed a healthy row count two lines below it on the same screen.
+  {
+    entity: 'accounts',
+    label: 'Chart of Accounts',
+    cadence: 'WEEKLY',
+    description: 'Reference data. Alerts on new accounts so nothing lands unmapped.',
+  },
+  {
+    entity: 'classes',
+    label: 'Class list',
+    cadence: 'WEEKLY',
+    description: 'Reference data. Alerts on new classes so nothing lands unmapped.',
+  },
   {
     entity: 'profit_and_loss',
     label: 'Profit & Loss by Class, by month',
@@ -49,45 +72,88 @@ const ENTITIES: EntityDescriptor[] = [
   },
   {
     entity: 'trial_balance',
-    label: 'Trial Balance (account level)',
+    label: 'Trial Balance (company level)',
     cadence: 'ON_CLOSE',
     description:
-      'Account-level detail. Enables drill-down, the self-generating audit pack, and variance commentary that can say why a line moved.',
+      'QuickBooks gives the trial balance no class dimension, so it produces no divisional rows by design. It is landed in full as the company-level tie-out against the classed P&L and balance sheet, and carried in the audit pack. Account-level detail BY division comes from the classed P&L.',
   },
   {
     entity: 'ar_aging',
-    label: 'A/R Aging Summary',
+    label: 'A/R Aging (open invoices)',
     cadence: 'DAILY',
-    description: 'Feeds the aging view and the DSO reconciliation.',
+    description:
+      'Built from the open invoices themselves rather than an aging report: no QuickBooks aging report carries a class, so none of them can be split by division. An invoice carries its own class, balance and due date. A snapshot of today, not a reconstruction of a past month.',
   },
   {
     entity: 'ap_aging',
-    label: 'A/P Aging Summary',
+    label: 'A/P Aging (open bills)',
     cadence: 'DAILY',
-    description: 'Feeds the DPO reconciliation.',
-  },
-  {
-    entity: 'accounts',
-    label: 'Chart of Accounts',
-    cadence: 'WEEKLY',
-    description: 'Reference data. Alerts on new accounts so nothing lands unmapped.',
-  },
-  {
-    entity: 'classes',
-    label: 'Class list',
-    cadence: 'WEEKLY',
-    description: 'Reference data. Alerts on new classes so nothing lands unmapped.',
+    description:
+      'Built from the open bills themselves, for the same reason as A/R. Feeds the DPO reconciliation and the aging view.',
   },
 ];
 
-/** Which QBO report backs each monthly entity. */
-const MONTHLY_REPORTS: Record<string, string> = {
-  profit_and_loss: 'ProfitAndLoss',
-  balance_sheet: 'BalanceSheet',
-  trial_balance: 'TrialBalance',
-  ar_aging: 'AgedReceivables',
-  ap_aging: 'AgedPayables',
+/**
+ * Which QBO report backs each monthly entity, and the parameters it accepts.
+ *
+ * QuickBooks does NOT take the same query parameters on every report, and it
+ * answers an unsupported one with a 400 rather than ignoring it. Every monthly
+ * report was being sent `summarize_column_by=Classes` and a `start_date`, which
+ * only the P&L and Balance Sheet accept — that is why the balance sheet run
+ * FAILED outright and the trial balance and both aging pulls came back with
+ * nothing to conform. Each report's real parameter shape is declared here
+ * instead of being assumed uniform.
+ */
+interface ReportSpec {
+  report: string;
+  /** A range (P&L, TB) or a position at a date (aging). */
+  period: 'range' | 'as_of';
+  acceptsBasis: boolean;
+  /**
+   * Whether a per-class breakdown may be requested. Requesting one is not the
+   * same as getting one: a company that does not class this report answers with
+   * a single total column, which conform reports rather than mistaking for zero.
+   */
+  acceptsClasses: boolean;
+  /** Explicit column list, for the detail reports that take one. */
+  columns?: string;
+}
+
+const MONTHLY_REPORTS: Record<string, ReportSpec> = {
+  profit_and_loss: { report: 'ProfitAndLoss', period: 'range', acceptsBasis: true, acceptsClasses: true },
+  balance_sheet: { report: 'BalanceSheet', period: 'range', acceptsBasis: true, acceptsClasses: true },
+  // QuickBooks' Trial Balance has no class dimension at all. It is pulled at
+  // company level as the tie-out against the classed P&L and balance sheet;
+  // asking it to summarise by class is what made it fail.
+  trial_balance: { report: 'TrialBalance', period: 'range', acceptsBasis: true, acceptsClasses: false },
 };
+
+/** The query parameters one month of a report actually takes. */
+export function reportParams(
+  spec: ReportSpec,
+  month: string,
+  withClasses: boolean,
+): Record<string, string> {
+  const monthEnd = lastDayOfMonth(month);
+  const params: Record<string, string> = {};
+
+  if (spec.period === 'range') {
+    params.start_date = month;
+    params.end_date = monthEnd;
+  } else {
+    // Aging is as-at a single date, under a different parameter name entirely.
+    params.report_date = monthEnd;
+  }
+
+  if (spec.columns) params.columns = spec.columns;
+  // Rule 3: ARG reports on the accrual basis. Never mix silently.
+  if (spec.acceptsBasis) params.accounting_method = 'Accrual';
+  if (spec.acceptsClasses && withClasses) params.summarize_column_by = 'Classes';
+
+  return params;
+}
+
+export const REPORT_SPECS = MONTHLY_REPORTS;
 
 interface TokenCache {
   accessToken: string;
@@ -195,9 +261,14 @@ async function callApi(path: string, params: Record<string, string>): Promise<un
  * QBO's report API summarises by month OR by class, not both in one call, so
  * classed monthly figures come from one call per month. That is more requests
  * but it is the only shape that yields a division dimension.
+ *
+ * A classed request that fails is retried once, unclassed. That is open item 1
+ * behaving as documented rather than as an outage: a company that does not class
+ * its balance sheet gets ARG Total figures and a conform note, where before the
+ * entity simply FAILED and the balance sheet never loaded at all.
  */
 async function fetchMonthlyReport(
-  reportName: string,
+  spec: ReportSpec,
   window: FetchWindow,
   extraParams: Record<string, string> = {},
   options?: FetchOptions,
@@ -214,21 +285,80 @@ async function fetchMonthlyReport(
 
   for (let i = from; i < months.length; i++) {
     const month = months[i]!;
-    const payload = await callApi(`reports/${reportName}`, {
-      start_date: month,
-      end_date: lastDayOfMonth(month),
-      // Rule 3: ARG reports on the accrual basis. Never mix silently.
-      accounting_method: 'Accrual',
-      summarize_column_by: 'Classes',
-      ...extraParams,
-    });
-    records.push({ entity: reportName, key: month, payload });
+
+    let payload: unknown;
+    try {
+      payload = await callApi(`reports/${spec.report}`, {
+        ...reportParams(spec, month, true),
+        ...extraParams,
+      });
+    } catch (error) {
+      if (!spec.acceptsClasses || !(error instanceof ConnectorRequestError)) throw error;
+      payload = await callApi(`reports/${spec.report}`, {
+        ...reportParams(spec, month, false),
+        ...extraParams,
+      });
+    }
+
+    records.push({ entity: spec.report, key: month, payload });
 
     const next = months[i + 1];
     if (next && budgetSpent(options, records.length)) return { records, nextCursor: next };
   }
 
   return { records, nextCursor: null };
+}
+
+/**
+ * Every row of a QuickBooks entity, active and inactive, across all pages.
+ *
+ * `Active in (true, false)` is the documented way to stop QuickBooks filtering
+ * to active rows. Paging by STARTPOSITION matters at ARG's size: 314 accounts
+ * fits one page today, but a chart of accounts that grows past 1000 would start
+ * losing its tail silently, which is the same class of failure as the active
+ * filter and just as hard to notice.
+ */
+type QueryEntity = 'Account' | 'Class' | 'Invoice' | 'Bill';
+
+const QUERY_ENTITY_TO_ENTITY: Record<QueryEntity, string> = {
+  Account: 'accounts',
+  Class: 'classes',
+  Invoice: 'ar_aging',
+  Bill: 'ap_aging',
+};
+
+async function queryAll(entityName: QueryEntity, where?: string): Promise<RawRecord[]> {
+  const pageSize = 1000;
+  const records: RawRecord[] = [];
+  let startPosition = 1;
+
+  // Reference data must include INACTIVE rows; transactions must not be
+  // filtered on Active at all. A deleted account still carries every balance it
+  // held on earlier balance sheets, so omitting it does not remove it from the
+  // report — only our ability to read one.
+  const clause =
+    where ?? (entityName === 'Account' || entityName === 'Class' ? 'Active in (true, false)' : null);
+
+  for (;;) {
+    const payload = (await callApi('query', {
+      query:
+        `select * from ${entityName}` +
+        (clause ? ` where ${clause}` : '') +
+        ` startposition ${startPosition} maxresults ${pageSize}`,
+    })) as { QueryResponse?: Record<string, unknown[]> };
+
+    records.push({
+      entity: QUERY_ENTITY_TO_ENTITY[entityName],
+      key: `page-${startPosition}`,
+      payload,
+    });
+
+    const returned = (payload.QueryResponse?.[entityName] ?? []).length;
+    if (returned < pageSize) break;
+    startPosition += pageSize;
+  }
+
+  return records;
 }
 
 export const qboConnector: SourceConnector = {
@@ -246,32 +376,41 @@ export const qboConnector: SourceConnector = {
     let nextCursor: string | null = null;
 
     switch (entity) {
+      // Aging comes from the open transactions themselves, not from an aging
+      // report. Neither AgedReceivables nor AgedReceivableDetail carries a class
+      // column — Intuit's documented column list for the detail report has no
+      // klass_name in it, and the summary report is grouped by customer or
+      // vendor — so no aging report can be split by division, which is what
+      // fact_aging is keyed on. Invoice and Bill both expose ClassRef, Balance
+      // and DueDate, so the division is QuickBooks' own attribution and the
+      // bucket is arithmetic on a real due date.
+      case 'ar_aging':
+        records = await queryAll('Invoice', "Balance > '0'");
+        break;
+      case 'ap_aging':
+        records = await queryAll('Bill', "Balance > '0'");
+        break;
       case 'profit_and_loss':
       case 'balance_sheet':
-      case 'trial_balance':
-      case 'ar_aging':
-      case 'ap_aging': {
-        const report = MONTHLY_REPORTS[entity]!;
-        ({ records, nextCursor } = await fetchMonthlyReport(report, window, {}, options));
+      case 'trial_balance': {
+        const spec = MONTHLY_REPORTS[entity]!;
+        ({ records, nextCursor } = await fetchMonthlyReport(spec, window, {}, options));
         break;
       }
+      // Reference data is paged and includes INACTIVE records.
+      //
+      // QuickBooks' query language filters to active rows unless told otherwise,
+      // and `maxresults 1000` silently truncates beyond the first page. Both
+      // defaults were wrong here in the same way: a deleted account still
+      // carries its historical balances on every prior balance sheet, so
+      // omitting it does not remove it from the report — it removes it from
+      // dim_account and blocks the month. That is what "27 balance-sheet
+      // accounts have no balance_sheet_line … (deleted)" was.
       case 'accounts':
-        records = [
-          {
-            entity: 'accounts',
-            key: 'all',
-            payload: await callApi('query', { query: 'select * from Account maxresults 1000' }),
-          },
-        ];
+        records = await queryAll('Account');
         break;
       case 'classes':
-        records = [
-          {
-            entity: 'classes',
-            key: 'all',
-            payload: await callApi('query', { query: 'select * from Class maxresults 1000' }),
-          },
-        ];
+        records = await queryAll('Class');
         break;
       default:
         throw new Error(`Unknown QBO entity "${entity}".`);
