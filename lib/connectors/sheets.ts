@@ -18,7 +18,7 @@ import {
   type SourceConnector,
 } from './types';
 import { isConnected, loadCredential } from './credentials';
-import { proxy } from './composio';
+import { executeTool, proxy } from './composio';
 
 const TOKEN_URL = 'https://oauth2.googleapis.com/token';
 const SCOPE = 'https://www.googleapis.com/auth/spreadsheets.readonly';
@@ -137,14 +137,53 @@ export async function listTabs(spreadsheetId: string): Promise<string[]> {
     const connectedAccountId = credential.data.connectedAccountId;
     if (!connectedAccountId) throw new ConnectorNotConfiguredError('SHEETS');
 
-    const json = await proxy<{ sheets?: Array<{ properties?: { title?: string } }> }>({
-      connectedAccountId,
-      endpoint: path,
-      method: 'GET',
-      query,
-      headers: { accept: 'application/json' },
-    });
-    return tabTitles(json, 'the Composio proxy');
+    /**
+     * Two routes, because the raw proxy has already failed this twice.
+     *
+     * Composio ships a packaged Google Sheets tool whose response shape it
+     * maintains; the proxy hands back whatever envelope Composio happens to wrap
+     * the provider in this month, and a field added to that envelope is what
+     * made the tabs read as "(none)" for a spreadsheet with four of them.
+     *
+     * The packaged tool is tried first for that reason. The proxy remains as a
+     * fallback, and when BOTH fail the error carries both reasons — because
+     * "it did not work" without saying which route was tried is how this took
+     * three rounds to pin down.
+     */
+    const attempts: string[] = [];
+
+    for (const slug of ['GOOGLESHEETS_GET_SPREADSHEET_INFO', 'GOOGLESHEETS_GET_SPREADSHEET_BY_DATA_FILTER']) {
+      try {
+        const result = await executeTool<Record<string, unknown>>(slug, {
+          connectedAccountId,
+          arguments: { spreadsheet_id: spreadsheetId, spreadsheetId },
+        });
+        return tabTitles(result, `Composio's ${slug}`);
+      } catch (error) {
+        attempts.push(`${slug}: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+
+    try {
+      const json = await proxy<{ sheets?: Array<{ properties?: { title?: string } }> }>({
+        connectedAccountId,
+        endpoint: path,
+        method: 'GET',
+        query,
+        headers: { accept: 'application/json' },
+      });
+      return tabTitles(json, 'the Composio proxy');
+    } catch (error) {
+      attempts.push(`proxy ${path}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+
+    throw new Error(
+      `Could not read the spreadsheet's tabs through any available route. Tried — ` +
+        `${attempts.join(' | ')}. The connection itself is fine; this is how the data is being ` +
+        `requested. Setting SHEETS_RANGE_MONTHLY_BUDGET, SHEETS_RANGE_TENX_BUDGET and ` +
+        `SHEETS_RANGE_HEADCOUNT to explicit A1 ranges skips tab discovery entirely and will ` +
+        `import while this is sorted out.`,
+    );
   }
 
   const url = new URL(`https://sheets.googleapis.com${path}`);
@@ -168,7 +207,17 @@ export async function listTabs(spreadsheetId: string): Promise<string[]> {
  * the reader at their tab names instead of at the response.
  */
 function tabTitles(payload: unknown, via: string): string[] {
-  const json = payload as { sheets?: Array<{ properties?: { title?: string } }> } | null;
+  // A packaged tool nests the spreadsheet under its own key; the proxy returns
+  // it bare. Both are accepted rather than one being assumed.
+  const outer = payload as Record<string, unknown> | null;
+  const nested =
+    outer && typeof outer === 'object'
+      ? ((outer.spreadsheet ?? outer.response ?? outer.result) as Record<string, unknown> | undefined)
+      : undefined;
+
+  const json = (nested && Array.isArray(nested.sheets) ? nested : outer) as {
+    sheets?: Array<{ properties?: { title?: string } }>;
+  } | null;
 
   if (!json || typeof json !== 'object' || !Array.isArray(json.sheets)) {
     const keys = json && typeof json === 'object' ? Object.keys(json).join(', ') : typeof json;
@@ -332,7 +381,7 @@ export const sheetsConnector: SourceConnector = {
         // wrong tab name in seconds once they can see the list.
         throw new Error(
           `No tab in the connected spreadsheet looks like "${entity.replace(/_/g, ' ')}". ` +
-            `The tabs it has are: ${tabs.length ? tabs.join(', ') : '(none)'}. ` +
+            `The tabs it has are: ${tabs.join(', ')}. ` +
             `Rename the right one, or set ${
               entity === 'monthly_budget'
                 ? 'SHEETS_RANGE_MONTHLY_BUDGET'

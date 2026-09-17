@@ -14,9 +14,41 @@
  * variance chart, which is worse than importing nothing.
  */
 import { describe, expect, it } from 'vitest';
+import { readFile } from 'node:fs/promises';
 import { matchTab } from '@/lib/connectors/sheets';
 
+describe('reading the tab list', () => {
+  it('never reports a spreadsheet as having no tabs', async () => {
+    // "The tabs it has are: (none)" was stated about a connected spreadsheet
+    // with four tabs, for two rounds. A spreadsheet always has at least one
+    // tab, so an empty list is a transport failure being read as an answer —
+    // and the code can no longer express it: listTabs throws instead, and the
+    // "(none)" branch that printed it is gone.
+    const source = await readFile('lib/connectors/sheets.ts', 'utf8');
+    expect(source).not.toContain("'(none)'");
+  });
+
+  it('says which routes it tried when none of them work', async () => {
+    // Three rounds went into finding this because the failure never named the
+    // transport. Both the packaged tool and the proxy are attempted, and both
+    // reasons survive into the error.
+    const source = await readFile('lib/connectors/sheets.ts', 'utf8');
+    expect(source).toContain('GOOGLESHEETS_GET_SPREADSHEET_INFO');
+    expect(source).toContain('Could not read the spreadsheet');
+    expect(source).toContain('Tried —');
+  });
+});
+
 describe('matching a spreadsheet tab to an entity', () => {
+  it('matches the tabs ARG\'s workbook actually has', () => {
+    // FPA_Connector_Source_FY2026.xlsx, verbatim — note "TenX", not "10X".
+    const tabs = ['README', 'Monthly Budget', 'TenX Budget', 'Headcount'];
+
+    expect(matchTab('monthly_budget', tabs)).toBe('Monthly Budget');
+    expect(matchTab('tenx_budget', tabs)).toBe('TenX Budget');
+    expect(matchTab('headcount', tabs)).toBe('Headcount');
+  });
+
   it('finds the obvious names', () => {
     const tabs = ['Monthly Budget', '10X Budget', 'Headcount'];
 
