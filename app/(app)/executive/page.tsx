@@ -39,7 +39,7 @@ export default async function ExecutivePage({
         </p>
         <p className="mt-0.5 text-[12px] text-[var(--text-muted)]">
           {divisionLabel} · {formatMonth(session.period.month)} ·{' '}
-          {session.periodIsClosed ? 'closed period' : 'open period, figures preliminary'}
+          {session.periodIsClosed ? 'books closed, figures final' : 'books not closed, figures may change'}
         </p>
       </header>
 
@@ -107,7 +107,7 @@ export default async function ExecutivePage({
             title="Revenue and net profit by division"
             subtitle="Contribution % is division revenue ÷ ARG Total revenue. Net profit contribution divides by the absolute value of the total, so the sign stays readable in a loss month."
           />
-          <DataTable>
+          <DataTable dense>
             <thead>
               <tr>
                 <Th align="left">Division</Th>
@@ -168,7 +168,7 @@ export default async function ExecutivePage({
             title="YTD revenue against plan"
             subtitle="Attainment % and Variance $ are labelled distinctly on purpose — they are different measures, and the Excel's layout invited reading both as variances."
           />
-          <DataTable>
+          <DataTable dense>
             <thead>
               <tr>
                 <Th align="left">Baseline</Th>

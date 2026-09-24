@@ -4,7 +4,7 @@ import * as t from '@/lib/db/schema';
 import type { Database } from '@/lib/db/client';
 import { d, formatValue, type ValueFormat } from '@/lib/money';
 import { openSemanticSession, resolveKpi, CONSOLIDATED_CODE, type SemanticSession } from '@/lib/semantic/resolve';
-import { getKpiDefinition } from '@/lib/semantic/registry';
+import { getKpiDefinition, preferredBudgetScenario } from '@/lib/semantic/registry';
 import type { MonthKey } from '@/lib/semantic/periods';
 import type { Citation } from '@/lib/semantic/types';
 import type { SessionUser } from '@/lib/auth/session';
@@ -212,12 +212,12 @@ const budgetAttainment: Evaluator = {
   params: [
     { name: 'lineItem', label: 'Line item (revenue, cogs, opex)', required: true },
     { name: 'minAttainment', label: 'Minimum attainment (e.g. 0.9)', required: true },
-    { name: 'scenario', label: 'Scenario (blank = monthly budget)', required: false },
+    { name: 'scenario', label: 'Scenario (blank = the budget: QuickBooks first, else Sheets)', required: false },
     { name: 'divisions', label: 'Divisions (blank = all)', required: false },
   ],
   run(context) {
     const lineItem = String(context.goal.params?.lineItem ?? 'revenue');
-    const scenario = String(context.goal.params?.scenario ?? 'MONTHLY_BUDGET');
+    const scenario = String(context.goal.params?.scenario || preferredBudgetScenario(context.session.bundle));
     const floor = numberParam(context.goal.params, 'minAttainment') ?? d(0.9);
 
     // Direction comes from the line item, not from the attainment metric.

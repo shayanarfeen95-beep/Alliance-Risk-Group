@@ -769,7 +769,8 @@ const salesDefinitions: KpiDefinition[] = [
     name: 'Pipeline Value',
     category: 'sales',
     definition: 'Total value of deals still open as of the reporting date.',
-    formula: 'SUM(amount) WHERE deal is open, as of the reporting date',
+    formula: 'SUM(amount) of deals created by month end and not closed by month end',
+    notes: 'Reconstructed from each deal\'s create and close dates, so a past month shows the pipeline as it stood then. Amounts are the deal\'s current amount — HubSpot does not keep amount history on this connection.',
     sourceSystem: 'HubSpot',
     format: 'currency',
     higherIsBetter: true,
@@ -778,17 +779,25 @@ const salesDefinitions: KpiDefinition[] = [
     compute: (input) => {
       const scope = hubspotScope(input);
       if (scope) return { value: null, unavailable: scope, citations: [] };
-      const open = input.bundle.deals.filter(
-        (deal) =>
-          !deal.isClosed &&
-          (input.isConsolidated ||
-            (deal.divisionCode !== null && input.divisions.includes(deal.divisionCode))),
-      );
+      // Open AT THE END OF THE REPORTING MONTH, not today. A deal counts if it
+      // had been created by then and had not yet closed. Reading today's open
+      // deals for every month made each past month, and every "vs prior month",
+      // report the same figure — a flat line labelled as a trend.
+      const { endExclusive } = monthBounds(input.period.month);
+      const open = input.bundle.deals.filter((deal) => {
+        const inScope =
+          input.isConsolidated ||
+          (deal.divisionCode !== null && input.divisions.includes(deal.divisionCode));
+        if (!inScope) return false;
+        if (deal.createdate && deal.createdate >= endExclusive) return false;
+        if (!deal.isClosed) return true;
+        return deal.closedate !== null && deal.closedate >= endExclusive;
+      });
       const total = open.reduce((sum, deal) => sum.plus(deal.amount), ZERO);
       return {
         value: total,
         citations: [
-          { label: 'Open deals', value: String(open.length), source: 'HubSpot' },
+          { label: 'Open deals at month end', value: String(open.length), source: 'HubSpot' },
           money('Pipeline value', total, 'HubSpot'),
         ],
       };

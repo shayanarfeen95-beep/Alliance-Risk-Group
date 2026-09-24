@@ -182,7 +182,7 @@ const getKpi: ToolDefinition = {
       options: {
         type: 'object',
         description:
-          'Per-metric options. cash_runway accepts {"variant":"trailing_3m"}; budget_attainment accepts {"scenario":"MONTHLY_BUDGET"|"TENX","lineItem":"revenue"|"cogs"|"opex","scope":"month"|"ytd"}.',
+          'Per-metric options. cash_runway accepts {"variant":"trailing_3m"}; budget_attainment accepts {"scenario":"QBO_BUDGET"|"MONTHLY_BUDGET"|"TENX"|"FORECAST" (omit for the default budget, QuickBooks first),"lineItem":"revenue"|"cogs"|"opex","scope":"month"|"ytd"}.',
         additionalProperties: true,
       },
     },
