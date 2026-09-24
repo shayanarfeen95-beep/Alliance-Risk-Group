@@ -344,7 +344,9 @@ export async function compareBatch(
     batch,
     hashes,
     changedScopes,
-    notes: before ? [`Changed since the last import on ${day(before.changedAt)} — re-imported.`] : [],
+    notes: before
+      ? [`Changed since the last import on ${day(before.changedAt)} — re-imported.`]
+      : ['First import: nothing to compare with yet, so all of it was imported. The next pull imports it again only if it changes.'],
   };
 }
 
