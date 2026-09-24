@@ -2,7 +2,7 @@ import 'server-only';
 import Decimal from 'decimal.js';
 import { resolveKpi, CONSOLIDATED_CODE, type SemanticSession } from '@/lib/semantic/resolve';
 import { formatMonthShort, type MonthKey } from '@/lib/semantic/periods';
-import { getKpiDefinition } from '@/lib/semantic/registry';
+import { getKpiDefinition, preferredBudgetScenario } from '@/lib/semantic/registry';
 import { formatNumber } from '@/lib/format';
 import type { KpiTileProps } from '@/components/dashboard/kpi-tile';
 
@@ -81,7 +81,7 @@ export function buildTile(
   const budgetable = ['revenue', 'cogs', 'opex'].includes(spec.id);
   if (budgetable) {
     const attainment = resolveKpi(session, 'budget_attainment', divisionCode, {
-      options: { scenario: 'MONTHLY_BUDGET', lineItem: spec.id, scope: 'month' },
+      options: { scenario: preferredBudgetScenario(session.bundle), lineItem: spec.id, scope: 'month' },
     });
     if (!attainment.unavailable && attainment.components?.budget) {
       const budget = attainment.components.budget.toNumber();
@@ -89,7 +89,8 @@ export function buildTile(
         id: 'budget',
         label: 'Budget',
         periodLabel: formatMonthShort(period.month),
-        formatted: attainment.components.budget.toDecimalPlaces(0).toString(),
+        // Formatted as money: this string is printed on the tile as it is.
+        formatted: formatNumber(budget, 'currency'),
         delta: value !== null ? value - budget : null,
         pctChange: value !== null && budget > 0 ? (value - budget) / budget : null,
       });

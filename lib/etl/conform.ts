@@ -4,7 +4,7 @@ import { eq, sql } from 'drizzle-orm';
 import type { Database } from '@/lib/db/client';
 import * as t from '@/lib/db/schema';
 import { rollUpGl, type ReportingLine } from './rollup';
-import type { RawBatch } from '@/lib/connectors/types';
+import { lastDayOfMonth, type RawBatch } from '@/lib/connectors/types';
 
 /**
  * Landed data -> the warehouse the dashboards read.
@@ -189,33 +189,56 @@ function amount(cell: QboCell | undefined): Decimal {
   return negated ? parsed.negated() : parsed;
 }
 
+/** True when any money cell (everything after the label) holds a value. */
+function carriesAmounts(cells: QboCell[] | undefined): boolean {
+  return Boolean(cells?.slice(1).some((cell) => (cell.value ?? '').trim() !== ''));
+}
+
 /**
- * Every leaf row of a QuickBooks report, carrying the section it sits in.
+ * Every row of a QuickBooks report that carries its own money, with the section
+ * it sits in and the parent accounts above it.
  *
  * The section is what tells revenue from cost — QuickBooks does not repeat that
  * on the row itself. Summary rows are skipped: they are totals of rows already
  * yielded, and including them would double every figure.
+ *
+ * A parent account's OWN postings are on its section HEADER, not on a child row.
+ * QuickBooks draws "Litigation Support Income" as a section whose header carries
+ * whatever was posted to the parent directly, with the sub-accounts beneath it
+ * and a "Total …" summary of both. Skipping every header — which this used to do
+ * — dropped that money outright: $162,462.70 of LITS revenue and $42,998.95 of TP
+ * revenue in March 2026 alone, so ARG Total read low by a third and COGS % and
+ * net margin were wrong on every view. A header is yielded whenever it carries an
+ * amount; grouping headers ("Income", "Current Assets") carry none and are passed
+ * over. There is no double count: the header holds only the parent's direct
+ * postings, and the sub-accounts are yielded as their own rows.
  */
-function* leafRows(
+export function* leafRows(
   rows: QboRow[] | undefined,
   group: string | undefined,
-): Generator<{ group: string | undefined; cells: QboCell[] }> {
+  ancestors: string[] = [],
+): Generator<{ group: string | undefined; cells: QboCell[]; ancestors: string[] }> {
   for (const row of rows ?? []) {
     const inherited = row.group ?? group;
+    const header = row.Header?.ColData;
+
+    if (header?.length && carriesAmounts(header)) {
+      yield { group: inherited, cells: header, ancestors };
+    }
 
     if (row.Rows?.Row?.length) {
-      yield* leafRows(row.Rows.Row, inherited);
+      const name = header?.[0]?.value?.trim();
+      yield* leafRows(row.Rows.Row, inherited, name ? [...ancestors, name] : ancestors);
       continue;
     }
 
-    const cells = row.ColData ?? row.Header?.ColData;
-    if (cells?.length && row.type !== 'Section') {
-      yield { group: inherited, cells };
+    if (row.ColData?.length && row.type !== 'Section') {
+      yield { group: inherited, cells: row.ColData, ancestors };
     }
   }
 }
 
-/** The money columns of a report, excluding the running Total column. */
+/** The money columns of a report, with the running Total column held apart. */
 function divisionColumns(
   report: QboReport,
   lookup: DivisionLookup,
@@ -223,11 +246,17 @@ function divisionColumns(
   columns: Array<{ index: number; divisionCode: string }>;
   unmapped: string[];
   excluded: string[];
+  /** Columns on classes deliberately outside every division (Not Specified, Z Alloc). */
+  excludedColumns: Array<{ index: number; title: string }>;
+  /** QuickBooks' company-level column, or null when the report has none. */
+  totalIndex: number | null;
 } {
   const all = report.Columns?.Column ?? [];
   const columns: Array<{ index: number; divisionCode: string }> = [];
   const unmapped: string[] = [];
   const excluded: string[] = [];
+  const excludedColumns: Array<{ index: number; title: string }> = [];
+  let totalIndex: number | null = null;
 
   all.forEach((column, index) => {
     if (column.ColType !== 'Money') return;
@@ -239,19 +268,91 @@ function divisionColumns(
 
     // The total column is a rollup of the others; §3 says ARG Total is never a
     // row of its own, and taking it as one would double the consolidated figure.
-    if (!title || /^total$/i.test(title) || meta.ColKey === 'total') return;
+    // It is kept aside as QuickBooks' own company figure, which is what the
+    // company balance sheet and the P&L tie-out are read from.
+    if (!title || /^total$/i.test(title) || meta.ColKey === 'total') {
+      if (/^total$/i.test(title) || meta.ColKey === 'total') totalIndex = index;
+      return;
+    }
 
-    const classRef = meta.ClassRef ?? meta.ClassId;
+    // QuickBooks names the class id `ColKey` on a classed report's columns.
+    const classRef = meta.ClassRef ?? meta.ClassId ?? meta.ColKey;
     const divisionCode = resolveDivision(lookup, classRef, title);
     if (divisionCode) columns.push({ index, divisionCode });
     // Deliberately excluded: left out of every divisional figure and out of ARG
     // Total, which is what an allocation or unclassified bucket should do. The
     // caller reports it so under-reporting is stated rather than discovered.
-    else if (isExcluded(lookup, classRef, title)) excluded.push(title);
-    else unmapped.push(title);
+    else if (isExcluded(lookup, classRef, title)) {
+      excluded.push(title);
+      excludedColumns.push({ index, title });
+    } else unmapped.push(title);
   });
 
-  return { columns, unmapped, excluded };
+  return { columns, unmapped, excluded, excludedColumns, totalIndex };
+}
+
+/**
+ * Replaces one month of one statement in fact_company_total.
+ *
+ * Wholesale, like the fact tables: a line that emptied since the last pull goes
+ * to zero instead of leaving its old figure standing.
+ */
+async function writeCompanyTotals(
+  db: Database,
+  loadRunId: string,
+  month: string,
+  statement: string,
+  lines: Record<string, Decimal>,
+): Promise<number> {
+  await db
+    .delete(t.factCompanyTotal)
+    .where(
+      sql`${t.factCompanyTotal.periodMonth} = ${month} and ${t.factCompanyTotal.statement} = ${statement}`,
+    );
+
+  const rows = Object.entries(lines).map(([line, amount]) => ({
+    periodMonth: month,
+    statement,
+    line,
+    amount: n(amount),
+    sourceSystem: 'QBO' as const,
+    loadRunId,
+    loadedAt: new Date(),
+  }));
+  if (rows.length) await db.insert(t.factCompanyTotal).values(rows);
+  return rows.length;
+}
+
+const PAYROLL_PARENT = /payroll/i;
+const NOT_PAYROLL = /\b(fee|fees|service|services)\b/i;
+
+/**
+ * Whether an account is payroll, judged the way ARG's chart is laid out.
+ *
+ * ARG keeps payroll under parent accounts — "Payroll-Direct" in COGS, "Payroll
+ * Expenses" in operating expense — and every account beneath them is payroll:
+ * Gross Wages-Direct, Employee Benefits-Direct, Payroll Taxes, 401K. Reading the
+ * parent is what fills the two memo rows, which otherwise read $0 every month
+ * because no account is ever TYPED as payroll in QuickBooks. A payroll-service
+ * fee is a fee, not payroll, and stays in the total it came from.
+ */
+export function isPayrollAccount(name: string, ancestors: string[]): boolean {
+  if (ancestors.some((parent) => PAYROLL_PARENT.test(parent))) return true;
+  return PAYROLL_PARENT.test(name) && !NOT_PAYROLL.test(name);
+}
+
+/**
+ * Upgrades a COGS or OpEx line to its payroll memo line.
+ *
+ * Totals cannot move: payroll_direct rolls up INTO cogs and payroll_expense into
+ * opex (lib/etl/rollup.ts), so this only decides which memo row an account is
+ * also shown on. A line somebody deliberately set to a payroll line stays as is.
+ */
+function withPayrollMemo(line: ReportingLine, name: string, ancestors: string[]): ReportingLine {
+  if (!isPayrollAccount(name, ancestors)) return line;
+  if (line === 'cogs') return 'payroll_direct';
+  if (line === 'opex') return 'payroll_expense';
+  return line;
 }
 
 /** QuickBooks' P&L sections, translated to the five reporting lines. */
@@ -335,7 +436,7 @@ async function conformProfitAndLoss(
   report: QboReport,
   lookup: DivisionLookup,
 ): Promise<number> {
-  const { columns, unmapped } = divisionColumns(report, lookup);
+  const { columns, unmapped, totalIndex, excludedColumns } = divisionColumns(report, lookup);
 
   if (unmapped.length) {
     throw new UnmappedSourceDataError(
@@ -365,29 +466,49 @@ async function conformProfitAndLoss(
   const balances: Array<{ divisionCode: string; accountId: string; amount: Decimal }> = [];
   const seenAccounts = new Map<string, { name: string; line: ReportingLine }>();
   const unmappedAccounts: string[] = [];
+  const companyRows: GlRowForTotal[] = [];
+  const unassignedRows = new Map<string, GlRowForTotal[]>();
 
-  for (const { group, cells } of leafRows(report.Rows?.Row, undefined)) {
+  for (const { group, cells, ancestors } of leafRows(report.Rows?.Row, undefined)) {
     const label = cells[0]?.value?.trim();
     if (!label) continue;
 
     const accountId = cells[0]?.id?.trim() || label;
     const known = existing.get(accountId);
-    const line = known?.reportingLine ?? reportingLineForSection(group);
+    // A known account with no line is classified from its section rather than
+    // skipped. Skipping it was silent — the one path in this function that let
+    // money leave without an error — and the section is QuickBooks' own answer.
+    const baseLine = known?.reportingLine ?? reportingLineForSection(group);
 
-    if (!line) {
-      // A row that is neither known nor classifiable is not silently dropped:
-      // it is money, and money that vanishes between QuickBooks and a dashboard
-      // is the failure this whole system exists to prevent.
-      if (!known) unmappedAccounts.push(`${label} (section: ${group ?? 'none'})`);
+    if (!baseLine) {
+      // A row that cannot be classified at all is not silently dropped: it is
+      // money, and money that vanishes between QuickBooks and a dashboard is the
+      // failure this whole system exists to prevent.
+      const carries =
+        columns.some((column) => !amount(cells[column.index]).isZero()) ||
+        (totalIndex !== null && !amount(cells[totalIndex]).isZero());
+      if (carries) unmappedAccounts.push(`${label} (section: ${group ?? 'none'})`);
       continue;
     }
 
+    const line = withPayrollMemo(baseLine, known?.accountName ?? label, ancestors);
     seenAccounts.set(accountId, { name: label, line });
 
     for (const column of columns) {
       const value = amount(cells[column.index]);
       if (value.isZero()) continue;
       balances.push({ divisionCode: column.divisionCode, accountId, amount: value });
+    }
+
+    if (totalIndex !== null) {
+      companyRows.push({ accountId, reportingLine: line, amount: amount(cells[totalIndex]) });
+    }
+    for (const column of excludedColumns) {
+      const value = amount(cells[column.index]);
+      if (value.isZero()) continue;
+      const rows = unassignedRows.get(column.title) ?? [];
+      rows.push({ accountId, reportingLine: line, amount: value });
+      unassignedRows.set(column.title, rows);
     }
   }
 
@@ -402,7 +523,19 @@ async function conformProfitAndLoss(
 
   // --- dim_account ---------------------------------------------------------
   for (const [accountId, account] of seenAccounts) {
-    if (existing.has(accountId)) continue;
+    const known = existing.get(accountId);
+    if (known) {
+      // The one change made to an existing mapping: a plain COGS or OpEx account
+      // that sits under a payroll parent is marked as the payroll memo line, so
+      // drill-down agrees with the memo rows. Totals are unaffected either way.
+      if (known.reportingLine !== account.line && (known.reportingLine === 'cogs' || known.reportingLine === 'opex' || known.reportingLine === null)) {
+        await db
+          .update(t.dimAccount)
+          .set({ reportingLine: account.line })
+          .where(eq(t.dimAccount.accountId, accountId));
+      }
+      continue;
+    }
     await db
       .insert(t.dimAccount)
       .values({
@@ -475,8 +608,47 @@ async function conformProfitAndLoss(
     written += 1;
   }
 
+  // --- fact_company_total --------------------------------------------------
+  //
+  // QuickBooks' own TOTAL column, rolled up through the same function. It
+  // includes every class — excluded ones too — so it is the figure the P&L is
+  // reconciled against, not a second source of divisional truth.
+  if (totalIndex !== null) {
+    const company = rollUpGl(companyRows);
+    written += await writeCompanyTotals(db, loadRunId, month, 'PL', {
+      revenue: company.revenue,
+      payroll_direct: company.payrollDirect,
+      cogs: company.cogs,
+      payroll_expense: company.payrollExpense,
+      opex: company.opex,
+    });
+  }
+
+  // What QuickBooks holds on classes that belong to no division — "Not
+  // Specified" (posted with no class) and allocation classes such as Z Alloc.
+  // ARG Total is the four divisions, so these amounts are in QuickBooks' total
+  // and not in ours. Recording them is what lets the tie-out say "the $94,267
+  // difference is September OpEx not yet on any division" instead of only
+  // "does not tie".
+  const unassigned: Record<string, Decimal> = {
+    revenue: new Decimal(0),
+    cogs: new Decimal(0),
+    opex: new Decimal(0),
+  };
+  for (const [title, rows] of unassignedRows) {
+    const lines = rollUpGl(rows);
+    for (const line of ['revenue', 'cogs', 'opex'] as const) {
+      if (lines[line].isZero()) continue;
+      unassigned[line] = unassigned[line]!.plus(lines[line]);
+      unassigned[`${line}|${title}`] = lines[line];
+    }
+  }
+  written += await writeCompanyTotals(db, loadRunId, month, 'PL_UNASSIGNED', unassigned);
+
   return written;
 }
+
+type GlRowForTotal = { accountId: string; reportingLine: ReportingLine; amount: Decimal };
 
 // ---------------------------------------------------------------------------
 // QuickBooks — Balance Sheet
@@ -495,59 +667,127 @@ const BALANCE_SHEET_FIELDS = {
   shareholder_equity: 'shareholderEquity',
 } as const;
 
+/**
+ * QuickBooks' balance-sheet sections, translated to fact_bs_actual's groupings.
+ *
+ * The fallback for a row with no mapped account — above all "Net Income", the
+ * current year's earnings, which QuickBooks prints inside equity with no account
+ * id at all. Treating it as an unknown account is what failed every balance-sheet
+ * load: equity without it cannot balance, and there is no account to map.
+ */
+function balanceSheetLineForSection(group: string | undefined): string | null {
+  switch ((group ?? '').toLowerCase()) {
+    case 'bankaccounts':
+      return 'cash';
+    case 'ar':
+      return 'accounts_receivable';
+    case 'othercurrentassets':
+      return 'other_current_assets';
+    case 'fixedassets':
+    case 'otherassets':
+      return 'fixed_assets';
+    case 'ap':
+      return 'accounts_payable';
+    case 'creditcards':
+      return 'cc_liability';
+    case 'othercurrentliabilities':
+      return 'other_current_liabilities';
+    case 'longtermliabilities':
+      return 'lt_liabilities';
+    case 'equity':
+    case 'netincome':
+      return 'shareholder_equity';
+    default:
+      return null;
+  }
+}
+
+async function balanceSheetIsClassed(db: Database): Promise<boolean> {
+  const [row] = await db
+    .select({ value: t.appConfig.value })
+    .from(t.appConfig)
+    .where(eq(t.appConfig.key, 'BALANCE_SHEET_CLASSED'))
+    .limit(1);
+  // Unset means the question was never asked; the classed path is the one that
+  // refuses loudly, so it is the safe default.
+  return row?.value !== 'false';
+}
+
 async function conformBalanceSheet(
   db: Database,
   loadRunId: string,
   month: string,
   report: QboReport,
   lookup: DivisionLookup,
+  notes: string[],
 ): Promise<number> {
-  const { columns, unmapped } = divisionColumns(report, lookup);
+  const classed = await balanceSheetIsClassed(db);
+  const { columns, unmapped, totalIndex: reportedTotal } = divisionColumns(report, lookup);
 
-  if (unmapped.length) {
-    throw new UnmappedSourceDataError(
-      `The ${month.slice(0, 7)} balance sheet has classes that map to no division: ` +
-        `${unmapped.join(', ')}. Nothing was written. Map them in Admin → Class mapping, or ` +
-        `mark them as not belonging to a division.`,
-      unmapped,
-    );
-  }
-  if (!columns.length) {
-    // Open item 1: ARG may not class its balance sheet at all. That is a real
-    // answer, and the dashboards already handle it — but it is not something to
-    // discover by finding an empty table.
-    throw new UnmappedSourceDataError(
-      `The ${month.slice(0, 7)} balance sheet came back with no class columns, so it cannot be ` +
-        `loaded by division. If ARG does not class its balance sheet, set BALANCE_SHEET_CLASSED ` +
-        `to false — the four affected metrics then report at ARG Total and say so.`,
-    );
+  // An unclassed report has a single money column and no TOTAL heading.
+  const moneyColumns = (report.Columns?.Column ?? [])
+    .map((column, index) => ({ column, index }))
+    .filter(({ column }) => column.ColType === 'Money');
+  const totalIndex =
+    reportedTotal ?? (moneyColumns.length === 1 ? moneyColumns[0]!.index : null);
+
+  if (classed) {
+    if (unmapped.length) {
+      throw new UnmappedSourceDataError(
+        `The ${month.slice(0, 7)} balance sheet has classes that map to no division: ` +
+          `${unmapped.join(', ')}. Nothing was written. Map them in Admin → Class mapping, or ` +
+          `mark them as not belonging to a division.`,
+        unmapped,
+      );
+    }
+    if (!columns.length && totalIndex === null) {
+      throw new UnmappedSourceDataError(
+        `The ${month.slice(0, 7)} balance sheet came back with no money columns at all. ` +
+          `Nothing was written.`,
+      );
+    }
   }
 
   const accounts = new Map(
     (await db.select().from(t.dimAccount)).map((row) => [row.accountId, row]),
   );
 
-  const totals = new Map<string, Record<string, Decimal>>();
+  type Field = (typeof BALANCE_SHEET_FIELDS)[keyof typeof BALANCE_SHEET_FIELDS];
+  const totals = new Map<string, Partial<Record<Field, Decimal>>>();
+  const company: Partial<Record<Field, Decimal>> = {};
   const unclassified: string[] = [];
 
-  for (const { cells } of leafRows(report.Rows?.Row, undefined)) {
+  for (const { group, cells } of leafRows(report.Rows?.Row, undefined)) {
     const label = cells[0]?.value?.trim();
     if (!label) continue;
 
     const accountId = cells[0]?.id?.trim() || label;
-    const line = accounts.get(accountId)?.balanceSheetLine;
+    const known = accounts.get(accountId);
+    // The account's own mapping wins; QuickBooks' section is the fallback, and
+    // it is QuickBooks' classification rather than a guess.
+    const mapped = known?.balanceSheetLine;
+    const line =
+      mapped && mapped in BALANCE_SHEET_FIELDS ? mapped : balanceSheetLineForSection(group);
 
-    if (!line || !(line in BALANCE_SHEET_FIELDS)) {
-      if (!accounts.has(accountId)) unclassified.push(label);
+    if (!line) {
+      const indexes = [...columns.map((column) => column.index), ...(totalIndex === null ? [] : [totalIndex])];
+      if (indexes.every((index) => amount(cells[index]).isZero())) continue;
+      unclassified.push(`${label} (section: ${group ?? 'none'})`);
       continue;
     }
 
+    const field = BALANCE_SHEET_FIELDS[line as keyof typeof BALANCE_SHEET_FIELDS];
+
+    if (totalIndex !== null) {
+      const value = amount(cells[totalIndex]);
+      if (!value.isZero()) company[field] = (company[field] ?? new Decimal(0)).plus(value);
+    }
+
+    if (!classed) continue;
     for (const column of columns) {
       const value = amount(cells[column.index]);
       if (value.isZero()) continue;
-
       const division = totals.get(column.divisionCode) ?? {};
-      const field = BALANCE_SHEET_FIELDS[line as keyof typeof BALANCE_SHEET_FIELDS];
       division[field] = (division[field] ?? new Decimal(0)).plus(value);
       totals.set(column.divisionCode, division);
     }
@@ -555,28 +795,66 @@ async function conformBalanceSheet(
 
   if (unclassified.length) {
     throw new UnmappedSourceDataError(
-      `${unclassified.length} balance-sheet account${unclassified.length === 1 ? '' : 's'} in ` +
-        `${month.slice(0, 7)} have no balance_sheet_line in dim_account: ` +
+      `${unclassified.length} balance-sheet row${unclassified.length === 1 ? '' : 's'} in ` +
+        `${month.slice(0, 7)} could not be placed on the balance sheet: ` +
         `${unclassified.slice(0, 8).join('; ')}${unclassified.length > 8 ? '; …' : ''}. ` +
-        `Nothing was written — an unclassified balance would silently understate cash, ` +
+        `Nothing was written — an unplaced balance would silently understate cash, ` +
         `receivables or payables, and DSO, DPO, CCC and Cash Runway all read from them.`,
     );
   }
 
+  const zero = new Decimal(0);
   let written = 0;
+
+  // --- company balance sheet, from QuickBooks' TOTAL column ---------------
+  if (totalIndex !== null) {
+    const lines: Record<string, Decimal> = {};
+    for (const [line, field] of Object.entries(BALANCE_SHEET_FIELDS)) {
+      lines[line] = company[field as Field] ?? zero;
+    }
+    written += await writeCompanyTotals(db, loadRunId, month, 'BS', lines);
+
+    const assets = ['cash', 'accounts_receivable', 'other_current_assets', 'fixed_assets'].reduce(
+      (sum, line) => sum.plus(lines[line]!),
+      zero,
+    );
+    const liabilitiesAndEquity = [
+      'accounts_payable',
+      'cc_liability',
+      'other_current_liabilities',
+      'lt_liabilities',
+      'shareholder_equity',
+    ].reduce((sum, line) => sum.plus(lines[line]!), zero);
+    const gap = assets.minus(liabilitiesAndEquity);
+    if (gap.abs().greaterThan(1)) {
+      notes.push(
+        `The ${month.slice(0, 7)} company balance sheet is out by ${gap.toFixed(2)} ` +
+          `(assets ${assets.toFixed(2)}, liabilities and equity ${liabilitiesAndEquity.toFixed(2)}).`,
+      );
+    }
+  }
+
+  if (!classed) {
+    notes.push(
+      `${month.slice(0, 7)}: balance sheet loaded at company level from QuickBooks' total column. ` +
+        `ARG does not class its balance sheet, so no divisional balance sheet was written.`,
+    );
+    return written;
+  }
+
   for (const [divisionCode, fields] of totals) {
     const values = {
       periodMonth: month,
       divisionCode,
-      cash: n(fields.cash ?? new Decimal(0)),
-      accountsReceivable: n(fields.accountsReceivable ?? new Decimal(0)),
-      otherCurrentAssets: n(fields.otherCurrentAssets ?? new Decimal(0)),
-      fixedAssets: n(fields.fixedAssets ?? new Decimal(0)),
-      accountsPayable: n(fields.accountsPayable ?? new Decimal(0)),
-      ccLiability: n(fields.ccLiability ?? new Decimal(0)),
-      otherCurrentLiabilities: n(fields.otherCurrentLiabilities ?? new Decimal(0)),
-      ltLiabilities: n(fields.ltLiabilities ?? new Decimal(0)),
-      shareholderEquity: n(fields.shareholderEquity ?? new Decimal(0)),
+      cash: n(fields.cash ?? zero),
+      accountsReceivable: n(fields.accountsReceivable ?? zero),
+      otherCurrentAssets: n(fields.otherCurrentAssets ?? zero),
+      fixedAssets: n(fields.fixedAssets ?? zero),
+      accountsPayable: n(fields.accountsPayable ?? zero),
+      ccLiability: n(fields.ccLiability ?? zero),
+      otherCurrentLiabilities: n(fields.otherCurrentLiabilities ?? zero),
+      ltLiabilities: n(fields.ltLiabilities ?? zero),
+      shareholderEquity: n(fields.shareholderEquity ?? zero),
       sourceSystem: 'QBO' as const,
       loadRunId,
       loadedAt: new Date(),
@@ -594,6 +872,197 @@ async function conformBalanceSheet(
   }
 
   return written;
+}
+
+// ---------------------------------------------------------------------------
+// QuickBooks — A/R and A/P aging
+// ---------------------------------------------------------------------------
+
+/**
+ * Days past due -> the five buckets fact_aging carries.
+ *
+ * Arithmetic on a real due date, not a match against a report's column heading —
+ * those headings move with the company's aging settings.
+ */
+export function bucketForDaysPastDue(daysPastDue: number): string {
+  if (daysPastDue <= 0) return 'current';
+  if (daysPastDue <= 30) return '1_30';
+  if (daysPastDue <= 60) return '31_60';
+  if (daysPastDue <= 90) return '61_90';
+  return 'over_90';
+}
+
+const AGING_BUCKETS = ['current', '1_30', '31_60', '61_90', 'over_90'] as const;
+
+/** Whole days between two dates, positive when the first is later. */
+export function daysBetween(later: string, earlier: string): number {
+  const a = Date.parse(`${later}T00:00:00Z`);
+  const b = Date.parse(`${earlier}T00:00:00Z`);
+  if (Number.isNaN(a) || Number.isNaN(b)) return 0;
+  return Math.floor((a - b) / 86_400_000);
+}
+
+interface QboTransaction {
+  Id?: string;
+  DocNumber?: string;
+  Balance?: number | string;
+  DueDate?: string;
+  TxnDate?: string;
+  ClassRef?: { value?: string; name?: string };
+  Line?: Array<{
+    Amount?: number | string;
+    SalesItemLineDetail?: { ClassRef?: { value?: string; name?: string } };
+    AccountBasedExpenseLineDetail?: { ClassRef?: { value?: string; name?: string } };
+    ItemBasedExpenseLineDetail?: { ClassRef?: { value?: string; name?: string } };
+  }>;
+}
+
+/**
+ * The single class a transaction belongs to, or null.
+ *
+ * QuickBooks puts the class in one of two places depending on a company
+ * preference: on the transaction itself when it is set to one class per whole
+ * transaction, or on each line when it is set to one class per line. Both are
+ * read, transaction first.
+ *
+ * A transaction whose lines carry DIFFERENT classes returns null rather than
+ * picking one or splitting the balance across them. The line amounts would make
+ * a split look principled, but a part-paid invoice's remaining balance does not
+ * belong to its lines in any proportion QuickBooks knows — the payment was
+ * against the invoice, not against a line. Reporting it beats inventing it.
+ */
+export function transactionClass(transaction: QboTransaction): string | null {
+  const direct = transaction.ClassRef?.name ?? transaction.ClassRef?.value;
+  if (direct) return direct;
+
+  const fromLines = new Set<string>();
+  for (const line of transaction.Line ?? []) {
+    const reference =
+      line.SalesItemLineDetail?.ClassRef ??
+      line.AccountBasedExpenseLineDetail?.ClassRef ??
+      line.ItemBasedExpenseLineDetail?.ClassRef;
+    const name = reference?.name ?? reference?.value;
+    if (name) fromLines.add(name);
+  }
+
+  return fromLines.size === 1 ? [...fromLines][0]! : null;
+}
+
+/**
+ * Open invoices and bills -> A/R and A/P by division and bucket.
+ *
+ * This does not read an aging report, and that is the point. No QuickBooks aging
+ * report carries a class: Intuit's documented column list for the DETAIL report
+ * has no klass_name, and the SUMMARY report is grouped by customer or vendor.
+ * fact_aging is keyed on division, so for as long as the aging came from those
+ * reports it could never be filled — which is exactly what "0 rows" and "came
+ * back without a class column" were saying, twelve months in a row.
+ *
+ * An open transaction carries its own ClassRef, Balance and DueDate, so the
+ * division is QuickBooks' own attribution and the bucket is arithmetic.
+ *
+ * One honest limitation, stated on the run rather than buried: open balances are
+ * as they stand NOW. A past month's aging cannot be reconstructed from them,
+ * because a since-paid invoice no longer has a balance to age. The snapshot is
+ * therefore written against one month — the latest in the window — and not
+ * spread backwards across months it cannot describe.
+ */
+async function conformAging(
+  db: Database,
+  loadRunId: string,
+  month: string,
+  transactions: QboTransaction[],
+  lookup: DivisionLookup,
+  kind: 'AR' | 'AP',
+  notes: string[],
+): Promise<number> {
+  const label = kind === 'AR' ? 'A/R' : 'A/P';
+  const asOf = lastDayOfMonth(month);
+
+  const totals = new Map<string, Map<string, Decimal>>();
+  // Every open balance, whatever its class. The company aging is what "Total
+  // A/R" means to ARG, and an unclassed invoice is still money owed to ARG.
+  const company = new Map<string, Decimal>(AGING_BUCKETS.map((bucket) => [bucket, new Decimal(0)]));
+  const unmapped = new Set<string>();
+  let unclassified = new Decimal(0);
+  let counted = 0;
+
+  for (const transaction of transactions) {
+    const balance = new Decimal(String(transaction.Balance ?? 0));
+    if (balance.isZero()) continue;
+    counted += 1;
+
+    // A bill with no due date is due on receipt, which is what QuickBooks shows
+    // in its own aging. A missing date is not a reason to call it current.
+    const due = transaction.DueDate ?? transaction.TxnDate ?? asOf;
+    const bucket = bucketForDaysPastDue(daysBetween(asOf, due));
+    company.set(bucket, company.get(bucket)!.plus(balance));
+
+    const className = transactionClass(transaction);
+    if (!className) {
+      unclassified = unclassified.plus(balance);
+      continue;
+    }
+
+    const divisionCode = resolveDivision(lookup, undefined, className);
+    if (!divisionCode) {
+      if (!isExcluded(lookup, undefined, className)) unmapped.add(className);
+      continue;
+    }
+
+    const buckets = totals.get(divisionCode) ?? new Map<string, Decimal>();
+    buckets.set(bucket, (buckets.get(bucket) ?? new Decimal(0)).plus(balance));
+    totals.set(divisionCode, buckets);
+  }
+
+  if (unmapped.size) {
+    throw new UnmappedSourceDataError(
+      `Open ${label} transactions carry classes that map to no division: ` +
+        `${[...unmapped].join(', ')}. Nothing was written — dropping them would understate ` +
+        `${label} for whichever division they belong to. Map them in Admin → Class mapping, or ` +
+        `mark them as not belonging to a division.`,
+      [...unmapped],
+    );
+  }
+
+  if (counted === 0) {
+    notes.push(`No open ${label} transactions, so there is nothing to age. That is a real zero.`);
+    return 0;
+  }
+
+  if (!unclassified.isZero()) {
+    notes.push(
+      `${unclassified.toFixed(2)} of open ${label} sits on transactions with no single class — ` +
+        `either unclassed, or split across classes on their lines. It is absent from the ` +
+        `divisional aging and will read as a gap against the balance sheet. It is never spread ` +
+        `across divisions: the remaining balance of a part-paid invoice does not belong to its ` +
+        `lines in any proportion QuickBooks knows.`,
+    );
+  }
+
+  // The month is replaced wholesale for this kind, so a bucket that emptied
+  // since the last pull goes to zero rather than leaving its old figure standing.
+  await db
+    .delete(t.factAging)
+    .where(sql`${t.factAging.periodMonth} = ${month} and ${t.factAging.kind} = ${kind}`);
+
+  const rows = [...totals].flatMap(([divisionCode, buckets]) =>
+    AGING_BUCKETS.map((bucket) => ({
+      periodMonth: month,
+      divisionCode,
+      kind,
+      bucket,
+      amount: n(buckets.get(bucket) ?? new Decimal(0)),
+      loadRunId,
+    })),
+  );
+
+  if (rows.length) await db.insert(t.factAging).values(rows);
+
+  // The company aging rides alongside; the run's row count stays the divisional
+  // rows, which is what "did the aging land" has always meant.
+  await writeCompanyTotals(db, loadRunId, month, kind === 'AR' ? 'AR_AGING' : 'AP_AGING', Object.fromEntries(company));
+  return rows.length;
 }
 
 // ---------------------------------------------------------------------------
@@ -622,16 +1091,71 @@ interface QboQueryResponse {
  * Westport has deliberately tagged as a payroll memo line must stay that way
  * through every subsequent refresh.
  */
-async function conformAccounts(db: Database, payload: QboQueryResponse): Promise<number> {
+/**
+ * QuickBooks' AccountType -> the balance-sheet grouping fact_bs_actual carries.
+ *
+ * This is not a guess and it is not a Westport decision. QuickBooks makes every
+ * account declare exactly one of these types, and each one has a single sensible
+ * home among the nine columns. Leaving them NULL and waiting for somebody to map
+ * 150 accounts by hand is what blocked the balance sheet for months: the P&L
+ * side has always derived its reporting line from QuickBooks' own classification
+ * in this very function, and holding the balance sheet to a stricter standard
+ * bought nothing except an empty Finance dashboard.
+ *
+ * What remains a real decision is still respected: a line somebody has set is
+ * never overwritten, so an account Westport deliberately regroups stays put.
+ */
+const ACCOUNT_TYPE_TO_BALANCE_SHEET_LINE: Record<string, string> = {
+  bank: 'cash',
+  'accounts receivable': 'accounts_receivable',
+  'other current asset': 'other_current_assets',
+  'fixed asset': 'fixed_assets',
+  // QuickBooks' "Other Asset" is non-current, and fixed_assets is the only
+  // non-current asset column the schema has. Grouping it there keeps total
+  // assets right, which is what the balance check and Cash Runway read.
+  'other asset': 'fixed_assets',
+  'accounts payable': 'accounts_payable',
+  'credit card': 'cc_liability',
+  'other current liability': 'other_current_liabilities',
+  'long term liability': 'lt_liabilities',
+  equity: 'shareholder_equity',
+};
+
+/** The balance-sheet line implied by an account's QuickBooks type, if any. */
+export function balanceSheetLineFor(accountType: string | undefined): string | null {
+  const key = (accountType ?? '').trim().toLowerCase();
+  return ACCOUNT_TYPE_TO_BALANCE_SHEET_LINE[key] ?? null;
+}
+
+/**
+ * The chart of accounts.
+ *
+ * New accounts land with both lines derived from QuickBooks' own classification.
+ * Existing accounts are left alone EXCEPT where a line is still NULL, which is
+ * filled in — that backfill is what unblocks a warehouse whose accounts were
+ * loaded before this mapping existed, without touching a single mapping anybody
+ * has actually made.
+ */
+export interface AccountSync {
+  /** Accounts QuickBooks returned and that are now in dim_account. */
+  synced: number;
+  added: number;
+  updated: number;
+  inactive: number;
+}
+
+async function conformAccounts(db: Database, payload: QboQueryResponse): Promise<AccountSync> {
   const accounts = payload.QueryResponse?.Account ?? [];
-  if (!accounts.length) return 0;
+  const result: AccountSync = { synced: 0, added: 0, updated: 0, inactive: 0 };
+  if (!accounts.length) return result;
 
-  const existing = new Set((await db.select({ id: t.dimAccount.accountId }).from(t.dimAccount)).map((row) => row.id));
+  const existing = new Map(
+    (await db.select().from(t.dimAccount)).map((row) => [row.accountId, row]),
+  );
 
-  let written = 0;
   for (const account of accounts) {
     const accountId = account.Id?.trim();
-    if (!accountId || existing.has(accountId)) continue;
+    if (!accountId) continue;
 
     const classification = (account.Classification ?? '').toLowerCase();
     const accountType =
@@ -653,31 +1177,140 @@ async function conformAccounts(db: Database, payload: QboQueryResponse): Promise
     // margin is wrong on every division, in every month.
     const isCogs = (account.AccountType ?? '').toLowerCase().includes('cost of goods');
 
+    const reportingLine =
+      accountType === 'INCOME'
+        ? 'revenue'
+        : isCogs
+          ? 'cogs'
+          : accountType === 'EXPENSE'
+            ? 'opex'
+            : null;
+
+    const balanceSheetLine = balanceSheetLineFor(account.AccountType);
+    const isActive = account.Active ?? true;
+    const accountName = account.Name ?? accountId;
+    const accountNumber = account.AcctNum ?? null;
+
+    result.synced += 1;
+    if (!isActive) result.inactive += 1;
+
+    const known = existing.get(accountId);
+    if (known) {
+      // What QuickBooks owns — the name, the number, whether it is active — is
+      // refreshed, so a renamed or deactivated account reads as it does in the
+      // books. The reporting lines only ever fill a hole: a line already set by
+      // Westport, by an earlier load or by hand is left exactly as it is.
+      const changes: Record<string, unknown> = {};
+      if (known.accountName !== accountName) changes.accountName = accountName;
+      if ((known.accountNumber ?? null) !== accountNumber) changes.accountNumber = accountNumber;
+      if (known.isActive !== isActive) changes.isActive = isActive;
+      if (!known.reportingLine && reportingLine) changes.reportingLine = reportingLine;
+      if (!known.balanceSheetLine && balanceSheetLine) changes.balanceSheetLine = balanceSheetLine;
+      if (Object.keys(changes).length) {
+        await db.update(t.dimAccount).set(changes).where(eq(t.dimAccount.accountId, accountId));
+        result.updated += 1;
+      }
+      continue;
+    }
+
     await db
       .insert(t.dimAccount)
       .values({
         accountId,
-        accountNumber: account.AcctNum ?? null,
-        accountName: account.Name ?? accountId,
+        accountNumber,
+        accountName,
         accountType: isCogs ? 'COGS' : accountType,
-        // Balance-sheet accounts are deliberately left unmapped: which grouping
-        // a given asset belongs to is a Westport decision, and the balance-sheet
-        // conform refuses to run rather than guessing it.
-        reportingLine:
-          accountType === 'INCOME'
-            ? 'revenue'
-            : isCogs
-              ? 'cogs'
-              : accountType === 'EXPENSE'
-                ? 'opex'
-                : null,
-        isActive: account.Active ?? true,
+        reportingLine,
+        balanceSheetLine,
+        // An inactive account still carries every balance it ever held, so it is
+        // loaded and marked inactive rather than skipped. Skipping it does not
+        // remove it from a prior balance sheet — it only removes our ability to
+        // read one.
+        isActive,
       })
       .onConflictDoNothing();
-
-    written += 1;
+    result.added += 1;
   }
 
+  return result;
+}
+
+/**
+ * The trial balance, one month: every account's debit or credit, and the totals.
+ *
+ * It used to be landed and dropped — "0 rows" on the pull screen, which read as
+ * QuickBooks returning nothing. It is company-level by nature (QuickBooks gives
+ * it no class), so it is filed with the other company totals as statement 'TB':
+ * one line per account (debit − credit) plus the two column totals, which the
+ * "trial balance balances" check compares.
+ */
+export function readTrialBalance(report: QboReport): {
+  accounts: Array<{ id: string; name: string; net: Decimal }>;
+  debits: Decimal;
+  credits: Decimal;
+} {
+  const accounts: Array<{ id: string; name: string; net: Decimal }> = [];
+  let debits = new Decimal(0);
+  let credits = new Decimal(0);
+  let reportedDebits: Decimal | null = null;
+  let reportedCredits: Decimal | null = null;
+
+  const walk = (rows: QboRow[] | undefined) => {
+    for (const row of rows ?? []) {
+      if (row.Rows?.Row) walk(row.Rows.Row);
+      if (row.ColData?.length) {
+        const [label, debit, credit] = row.ColData;
+        const name = (label?.value ?? '').trim();
+        if (!name) continue;
+        const d = amount(debit);
+        const c = amount(credit);
+        debits = debits.plus(d);
+        credits = credits.plus(c);
+        accounts.push({ id: (label?.id ?? name).trim(), name, net: d.minus(c) });
+      }
+      if (row.Summary?.ColData?.length && /total/i.test(row.Summary.ColData[0]?.value ?? '')) {
+        reportedDebits = amount(row.Summary.ColData[1]);
+        reportedCredits = amount(row.Summary.ColData[2]);
+      }
+    }
+  };
+  walk(report.Rows?.Row);
+
+  // QuickBooks' own TOTAL row wins when it is there: it is what an accountant
+  // sees at the foot of the report.
+  return {
+    accounts,
+    debits: reportedDebits ?? debits,
+    credits: reportedCredits ?? credits,
+  };
+}
+
+async function conformTrialBalance(
+  db: Database,
+  loadRunId: string,
+  month: string,
+  report: QboReport,
+  notes: string[],
+): Promise<number> {
+  const { accounts, debits, credits } = readTrialBalance(report);
+  if (!accounts.length) {
+    notes.push(`${month.slice(0, 7)}: QuickBooks returned a trial balance with no accounts.`);
+    return 0;
+  }
+
+  const lines: Record<string, Decimal> = { total_debits: debits, total_credits: credits };
+  for (const account of accounts) {
+    const key = `account:${account.id}`;
+    lines[key] = (lines[key] ?? new Decimal(0)).plus(account.net);
+  }
+  const written = await writeCompanyTotals(db, loadRunId, month, 'TB', lines);
+
+  if (!debits.minus(credits).abs().lte(0.01)) {
+    notes.push(
+      `${month.slice(0, 7)}: the trial balance does not balance — debits ${debits.toFixed(2)}, ` +
+        `credits ${credits.toFixed(2)}.`,
+    );
+  }
   return written;
 }
 
@@ -688,9 +1321,12 @@ async function conformAccounts(db: Database, payload: QboQueryResponse): Promise
  * exactly what §3 forbids. What this does is report which classes have no
  * division, which is the alert the spec asks for.
  */
-async function checkClasses(db: Database, payload: QboQueryResponse): Promise<string[]> {
+async function checkClasses(
+  db: Database,
+  payload: QboQueryResponse,
+): Promise<{ unmapped: string[]; recorded: number; active: number }> {
   const classes = payload.QueryResponse?.Class ?? [];
-  if (!classes.length) return [];
+  if (!classes.length) return { unmapped: [], recorded: 0, active: 0 };
 
   const lookup = await divisionLookup(db);
   const unmapped: string[] = [];
@@ -731,7 +1367,11 @@ async function checkClasses(db: Database, payload: QboQueryResponse): Promise<st
     }
   }
 
-  return unmapped;
+  return {
+    unmapped,
+    recorded: classes.length,
+    active: classes.filter((entry) => entry.Active !== false).length,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -1202,9 +1842,128 @@ export function parseMonthHeader(value: unknown): string | null {
   return null;
 }
 
+/**
+ * Is this row a HEADER, or a row of data that happens to contain a keyword?
+ *
+ * ARG's sheet is why this exists. Its layout is one row per month per division,
+ * with a "Row Type" column whose value is literally "Division". The old detector
+ * looked for any cell matching /^div(ision)?$/ and found it — in the DATA. It
+ * then scanned that data row for month columns, hit the Excel serial in "Month
+ * Start" and the raw figures, and read revenue and headcount numbers as dates.
+ *
+ * A header row is mostly words. Requiring that is what stops a data row being
+ * mistaken for one, and it is checked before anything else is believed.
+ */
+function looksLikeHeaderRow(row: string[]): boolean {
+  const filled = row.map((cell) => String(cell ?? '').trim()).filter(Boolean);
+  if (filled.length < 2) return false;
+
+  const numeric = filled.filter((cell) => /^[$(]?-?[\d,.]+%?\)?$/.test(cell)).length;
+  // A header may legitimately carry a year or a date as a column title, so this
+  // is a majority test rather than an absolute one.
+  return numeric * 2 < filled.length;
+}
+
+/** A column whose header names one of the five reporting concepts. */
+// A forecast log prefixes its figures — "FC Revenue" beside "Act Revenue" — so
+// the forecast prefix is accepted and an actuals column never is.
+const FORECAST_PREFIX = String.raw`(?:(?:fc|fcst|forecast(?:ed)?)\s+)?`;
+const LONG_VALUE_COLUMNS: Array<{ line: 'revenue' | 'cogs' | 'opex'; pattern: RegExp }> = [
+  { line: 'revenue', pattern: new RegExp(`^${FORECAST_PREFIX}revenue\\b`, 'i') },
+  { line: 'cogs', pattern: new RegExp(`^${FORECAST_PREFIX}(cogs|cost of (goods|sales))\\b`, 'i') },
+  { line: 'opex', pattern: new RegExp(`^${FORECAST_PREFIX}(opex|operating expenses?)\\b`, 'i') },
+];
+
+export interface LongSheetTable {
+  headerIndex: number;
+  monthColumn: number;
+  yearColumn: number | null;
+  divisionColumn: number;
+  rowTypeColumn: number | null;
+  /** Reporting line -> the column carrying its figure. */
+  valueColumns: Array<{ line: 'revenue' | 'cogs' | 'opex'; index: number }>;
+  headcountColumn: number | null;
+}
+
+/**
+ * The LONG layout: one row per month per division, values across the columns.
+ *
+ * This is the shape ARG's connector workbook actually uses, and the shape a
+ * spreadsheet ends up in whenever somebody maintains it as a list rather than a
+ * grid. It is detected before the wide layout because a long sheet also contains
+ * a Division column, so the wide detector would half-match it and read the wrong
+ * cells — which is exactly what happened.
+ */
+export function findLongSheetTable(values: string[][]): LongSheetTable | null {
+  for (let index = 0; index < Math.min(values.length, 15); index++) {
+    const row = (values[index] ?? []).map((cell) => String(cell ?? '').trim());
+    if (!looksLikeHeaderRow(row)) continue;
+
+    const lowered = row.map((cell) => cell.toLowerCase());
+
+    const divisionColumn = lowered.findIndex((cell) => /^div(ision)?$/.test(cell));
+    if (divisionColumn === -1) continue;
+
+    // A month column names the month, rather than being one month's figures.
+    const monthColumn = lowered.findIndex((cell) => /^(month|period|month name)$/.test(cell));
+    if (monthColumn === -1) continue;
+
+    const yearColumn = lowered.findIndex((cell) => /^(year|fiscal year|fy)$/.test(cell));
+    const rowTypeColumn = lowered.findIndex((cell) => /^(row ?type|type|level)$/.test(cell));
+
+    const valueColumns = LONG_VALUE_COLUMNS.flatMap(({ line, pattern }) => {
+      const column = row.findIndex((cell) => pattern.test(cell));
+      return column === -1 ? [] : [{ line, index: column }];
+    });
+
+    const headcountColumn = row.findIndex((cell) => /^head\s*count\b|^fte\b/i.test(cell));
+
+    if (!valueColumns.length && headcountColumn === -1) continue;
+
+    return {
+      headerIndex: index,
+      monthColumn,
+      yearColumn: yearColumn === -1 ? null : yearColumn,
+      divisionColumn,
+      rowTypeColumn: rowTypeColumn === -1 ? null : rowTypeColumn,
+      valueColumns,
+      headcountColumn: headcountColumn === -1 ? null : headcountColumn,
+    };
+  }
+
+  return null;
+}
+
+/**
+ * A month from a name plus a year held in a separate column.
+ *
+ * "JAN" alone is not a month — it is a month NAME. Pairing it with the Year
+ * column is what makes it one, and refusing to guess the year is what stops a
+ * 2026 budget quietly loading against the current calendar year.
+ */
+export function monthFromNameAndYear(name: unknown, year: unknown): string | null {
+  const text = String(name ?? '').trim();
+  const yearText = String(year ?? '').trim();
+  if (!text || !/^\d{4}$/.test(yearText)) return null;
+
+  const months = [
+    'jan', 'feb', 'mar', 'apr', 'may', 'jun',
+    'jul', 'aug', 'sep', 'oct', 'nov', 'dec',
+  ];
+  const index = months.indexOf(text.slice(0, 3).toLowerCase());
+  if (index === -1) return null;
+
+  return `${yearText}-${String(index + 1).padStart(2, '0')}-01`;
+}
+
 export function findSheetTable(values: string[][]): SheetTable | null {
   for (let index = 0; index < Math.min(values.length, 10); index++) {
     const row = values[index] ?? [];
+    // Checked first: a data row carrying the word "Division" in a Row Type
+    // column is not a header, and believing it was is what read ARG's revenue
+    // figures as dates.
+    if (!looksLikeHeaderRow(row.map((cell) => String(cell ?? '')))) continue;
+
     const lowered = row.map((cell) => String(cell ?? '').trim().toLowerCase());
 
     const divisionColumn = lowered.findIndex((cell) => /^div(ision)?$/.test(cell));
@@ -1219,12 +1978,165 @@ export function findSheetTable(values: string[][]): SheetTable | null {
       if (month) months.push({ index: columnIndex, month });
     });
 
-    if (months.length) {
+    // Two months, not one. A single "month" in a header row is far more often a
+    // stray year or an id than a genuine one-month report.
+    if (months.length >= 2) {
       return { headerIndex: index, divisionColumn, lineItemColumn, months };
     }
   }
 
   return null;
+}
+
+const MONTH_NAMES = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
+
+/** "JAN", "Jan", "January" — a month NAME with no year. */
+function monthNameIndex(value: unknown): number {
+  const text = String(value ?? '').trim().toLowerCase();
+  if (!/^[a-z]{3,9}\.?$/.test(text)) return -1;
+  const index = MONTH_NAMES.indexOf(text.slice(0, 3));
+  if (index === -1) return -1;
+  // "Mar" and "March" are months; "Marketing" is not.
+  const full = new Date(Date.UTC(2000, index, 1)).toLocaleString('en-US', { month: 'long', timeZone: 'UTC' });
+  return full.toLowerCase().startsWith(text.replace(/\.$/, '')) ? index : -1;
+}
+
+/** Which reporting line a section title names; null for derived lines (GP, NOI). */
+function sectionLine(title: string): 'revenue' | 'cogs' | 'opex' | null {
+  const text = title.trim().toLowerCase();
+  // Derived lines are recomputed, never imported: loading GP beside revenue and
+  // COGS would let the identity drift the moment someone edits one cell.
+  if (/\b(gp|gross profit|noi|net|ebitda|margin|profit)\b/.test(text)) return null;
+  if (/\bcogs\b|cost of (goods|sales|revenue)/.test(text)) return 'cogs';
+  if (/\bop\s*ex\b|operating expense/.test(text)) return 'opex';
+  if (/\brev(enue)?s?\b|\bsales\b/.test(text)) return 'revenue';
+  return null;
+}
+
+export interface SectionedCell<Line extends string = 'revenue' | 'cogs' | 'opex'> {
+  periodMonth: string;
+  divisionLabel: string;
+  lineItem: Line;
+  amount: string;
+}
+
+/**
+ * The SECTIONED layout: a title row naming the line ("Monthly Rev $",
+ * "COGS Budget (10X Plan)"), then a Divisions × JAN…DEC grid under it, repeated
+ * for each line.
+ *
+ * This is how ARG's own FP&A workbook lays out both the Monthly Budget and the
+ * 10X plan, and neither of the other readers could see it: the header says
+ * "Divisions", not "Division", and its months are bare names with the year held
+ * elsewhere — in the sheet title ("Budget - 2026") or in a row of years above
+ * the months (the 10X plan runs 2026 to 2028 across one row). So every budget
+ * pull failed with "no header row this can read" on a sheet that was full.
+ *
+ * The year is never guessed: a month column with no year above it and no year
+ * in the title is not read.
+ */
+export function readSectionedGrid(values: unknown[][]): { cells: SectionedCell[]; sections: string[] } | null {
+  return readSections(values, sectionLine, null);
+}
+
+/**
+ * The same layout for headcount: a Divisions × JAN…DEC grid of people, under a
+ * "Headcount" title or under no title at all.
+ */
+export function readHeadcountGrid(values: unknown[][]): { cells: SectionedCell<'headcount'>[]; sections: string[] } | null {
+  return readSections(
+    values,
+    (title) => (/head\s*count|\bfte\b|employees?|staff|people/i.test(title) ? 'headcount' : null),
+    'headcount',
+  );
+}
+
+function readSections<Line extends string>(
+  values: unknown[][],
+  classify: (title: string) => Line | null,
+  /** The line a grid is read as before any title has named one. */
+  untitled: Line | null,
+): { cells: SectionedCell<Line>[]; sections: string[] } | null {
+  const text = (cell: unknown) => String(cell ?? '').trim();
+
+  let titleYear: number | null = null;
+  for (const row of values.slice(0, 6)) {
+    for (const cell of row ?? []) {
+      const match = text(cell).match(/\b(20\d{2})\b/);
+      if (match && !/^\d+(\.\d+)?$/.test(text(cell))) {
+        titleYear = Number(match[1]);
+        break;
+      }
+    }
+    if (titleYear) break;
+  }
+
+  const cells: SectionedCell<Line>[] = [];
+  const sections: string[] = [];
+  let line: Line | null = untitled;
+  let titled = false;
+  let grid: { divisionColumn: number; months: Array<{ index: number; month: string }> } | null = null;
+  let sawHeader = false;
+
+  for (let index = 0; index < values.length; index++) {
+    const row = values[index] ?? [];
+    const filled = row.map(text).filter(Boolean);
+
+    // A title: one lone piece of text. Starts a new section and forgets the
+    // previous grid, so rows can never be read under the wrong line.
+    if (filled.length === 1 && !/^-?[\d,.]+$/.test(filled[0]!)) {
+      const named = classify(filled[0]!);
+      // Before the first title that names a line, an untitled grid keeps its
+      // default; once titles are in use, a title naming nothing ends the section.
+      if (named || titled) {
+        line = named;
+        titled = true;
+      }
+      grid = null;
+      if (named) sections.push(filled[0]!);
+      continue;
+    }
+
+    const divisionColumn = row.findIndex((cell) => /^div(ision)?s?$/i.test(text(cell)));
+    const monthColumns = row
+      .map((cell, column) => ({ column, month: monthNameIndex(cell) }))
+      .filter((entry) => entry.month !== -1);
+
+    if (divisionColumn !== -1 && monthColumns.length >= 2) {
+      sawHeader = true;
+      // Years from the row above, carried rightward from wherever each one sits
+      // (a year labels the block of months that starts under it).
+      const above = values[index - 1] ?? [];
+      const months: Array<{ index: number; month: string }> = [];
+      for (const { column, month } of monthColumns) {
+        let year: number | null = null;
+        for (let left = column; left >= 0; left--) {
+          const candidate = text(above[left]);
+          if (/^20\d{2}$/.test(candidate)) {
+            year = Number(candidate);
+            break;
+          }
+        }
+        year ??= titleYear;
+        if (!year) continue;
+        months.push({ index: column, month: `${year}-${String(month + 1).padStart(2, '0')}-01` });
+      }
+      grid = line && months.length ? { divisionColumn, months } : null;
+      continue;
+    }
+
+    if (!grid || !line) continue;
+    const label = text(row[grid.divisionColumn]);
+    if (!label) continue;
+
+    for (const month of grid.months) {
+      const raw = text(row[month.index]).replace(/[$,\s]/g, '');
+      if (!raw || !/^-?\d+(\.\d+)?(e-?\d+)?$/i.test(raw)) continue;
+      cells.push({ periodMonth: month.month, divisionLabel: label, lineItem: line, amount: raw });
+    }
+  }
+
+  return sawHeader ? { cells, sections } : null;
 }
 
 function normaliseLineItem(value: string): 'revenue' | 'cogs' | 'opex' | null {
@@ -1237,25 +2149,146 @@ function normaliseLineItem(value: string): 'revenue' | 'cogs' | 'opex' | null {
   return null;
 }
 
+/** What each budget scenario is called on screen. */
+const SCENARIO_NAMES: Record<string, { name: string; sortOrder: number }> = {
+  QBO_BUDGET: { name: 'QuickBooks Budget', sortOrder: 0 },
+  MONTHLY_BUDGET: { name: 'FY Operating Budget (Sheets)', sortOrder: 1 },
+  TENX: { name: '10X Growth Plan', sortOrder: 2 },
+  FORECAST: { name: 'Forecast', sortOrder: 3 },
+};
+
+/** Creates the scenario on first use, and keeps its description current. */
+async function ensureScenario(
+  db: Database,
+  scenarioCode: string,
+  months: string[],
+  description?: string,
+): Promise<void> {
+  const sorted = [...months].sort();
+  const meta = SCENARIO_NAMES[scenarioCode] ?? { name: scenarioCode, sortOrder: 9 };
+  const [existing] = await db
+    .select()
+    .from(t.budgetScenario)
+    .where(eq(t.budgetScenario.scenarioCode, scenarioCode))
+    .limit(1);
+
+  if (!existing) {
+    await db.insert(t.budgetScenario).values({
+      scenarioCode,
+      scenarioName: meta.name,
+      description: description ?? null,
+      firstMonth: sorted[0]!,
+      lastMonth: sorted[sorted.length - 1]!,
+      sortOrder: meta.sortOrder,
+    });
+    return;
+  }
+
+  await db
+    .update(t.budgetScenario)
+    .set({
+      ...(description ? { description } : {}),
+      firstMonth: sorted[0]! < existing.firstMonth ? sorted[0]! : existing.firstMonth,
+      lastMonth: sorted[sorted.length - 1]! > existing.lastMonth ? sorted[sorted.length - 1]! : existing.lastMonth,
+    })
+    .where(eq(t.budgetScenario.scenarioCode, scenarioCode));
+}
+
 async function conformBudget(
   db: Database,
   loadRunId: string,
-  scenarioCode: 'MONTHLY_BUDGET' | 'TENX',
+  scenarioCode: 'MONTHLY_BUDGET' | 'TENX' | 'FORECAST',
   values: string[][],
   lookup: DivisionLookup,
 ): Promise<{ written: number; notes: string[] }> {
-  const table = findSheetTable(values);
-  if (!table) {
-    throw new UnmappedSourceDataError(
-      'That sheet has no header row naming a Division column and at least one month column, so ' +
-        'it could not be read. Nothing was written. The expected shape is one row per division ' +
-        'and line item, with a column per month.',
-    );
-  }
-
   const rows: Array<{ periodMonth: string; divisionCode: string; lineItem: 'revenue' | 'cogs' | 'opex'; amount: Decimal }> = [];
   const unmappedDivisions = new Set<string>();
   const unmappedLines = new Set<string>();
+
+  /**
+   * The LONG layout is tried first, and ARG's workbook is in it: one row per
+   * month per division, Revenue / COGS / OpEx across the columns.
+   *
+   * Order matters. A long sheet also has a Division column, so the wide detector
+   * half-matches it and then reads whichever numeric cells happen to sit in the
+   * serial-date range as months — which is how revenue figures became dates.
+   */
+  const longTable = findLongSheetTable(values);
+
+  if (longTable) {
+    for (let index = longTable.headerIndex + 1; index < values.length; index++) {
+      const row = values[index] ?? [];
+
+      // A "Total" row is a rollup of the divisions beside it. Loading it would
+      // double every figure; §3 says ARG Total is computed, never stored.
+      const rowType =
+        longTable.rowTypeColumn === null
+          ? ''
+          : String(row[longTable.rowTypeColumn] ?? '').trim().toLowerCase();
+      if (rowType && rowType !== 'division') continue;
+
+      const divisionLabel = String(row[longTable.divisionColumn] ?? '').trim();
+      if (!divisionLabel) continue;
+
+      const divisionCode = lookup.byKey.get(divisionLabel.toLowerCase());
+      if (!divisionCode) {
+        if (!/^(arg[\s_-]*total|total|consolidated)$/i.test(divisionLabel)) {
+          unmappedDivisions.add(divisionLabel);
+        }
+        continue;
+      }
+
+      const periodMonth =
+        monthFromNameAndYear(
+          row[longTable.monthColumn],
+          longTable.yearColumn === null ? null : row[longTable.yearColumn],
+        ) ?? parseMonthHeader(row[longTable.monthColumn]);
+
+      if (!periodMonth) continue;
+
+      for (const column of longTable.valueColumns) {
+        const raw = String(row[column.index] ?? '').replace(/[$,\s]/g, '');
+        if (!raw) continue;
+        rows.push({
+          periodMonth,
+          divisionCode,
+          lineItem: column.line,
+          amount: new Decimal(raw || '0'),
+        });
+      }
+    }
+  }
+
+  const table = longTable ? null : findSheetTable(values);
+  const sectioned = longTable || table ? null : readSectionedGrid(values);
+  if (!longTable && !table && !sectioned) {
+    throw new UnmappedSourceDataError(
+      'That sheet has no header row this can read. Nothing was written. Three shapes are ' +
+        'understood: one row per month per division with Revenue/COGS/OpEx columns; a grid ' +
+        'with Division and Line Item columns and one column per month; or titled sections ' +
+        '("Monthly Rev $", "COGS Budget") each holding a Divisions × JAN…DEC grid.',
+    );
+  }
+
+  if (sectioned) {
+    for (const cell of sectioned.cells) {
+      const divisionCode = lookup.byKey.get(cell.divisionLabel.toLowerCase());
+      if (!divisionCode) {
+        if (!/^(arg[\s_-]*total|total|consolidated)$/i.test(cell.divisionLabel)) {
+          unmappedDivisions.add(cell.divisionLabel);
+        }
+        continue;
+      }
+      rows.push({
+        periodMonth: cell.periodMonth,
+        divisionCode,
+        lineItem: cell.lineItem,
+        amount: new Decimal(cell.amount),
+      });
+    }
+  }
+
+  if (table) {
 
   for (let index = table.headerIndex + 1; index < values.length; index++) {
     const row = values[index] ?? [];
@@ -1291,6 +2324,7 @@ async function conformBudget(
       });
     }
   }
+  }
 
   if (!rows.length) {
     throw new UnmappedSourceDataError(
@@ -1301,22 +2335,12 @@ async function conformBudget(
 
   await ensurePeriods(db, [...new Set(rows.map((row) => row.periodMonth))]);
 
-  const [scenario] = await db
-    .select()
-    .from(t.budgetScenario)
-    .where(eq(t.budgetScenario.scenarioCode, scenarioCode))
-    .limit(1);
-
-  const months = rows.map((row) => row.periodMonth).sort();
-  if (!scenario) {
-    await db.insert(t.budgetScenario).values({
-      scenarioCode,
-      scenarioName: scenarioCode === 'TENX' ? '10X Growth Plan' : 'FY Operating Budget',
-      firstMonth: months[0]!,
-      lastMonth: months[months.length - 1]!,
-      sortOrder: scenarioCode === 'TENX' ? 2 : 1,
-    });
-  }
+  await ensureScenario(
+    db,
+    scenarioCode,
+    rows.map((row) => row.periodMonth),
+    `Google Sheets, loaded ${new Date().toISOString().slice(0, 10)}`,
+  );
 
   for (const row of rows) {
     const values = {
@@ -1365,27 +2389,73 @@ async function conformHeadcount(
   values: string[][],
   lookup: DivisionLookup,
 ): Promise<number> {
-  const table = findSheetTable(values);
-  if (!table) {
+  const rows: Array<{ periodMonth: string; divisionCode: string; headcount: string }> = [];
+
+  // The LONG layout first, for the same reason as the budget: a long sheet has a
+  // Division column too, so the wide detector half-matches it and then reads a
+  // headcount figure that happens to fall in the serial-date range as a month.
+  const longTable = findLongSheetTable(values);
+
+  if (longTable && longTable.headcountColumn !== null) {
+    for (let index = longTable.headerIndex + 1; index < values.length; index++) {
+      const row = values[index] ?? [];
+
+      const rowType =
+        longTable.rowTypeColumn === null
+          ? ''
+          : String(row[longTable.rowTypeColumn] ?? '').trim().toLowerCase();
+      if (rowType && rowType !== 'division') continue;
+
+      const divisionCode = lookup.byKey.get(
+        String(row[longTable.divisionColumn] ?? '').trim().toLowerCase(),
+      );
+      if (!divisionCode) continue;
+
+      const periodMonth =
+        monthFromNameAndYear(
+          row[longTable.monthColumn],
+          longTable.yearColumn === null ? null : row[longTable.yearColumn],
+        ) ?? parseMonthHeader(row[longTable.monthColumn]);
+      if (!periodMonth) continue;
+
+      const raw = String(row[longTable.headcountColumn] ?? '').replace(/[,\s]/g, '');
+      if (!raw) continue;
+      rows.push({ periodMonth, divisionCode, headcount: new Decimal(raw).toFixed(2) });
+    }
+  }
+
+  const table = longTable ? null : findSheetTable(values);
+  const sectioned = longTable || table ? null : readHeadcountGrid(values);
+  if (!longTable && !table && !sectioned) {
     throw new UnmappedSourceDataError(
-      'The headcount sheet has no header row naming a Division column and at least one month ' +
-        'column, so it could not be read. Nothing was written.',
+      'The headcount sheet has no header row this can read. Nothing was written. Three shapes are ' +
+        'understood: one row per month per division with a Headcount column; a grid with a ' +
+        'Division column and one column per month; or, like the budget tab, a Divisions × ' +
+        'JAN…DEC grid with the year in the title.',
     );
   }
 
-  const rows: Array<{ periodMonth: string; divisionCode: string; headcount: string }> = [];
+  if (sectioned) {
+    for (const cell of sectioned.cells) {
+      const divisionCode = lookup.byKey.get(cell.divisionLabel.toLowerCase());
+      if (!divisionCode) continue;
+      rows.push({ periodMonth: cell.periodMonth, divisionCode, headcount: new Decimal(cell.amount).toFixed(2) });
+    }
+  }
 
-  for (let index = table.headerIndex + 1; index < values.length; index++) {
-    const row = values[index] ?? [];
-    const divisionCode = lookup.byKey.get(
-      String(row[table.divisionColumn] ?? '').trim().toLowerCase(),
-    );
-    if (!divisionCode) continue;
+  if (table) {
+    for (let index = table.headerIndex + 1; index < values.length; index++) {
+      const row = values[index] ?? [];
+      const divisionCode = lookup.byKey.get(
+        String(row[table.divisionColumn] ?? '').trim().toLowerCase(),
+      );
+      if (!divisionCode) continue;
 
-    for (const month of table.months) {
-      const raw = String(row[month.index] ?? '').replace(/[,\s]/g, '');
-      if (!raw) continue;
-      rows.push({ periodMonth: month.month, divisionCode, headcount: new Decimal(raw).toFixed(2) });
+      for (const month of table.months) {
+        const raw = String(row[month.index] ?? '').replace(/[,\s]/g, '');
+        if (!raw) continue;
+        rows.push({ periodMonth: month.month, divisionCode, headcount: new Decimal(raw).toFixed(2) });
+      }
     }
   }
 
@@ -1412,6 +2482,195 @@ async function conformHeadcount(
   }
 
   return rows.length;
+}
+
+// ---------------------------------------------------------------------------
+// QuickBooks — budgets
+// ---------------------------------------------------------------------------
+
+interface QboBudget {
+  Id?: string;
+  Name?: string;
+  StartDate?: string;
+  EndDate?: string;
+  BudgetType?: string;
+  BudgetEntryType?: string;
+  Active?: boolean;
+  MetaData?: { LastUpdatedTime?: string };
+  BudgetDetail?: Array<{
+    BudgetDate?: string;
+    Amount?: number | string;
+    AccountRef?: { value?: string; name?: string };
+    ClassRef?: { value?: string; name?: string };
+  }>;
+}
+
+const FORECAST_NAME = /forecast|outlook|fcst/i;
+
+/** The months a detail's amount belongs to, and the share of it each gets. */
+function budgetMonths(date: string, entryType: string | undefined): string[] {
+  const first = `${date.slice(0, 7)}-01`;
+  const span = /quarter/i.test(entryType ?? '') ? 3 : /annual|year/i.test(entryType ?? '') ? 12 : 1;
+  const [year, month] = first.split('-').map(Number) as [number, number];
+  return Array.from({ length: span }, (_, offset) => {
+    const shifted = new Date(Date.UTC(year, month - 1 + offset, 1));
+    return `${shifted.getUTCFullYear()}-${String(shifted.getUTCMonth() + 1).padStart(2, '0')}-01`;
+  });
+}
+
+/**
+ * Which budgets are current: one per scenario per year, the most recently edited.
+ *
+ * QuickBooks keeps every budget anybody ever made — last year's, a draft, the
+ * one revised in June. Summing them would double the plan; picking by name would
+ * break the first time someone renames one. The newest active profit-and-loss
+ * budget for each year wins, and a budget whose name says "forecast" is the
+ * forecast rather than the budget.
+ */
+export function currentBudgets(budgets: QboBudget[]): Array<{ scenario: 'QBO_BUDGET' | 'FORECAST'; budget: QboBudget }> {
+  const chosen = new Map<string, { scenario: 'QBO_BUDGET' | 'FORECAST'; budget: QboBudget }>();
+  for (const budget of budgets) {
+    if (budget.Active === false) continue;
+    if (budget.BudgetType && !/profit/i.test(budget.BudgetType)) continue;
+    const scenario = FORECAST_NAME.test(budget.Name ?? '') ? 'FORECAST' : 'QBO_BUDGET';
+    const year = (budget.StartDate ?? budget.BudgetDetail?.[0]?.BudgetDate ?? '').slice(0, 4);
+    const key = `${scenario}|${year}`;
+    const current = chosen.get(key);
+    const stamp = budget.MetaData?.LastUpdatedTime ?? '';
+    if (!current || stamp > (current.budget.MetaData?.LastUpdatedTime ?? '')) {
+      chosen.set(key, { scenario, budget });
+    }
+  }
+  return [...chosen.values()];
+}
+
+async function conformQboBudgets(
+  db: Database,
+  loadRunId: string,
+  budgets: QboBudget[],
+  lookup: DivisionLookup,
+  notes: string[],
+): Promise<number> {
+  const selected = currentBudgets(budgets);
+  if (!selected.length) {
+    notes.push(
+      budgets.length
+        ? 'QuickBooks holds budgets, but none is an active profit-and-loss budget, so none was loaded.'
+        : 'QuickBooks holds no budgets. Budget columns stay blank until one is created in QuickBooks ' +
+            '(or a budget tab is loaded from Google Sheets).',
+    );
+    return 0;
+  }
+
+  const accounts = new Map((await db.select().from(t.dimAccount)).map((row) => [row.accountId, row]));
+  const budgetLine = (line: string | null | undefined): 'revenue' | 'cogs' | 'opex' | null =>
+    line === 'revenue' ? 'revenue' : line === 'cogs' || line === 'payroll_direct' ? 'cogs' : line === 'opex' || line === 'payroll_expense' ? 'opex' : null;
+
+  let written = 0;
+
+  for (const { scenario, budget } of selected) {
+    const divisional = new Map<string, Decimal>();
+    const company = new Map<string, Decimal>();
+    const unplacedAccounts = new Set<string>();
+    const unmappedClasses = new Set<string>();
+
+    for (const detail of budget.BudgetDetail ?? []) {
+      if (!detail.BudgetDate) continue;
+      const value = new Decimal(String(detail.Amount ?? 0));
+      if (value.isZero()) continue;
+
+      const accountId = detail.AccountRef?.value ?? '';
+      const line = budgetLine(accounts.get(accountId)?.reportingLine);
+      if (!line) {
+        // A balance-sheet account in a P&L budget, or one not yet in the chart.
+        unplacedAccounts.add(detail.AccountRef?.name ?? accountId);
+        continue;
+      }
+
+      const months = budgetMonths(detail.BudgetDate, budget.BudgetEntryType);
+      const share = value.div(months.length);
+
+      const classRef = detail.ClassRef;
+      const divisionCode = classRef
+        ? resolveDivision(lookup, classRef.value, classRef.name)
+        : null;
+      if (classRef && !divisionCode && !isExcluded(lookup, classRef.value, classRef.name)) {
+        unmappedClasses.add(classRef.name ?? classRef.value ?? '?');
+      }
+
+      for (const month of months) {
+        const companyKey = `${month}|${line}`;
+        company.set(companyKey, (company.get(companyKey) ?? new Decimal(0)).plus(share));
+        if (divisionCode) {
+          const k = `${month}|${divisionCode}|${line}`;
+          divisional.set(k, (divisional.get(k) ?? new Decimal(0)).plus(share));
+        }
+      }
+    }
+
+    const months = [...new Set([...company.keys()].map((k) => k.split('|')[0]!))].sort();
+    if (!months.length) {
+      notes.push(`The QuickBooks budget "${budget.Name}" has no profit-and-loss amounts to load.`);
+      continue;
+    }
+
+    await ensurePeriods(db, months);
+    await ensureScenario(
+      db,
+      scenario,
+      months,
+      `QuickBooks budget “${budget.Name ?? budget.Id}”${budget.MetaData?.LastUpdatedTime ? `, last edited ${budget.MetaData.LastUpdatedTime.slice(0, 10)}` : ''}`,
+    );
+
+    // The chosen budget replaces the scenario for its months wholesale, so a line
+    // somebody deleted from the budget goes to zero instead of lingering.
+    await db
+      .delete(t.factBudget)
+      .where(
+        sql`${t.factBudget.scenarioCode} = ${scenario} and ${t.factBudget.periodMonth} >= ${months[0]} and ${t.factBudget.periodMonth} <= ${months[months.length - 1]}`,
+      );
+
+    for (const [k, value] of divisional) {
+      const [periodMonth, divisionCode, lineItem] = k.split('|') as [string, string, 'revenue' | 'cogs' | 'opex'];
+      await db.insert(t.factBudget).values({
+        scenarioCode: scenario,
+        periodMonth,
+        divisionCode,
+        lineItem,
+        amount: n(value),
+        sourceSystem: 'QBO',
+        loadRunId,
+      });
+      written += 1;
+    }
+
+    // The whole budget, whatever its class — what ARG Total is measured against.
+    for (const month of months) {
+      written += await writeCompanyTotals(db, loadRunId, month, scenario, {
+        revenue: company.get(`${month}|revenue`) ?? new Decimal(0),
+        cogs: company.get(`${month}|cogs`) ?? new Decimal(0),
+        opex: company.get(`${month}|opex`) ?? new Decimal(0),
+      });
+    }
+
+    notes.push(
+      `Loaded the QuickBooks ${scenario === 'FORECAST' ? 'forecast' : 'budget'} “${budget.Name}” ` +
+        `for ${months[0]!.slice(0, 7)} → ${months[months.length - 1]!.slice(0, 7)}` +
+        (divisional.size ? '.' : ' at company level only — it is not split by class, so divisions show no budget.'),
+    );
+    if (unplacedAccounts.size) {
+      notes.push(
+        `Budget lines on accounts with no P&L reporting line were left out: ${[...unplacedAccounts].slice(0, 8).join(', ')}.`,
+      );
+    }
+    if (unmappedClasses.size) {
+      notes.push(
+        `Budget lines on classes that map to no division count toward ARG Total only: ${[...unmappedClasses].join(', ')}.`,
+      );
+    }
+  }
+
+  return written;
 }
 
 // ---------------------------------------------------------------------------
@@ -1499,6 +2758,61 @@ async function conformInTransaction(
   let rowsWritten = 0;
 
   if (batch.sourceSystem === 'QBO') {
+    /**
+     * Aging is a SNAPSHOT, so it is handled before the per-month loop.
+     *
+     * Open balances are as they stand now. A past month's aging cannot be
+     * reconstructed from them — a since-paid invoice has no balance left to age
+     * — so the snapshot is written against one month rather than repeated into
+     * every month of the window, which would state twelve different months of
+     * history that all happen to be today.
+     */
+    if (batch.entity === 'ar_aging' || batch.entity === 'ap_aging') {
+      const kind = batch.entity === 'ar_aging' ? 'AR' : 'AP';
+      const entityName = kind === 'AR' ? 'Invoice' : 'Bill';
+
+      const transactions = batch.records.flatMap((record) => {
+        const payload = record.payload as { QueryResponse?: Record<string, unknown[]> };
+        return (payload.QueryResponse?.[entityName] ?? []) as QboTransaction[];
+      });
+
+      const snapshotMonth = `${batch.window.end.slice(0, 7)}-01`;
+      const closedSnapshot = await ensurePeriods(db, [snapshotMonth]);
+
+      if (closedSnapshot.has(snapshotMonth)) {
+        notes.push(
+          `${snapshotMonth.slice(0, 7)} is closed, so the ${kind === 'AR' ? 'A/R' : 'A/P'} aging ` +
+            `snapshot was not written into it.`,
+        );
+        return { rowsWritten, notes };
+      }
+
+      rowsWritten += await conformAging(
+        db,
+        loadRunId,
+        snapshotMonth,
+        transactions,
+        lookup,
+        kind,
+        notes,
+      );
+      notes.push(
+        `Aged against ${lastDayOfMonth(snapshotMonth)} from ${transactions.length.toLocaleString()} ` +
+          `open ${entityName.toLowerCase()}${transactions.length === 1 ? '' : 's'}. This is today's ` +
+          `position, not a reconstruction of that month.`,
+      );
+      return { rowsWritten, notes };
+    }
+
+    if (batch.entity === 'budgets') {
+      const budgets = batch.records.flatMap((record) => {
+        const payload = record.payload as { QueryResponse?: { Budget?: QboBudget[] } };
+        return payload.QueryResponse?.Budget ?? [];
+      });
+      rowsWritten += await conformQboBudgets(db, loadRunId, budgets, lookup, notes);
+      return { rowsWritten, notes };
+    }
+
     // One record per month for the report entities; the month is the record key.
     const months = batch.records.map((record) => record.key).filter((key) => /^\d{4}-\d{2}-\d{2}$/.test(key));
     const closed = months.length ? await ensurePeriods(db, months) : new Set<string>();
@@ -1526,31 +2840,42 @@ async function conformInTransaction(
             record.key,
             record.payload as QboReport,
             lookup,
+            notes,
           );
           break;
-        case 'accounts':
-          rowsWritten += await conformAccounts(db, record.payload as QboQueryResponse);
-          break;
-        case 'classes': {
-          const unmapped = await checkClasses(db, record.payload as QboQueryResponse);
+        case 'accounts': {
+          const sync = await conformAccounts(db, record.payload as QboQueryResponse);
+          rowsWritten += sync.synced;
           notes.push(
-            unmapped.length
-              ? `${unmapped.length} QuickBooks class${unmapped.length === 1 ? '' : 'es'} map to no ` +
-                  `division: ${unmapped.join(', ')}. Any figure carried on them is currently ` +
-                  `excluded from ARG Total.`
-              : 'Every active QuickBooks class maps to a division.',
+            `${sync.synced} accounts in QuickBooks' chart of accounts (${sync.synced - sync.inactive} ` +
+              `active, ${sync.inactive} inactive or deleted, kept because they carry past balances): ` +
+              `${sync.added} new, ${sync.updated} updated, the rest unchanged.`,
           );
           break;
         }
-        default:
-          // Trial balance and the aging reports are landed and kept, but they
-          // are not conformed: the aging reports carry no class dimension, and
-          // fact_aging is per division. Saying so is better than writing an
-          // ARG-Total row the schema forbids or splitting one on a guess.
+        case 'classes': {
+          const { unmapped, recorded, active } = await checkClasses(db, record.payload as QboQueryResponse);
+          rowsWritten += recorded;
           notes.push(
-            `${batch.entity.replace(/_/g, ' ')} was landed in full and is available in the audit ` +
-              `pack, but it is not yet conformed into a fact table.`,
+            `${recorded} QuickBooks class${recorded === 1 ? '' : 'es'} (${active} active). ` +
+              (unmapped.length
+                ? `${unmapped.length} map to no division: ${unmapped.join(', ')}. Any figure carried ` +
+                  `on them is currently excluded from ARG Total.`
+                : 'Every active class maps to a division.'),
           );
+          break;
+        }
+        case 'trial_balance':
+          rowsWritten += await conformTrialBalance(
+            db,
+            loadRunId,
+            record.key,
+            record.payload as QboReport,
+            notes,
+          );
+          break;
+        default:
+          notes.push(`${batch.entity.replace(/_/g, ' ')} was landed but is not conformed into a fact table.`);
           return { rowsWritten, notes };
       }
     }
@@ -1628,13 +2953,28 @@ async function conformInTransaction(
   }
 
   if (batch.sourceSystem === 'SHEETS') {
-    const payload = batch.records[0]?.payload as { values?: string[][] } | undefined;
+    const payload = batch.records[0]?.payload as
+      | { values?: string[][]; absent?: boolean; tabs?: string[] }
+      | undefined;
     const values = payload?.values ?? [];
 
+    if (payload?.absent) {
+      notes.push(
+        `No ${batch.entity.replace(/_/g, ' ')} tab in the connected spreadsheet, so none was loaded. ` +
+          `Tabs it has: ${(payload.tabs ?? []).join(', ') || '(none listed)'}. A tab with ` +
+          `"${batch.entity === 'headcount' ? 'Headcount' : 'Forecast'}" in its name is picked up ` +
+          `on the next pull.`,
+      );
+      return { rowsWritten, notes };
+    }
+
     if (!values.length) {
+      const range = (batch.records[0]?.payload as { range?: string } | undefined)?.range;
       throw new UnmappedSourceDataError(
-        'That range came back empty. Nothing was written — an empty budget and a budget that ' +
-          'failed to load look identical on a variance chart.',
+        `The range ${range ?? 'requested'} came back empty. Nothing was written — an empty budget ` +
+          `and a budget that failed to load look identical on a variance chart. The connector ` +
+          `picks the tab from the spreadsheet's real tab names, so an empty result here means the ` +
+          `tab it matched genuinely has no rows, not that the tab is missing.`,
       );
     }
 
@@ -1647,6 +2987,12 @@ async function conformInTransaction(
       }
       case 'tenx_budget': {
         const result = await conformBudget(db, loadRunId, 'TENX', values, lookup);
+        rowsWritten = result.written;
+        notes.push(...result.notes);
+        break;
+      }
+      case 'forecast': {
+        const result = await conformBudget(db, loadRunId, 'FORECAST', values, lookup);
         rowsWritten = result.written;
         notes.push(...result.notes);
         break;

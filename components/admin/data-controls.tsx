@@ -14,7 +14,7 @@
  * watches rows land source by source rather than staring at a spinner, and an
  * interrupted pull keeps everything it had already written.
  */
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useRef, useState, useSyncExternalStore } from 'react';
 import { useRouter } from 'next/navigation';
 import {
   CircleAlert,
@@ -71,24 +71,90 @@ const SLICE_RETRIES = 2;
 /** Guards against a connector that keeps claiming there is more to fetch. */
 const MAX_SLICES_PER_ENTITY = 200;
 
-export function DataControls(props: DataControlsProps) {
-  const router = useRouter();
-  const [busy, setBusy] = useState(false);
-  const [steps, setSteps] = useState<StepProgress[]>([]);
-  const [window_, setWindow] = useState<string | null>(null);
+/**
+ * The pull's progress lives outside the component, for the life of the tab.
+ *
+ * It used to live in component state, and the component cancelled its pull when
+ * it unmounted. The Admin sections are separate pages, so opening Connections to
+ * paste a spreadsheet link unmounted this panel and silently stopped a pull at
+ * "11 of 14" — the last three HubSpot entities and the reconciliation never ran.
+ * Held here, a pull keeps going while you look at another section, and coming
+ * back shows it where it is.
+ */
+interface PullState {
+  busy: boolean;
+  steps: StepProgress[];
+  window: string | null;
   // Whether the month range means anything for what was pulled. It does for
   // QuickBooks, which is fetched a report per month; it does not for HubSpot,
   // which is fetched by object.
-  const [windowApplies, setWindowApplies] = useState(false);
-  const [reconciliation, setReconciliation] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const cancelled = useRef(false);
+  windowApplies: boolean;
+  reconciliation: string | null;
+  error: string | null;
+}
 
-  // A pull that is still running when the panel unmounts must stop driving, or
-  // it keeps posting slices at a page nobody is looking at.
-  useEffect(() => () => {
-    cancelled.current = true;
-  }, []);
+const IDLE: PullState = {
+  busy: false,
+  steps: [],
+  window: null,
+  windowApplies: false,
+  reconciliation: null,
+  error: null,
+};
+let pullState: PullState = IDLE;
+const pullListeners = new Set<() => void>();
+
+function setPull(patch: Partial<PullState>) {
+  pullState = { ...pullState, ...patch };
+  for (const listener of pullListeners) listener();
+}
+function subscribePull(listener: () => void) {
+  pullListeners.add(listener);
+  return () => {
+    pullListeners.delete(listener);
+  };
+}
+const readPull = () => pullState;
+const readIdle = () => IDLE;
+
+const setBusy = (busy: boolean) => setPull({ busy });
+const setSteps = (steps: StepProgress[]) => setPull({ steps });
+const setWindow = (window: string | null) => setPull({ window });
+const setWindowApplies = (windowApplies: boolean) => setPull({ windowApplies });
+const setReconciliation = (reconciliation: string | null) => setPull({ reconciliation });
+const setError = (error: string | null) => setPull({ error });
+
+/** For the Admin header: is a pull running, and how far has it got? */
+export function usePullProgress(): { busy: boolean; finished: number; total: number } {
+  const state = useSyncExternalStore(subscribePull, readPull, readIdle);
+  return {
+    busy: state.busy,
+    finished: state.steps.filter((step) => step.state === 'done' || step.state === 'failed').length,
+    total: state.steps.length,
+  };
+}
+
+export function DataControls(props: DataControlsProps) {
+  const router = useRouter();
+  const pull = useSyncExternalStore(subscribePull, readPull, readIdle);
+  const { busy, steps, windowApplies, reconciliation, error } = pull;
+  const window_ = pull.window;
+
+  /**
+   * How far the next pull reaches.
+   *
+   * "Last 12 months" answers the routine refresh and nothing else. Comparing
+   * 2024 against 2025, re-pulling a single month somebody restated, or reaching
+   * further back than a year all need a start and an end — and needing a
+   * redeploy for that is why months of books sat unfetched.
+   */
+  const [rangeMode, setRangeMode] = useState<'trailing' | 'year' | 'custom'>('trailing');
+  const [trailingMonths, setTrailingMonths] = useState(24);
+  const [year, setYear] = useState(() => new Date().getFullYear());
+  const [fromMonth, setFromMonth] = useState(() => currentMonth(-11));
+  const [toMonth, setToMonth] = useState(() => currentMonth(0));
+  // Never set by unmounting any more (see PullState): a pull runs to the end.
+  const cancelled = useRef(false);
 
   const post = useCallback(async (body: Record<string, unknown>) => {
     const response = await fetch('/api/sync', {
@@ -106,7 +172,21 @@ export function DataControls(props: DataControlsProps) {
 
   const connected = props.connectedSources.filter((source) => source.connected);
 
+  /** The window the plan step is asked for, in the shape the route expects. */
+  function requestedWindow(): Record<string, unknown> {
+    switch (rangeMode) {
+      case 'year':
+        return { windowStart: `${year}-01`, windowEnd: `${year}-12` };
+      case 'custom':
+        return { windowStart: fromMonth, windowEnd: toMonth };
+      case 'trailing':
+      default:
+        return { months: trailingMonths };
+    }
+  }
+
   async function sync(sources?: string[], fullRefresh = false) {
+    if (pullState.busy) return;
     cancelled.current = false;
     setBusy(true);
     setError(null);
@@ -116,7 +196,12 @@ export function DataControls(props: DataControlsProps) {
 
     try {
       // --- What is there to pull? ----------------------------------------
-      const planned = (await post({ mode: 'plan', sources, fullRefresh })) as {
+      const planned = (await post({
+        mode: 'plan',
+        sources,
+        fullRefresh,
+        ...requestedWindow(),
+      })) as {
         ok: boolean;
         error?: string;
         window?: string;
@@ -191,7 +276,7 @@ export function DataControls(props: DataControlsProps) {
 
           step.rowsWritten += outcome.rowsWritten;
           step.recordsRead += outcome.recordsRead;
-          if (outcome.notes?.length) step.notes = outcome.notes;
+          if (outcome.notes?.length) step.notes = [...step.notes, ...outcome.notes];
 
           if (!outcome.ok) {
             step.state = 'failed';
@@ -279,16 +364,25 @@ export function DataControls(props: DataControlsProps) {
       <div className="rounded-[var(--radius)] border p-4" style={{ borderColor: 'var(--border)' }}>
         <div className="flex flex-wrap items-start justify-between gap-4">
           <div className="max-w-2xl">
-            <p className="text-[13px] font-semibold">Pull the latest data</p>
-            <p className="mt-1 text-[11.5px] leading-relaxed text-[var(--text-muted)]">
-              Fetches <strong>only what has changed</strong> since the last successful pull, so a
-              refresh reads the hundred records that moved rather than the sixty thousand that did
-              not. QuickBooks is read a month at a time, ending at the current month and reaching
-              twelve months back; HubSpot and Sheets are not read by month at all — HubSpot pulls
-              the whole portal. QuickBooks goes into the profit and loss and balance sheet, HubSpot
-              into deals, contacts and meetings, Sheets into budget and headcount. Each entity is saved as it
-              lands, so the dashboards update while the pull is still running. Closed months are
-              left untouched. The reconciliation controls run at the end.
+            <p className="text-[13px] font-semibold">Pull what is new or changed</p>
+            <ul className="mt-1 list-disc space-y-0.5 pl-4 text-[11.5px] leading-relaxed text-[var(--text-muted)]">
+              <li>
+                <strong>QuickBooks</strong>, month by month in the range below: months not yet loaded,
+                the latest three (books still open), and any month QuickBooks&apos; change log shows was
+                edited since the last check. Months already loaded and unchanged are not fetched or
+                re-imported.
+              </li>
+              <li>
+                <strong>Google Sheets</strong> and QuickBooks lists (accounts, classes, budgets, aging):
+                read, compared with what was last imported, and imported only if different.
+              </li>
+              <li>
+                <strong>HubSpot</strong>: only records modified since the last pull.
+              </li>
+            </ul>
+            <p className="mt-1 text-[11px] leading-relaxed text-[var(--text-muted)]">
+              The nightly refresh does the same. Every run is written to the pull log below — what was
+              new, what changed, what was left alone. The data checks run at the end.
             </p>
           </div>
 
@@ -306,10 +400,124 @@ export function DataControls(props: DataControlsProps) {
               ) : (
                 <RefreshCw size={12} aria-hidden />
               )}
-              {busy ? 'Pulling…' : 'Pull everything'}
+              {busy ? 'Pulling…' : 'Pull new & changed'}
             </button>
           )}
         </div>
+
+        {props.canManage && (
+          <div
+            className="mt-3 rounded-[5px] border p-3"
+            style={{ borderColor: 'var(--border)', background: 'var(--surface-2)' }}
+          >
+            <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+              <span className="text-[11.5px] font-medium">Months to pull</span>
+
+              <div className="flex flex-wrap gap-1">
+                {(
+                  [
+                    ['trailing', 'Recent'],
+                    ['year', 'A year'],
+                    ['custom', 'Custom range'],
+                  ] as const
+                ).map(([mode, label]) => (
+                  <button
+                    key={mode}
+                    type="button"
+                    onClick={() => setRangeMode(mode)}
+                    disabled={busy}
+                    className="rounded-[4px] border px-2 py-0.5 text-[11px] font-medium transition-colors disabled:opacity-40"
+                    style={{
+                      borderColor: rangeMode === mode ? 'var(--text-primary)' : 'var(--border)',
+                      background: rangeMode === mode ? 'var(--text-primary)' : 'transparent',
+                      color: rangeMode === mode ? 'var(--text-inverse)' : 'var(--text-secondary)',
+                    }}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+
+              {rangeMode === 'trailing' && (
+                <label className="flex items-center gap-1.5 text-[11px] text-[var(--text-secondary)]">
+                  Last
+                  <select
+                    value={trailingMonths}
+                    onChange={(event) => setTrailingMonths(Number(event.target.value))}
+                    disabled={busy}
+                    className="rounded-[4px] border px-1.5 py-0.5 text-[11px]"
+                    style={{ borderColor: 'var(--border)', background: 'var(--surface-1)' }}
+                  >
+                    {[3, 6, 12, 18, 24, 36].map((count) => (
+                      <option key={count} value={count}>
+                        {count}
+                      </option>
+                    ))}
+                  </select>
+                  months, ending this month
+                </label>
+              )}
+
+              {rangeMode === 'year' && (
+                <label className="flex items-center gap-1.5 text-[11px] text-[var(--text-secondary)]">
+                  Calendar year
+                  <select
+                    value={year}
+                    onChange={(event) => setYear(Number(event.target.value))}
+                    disabled={busy}
+                    className="rounded-[4px] border px-1.5 py-0.5 text-[11px]"
+                    style={{ borderColor: 'var(--border)', background: 'var(--surface-1)' }}
+                  >
+                    {Array.from({ length: 8 }, (_, index) => new Date().getFullYear() - index).map(
+                      (option) => (
+                        <option key={option} value={option}>
+                          {option}
+                        </option>
+                      ),
+                    )}
+                  </select>
+                  (January to December)
+                </label>
+              )}
+
+              {rangeMode === 'custom' && (
+                <div className="flex flex-wrap items-center gap-1.5 text-[11px] text-[var(--text-secondary)]">
+                  From
+                  <input
+                    type="month"
+                    value={fromMonth}
+                    max={toMonth}
+                    onChange={(event) => setFromMonth(event.target.value)}
+                    disabled={busy}
+                    className="rounded-[4px] border px-1.5 py-0.5 text-[11px]"
+                    style={{ borderColor: 'var(--border)', background: 'var(--surface-1)' }}
+                  />
+                  to
+                  <input
+                    type="month"
+                    value={toMonth}
+                    min={fromMonth}
+                    onChange={(event) => setToMonth(event.target.value)}
+                    disabled={busy}
+                    className="rounded-[4px] border px-1.5 py-0.5 text-[11px]"
+                    style={{ borderColor: 'var(--border)', background: 'var(--surface-1)' }}
+                  />
+                  <span className="text-[var(--text-muted)]">
+                    inclusive, up to 36 months in one run
+                  </span>
+                </div>
+              )}
+            </div>
+
+            {/* The same caveat the window label carries, said where the choice is
+                made rather than after the pull has already run. */}
+            <p className="mt-2 text-[10.5px] leading-relaxed text-[var(--text-muted)]">
+              This limits <strong>QuickBooks</strong>, which is fetched one report per month.
+              HubSpot is fetched by object and filtered on modification time, and Sheets reads whole
+              tabs, so neither is narrowed by these months.
+            </p>
+          </div>
+        )}
 
         <div className="mt-3 flex flex-wrap gap-2">
           {props.connectedSources.map((source) => (
@@ -343,10 +551,10 @@ export function DataControls(props: DataControlsProps) {
               Re-import everything from scratch
             </button>
             <p className="mt-1 max-w-2xl text-[10.5px] leading-relaxed text-[var(--text-muted)]">
-              Ignores what has already been pulled and reads each source from the beginning. Needed
-              only when the warehouse and the source have genuinely diverged — a mapping changed, or
-              records were edited in a way the provider does not stamp as a change. It reads
-              everything, so it takes as long as the first pull did.
+              Fetches and imports every month and record in the range again, changed or not. Rarely
+              needed: a change to the importer or to the class mapping already triggers a re-import of
+              what it affects. Use it if QuickBooks was edited in a way its change log does not show —
+              payroll, for example — in a month more than three months back.
             </p>
           </div>
         )}
@@ -410,8 +618,13 @@ export function DataControls(props: DataControlsProps) {
                     <span className="text-[var(--text-muted)]">queued</span>
                   ) : (
                     <span className="text-[var(--text-muted)]">
-                      {step.rowsWritten.toLocaleString()} row{step.rowsWritten === 1 ? '' : 's'}
-                      {step.state === 'running' ? ' so far…' : ''}
+                      {step.state === 'done' &&
+                      step.rowsWritten === 0 &&
+                      step.notes.some((note) => /unchanged|nothing to fetch|not re-imported/i.test(note))
+                        ? 'up to date — nothing re-imported'
+                        : `${step.rowsWritten.toLocaleString()} row${step.rowsWritten === 1 ? '' : 's'}${
+                            step.state === 'running' ? ' so far…' : ''
+                          }`}
                     </span>
                   )}
                   {step.notes.map((note, noteIndex) => (
@@ -449,4 +662,11 @@ function StepIcon({ state }: { state: StepState }) {
 
 function pause(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** A YYYY-MM string, offset from the current month. */
+function currentMonth(delta: number): string {
+  const now = new Date();
+  const shifted = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + delta, 1));
+  return `${shifted.getUTCFullYear()}-${String(shifted.getUTCMonth() + 1).padStart(2, '0')}`;
 }

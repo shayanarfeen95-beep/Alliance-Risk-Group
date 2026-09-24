@@ -18,7 +18,7 @@ import * as t from '@/lib/db/schema';
 import { getSessionUser, type SessionUser } from '@/lib/auth/session';
 import { openSemanticSession, CONSOLIDATED_CODE, type SemanticSession } from '@/lib/semantic/resolve';
 import type { MonthKey } from '@/lib/semantic/periods';
-import { resolveRange, type DateRange } from './range';
+import { chooseDefaultMonth, resolveRange, type DateRange } from './range';
 
 export type SearchParams = Record<string, string | string[] | undefined>;
 
@@ -99,6 +99,34 @@ async function monthsWithData(db: Awaited<ReturnType<typeof getDb>>): Promise<Mo
   );
 }
 
+/** The month before this one: the latest a set of books can be complete for. */
+export function lastCompletedMonth(today: Date = new Date()): MonthKey {
+  const month = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth() - 1, 1));
+  return `${month.toISOString().slice(0, 7)}-01` as MonthKey;
+}
+
+/**
+ * The month a view opens on when nobody has chosen one — shared by every
+ * dashboard and the assistant, so they can never disagree.
+ *
+ * The assistant used to take DEFAULT_REPORTING_MONTH straight, which sat at its
+ * seeded 2026-03: asked "how did we do?" from a page with no month in its URL,
+ * it answered about March while the dashboard beside it showed August.
+ */
+export async function defaultReportingMonth(db: Awaited<ReturnType<typeof getDb>>): Promise<MonthKey> {
+  const thisMonth = `${new Date().toISOString().slice(0, 7)}-01`;
+  const availableMonths = (await monthsWithData(db)).filter((month) => month <= thisMonth);
+  const [configured] = await db
+    .select({ value: t.appConfig.value })
+    .from(t.appConfig)
+    .where(eq(t.appConfig.key, 'DEFAULT_REPORTING_MONTH'))
+    .limit(1);
+  return (
+    chooseDefaultMonth(availableMonths, normaliseMonth(configured?.value ?? undefined)) ??
+    lastCompletedMonth()
+  );
+}
+
 export async function loadDashboardContext(
   searchParams: SearchParams,
 ): Promise<DashboardContext> {
@@ -107,7 +135,10 @@ export async function loadDashboardContext(
 
   const db = await getDb();
 
-  const availableMonths = await monthsWithData(db);
+  // Months that have happened: a month ahead of the calendar can only hold
+  // future-dated entries, and offering it reads as a month of real results.
+  const thisMonth = `${new Date().toISOString().slice(0, 7)}-01`;
+  const availableMonths = (await monthsWithData(db)).filter((month) => month <= thisMonth);
 
   const defaultMonthRow = await db
     .select({ value: t.appConfig.value })
@@ -120,15 +151,10 @@ export async function loadDashboardContext(
   const month =
     // What the URL asks for, if there is anything there to show.
     (requested && availableMonths.includes(requested) ? requested : null) ??
-    // Then the configured reporting month — but only while it still holds data.
-    // Honouring it unconditionally is what put every dashboard on a month that
-    // nothing had ever loaded into, so a fully populated warehouse read as zeroes
-    // everywhere and no screen said which month it was even looking at.
-    (configuredMonth && availableMonths.includes(configuredMonth) ? configuredMonth : null) ??
-    // Otherwise the most recent month that actually has figures in it.
-    availableMonths[0] ??
-    configuredMonth ??
-    '2026-03-01';
+    // Then the last completed month with figures (see chooseDefaultMonth: the
+    // configured month only wins when it is later, and only while it holds data).
+    chooseDefaultMonth(availableMonths, configuredMonth) ??
+    lastCompletedMonth();
 
   const session = await openSemanticSession(db, user, month);
 

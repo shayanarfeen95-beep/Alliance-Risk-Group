@@ -15,9 +15,9 @@
 import Decimal from 'decimal.js';
 import { safeDiv } from '@/lib/money';
 import {
-  hasBudget,
+  balanceSheetFor,
+  budgetFor,
   hasPl,
-  sumBs,
   sumBudget,
   sumPl,
   sumPlOverMonths,
@@ -54,6 +54,19 @@ function unavailable(reason: Unavailable['reason'], detail: string): KpiComputat
 
 function money(label: string, value: Decimal, source: Citation['source'], month?: MonthKey): Citation {
   return { label, value: value.toDecimalPlaces(2).toString(), source, periodMonth: month };
+}
+
+/**
+ * The budget a comparison is made against when none is named.
+ *
+ * QuickBooks' own budget first — it is the one ARG maintains in its books, and
+ * the one it asked to be measured against — then the operating budget from
+ * Google Sheets.
+ */
+export function preferredBudgetScenario(bundle: FactBundle): string {
+  for (const key of bundle.budget.keys()) if (key.startsWith('QBO_BUDGET|')) return 'QBO_BUDGET';
+  for (const key of bundle.company.keys()) if (key.startsWith('QBO_BUDGET|')) return 'QBO_BUDGET';
+  return 'MONTHLY_BUDGET';
 }
 
 const NO_PL_FOR_PERIOD =
@@ -328,8 +341,8 @@ const financeDefinitions: KpiDefinition[] = [
       const scope = balanceSheetScope(input);
       if (scope) return { value: null, unavailable: scope, citations: [] };
 
-      const { period, bundle, divisions } = input;
-      const bs = sumBs(bundle, period.month, divisions);
+      const { period, bundle, divisions, isConsolidated } = input;
+      const bs = balanceSheetFor(bundle, period.month, divisions, isConsolidated);
       if (!bs) return unavailable('NO_DATA', 'No balance sheet loaded for this period.');
       const pl = sumPl(bundle, period.month, divisions);
 
@@ -362,8 +375,8 @@ const financeDefinitions: KpiDefinition[] = [
       const scope = balanceSheetScope(input);
       if (scope) return { value: null, unavailable: scope, citations: [] };
 
-      const { period, bundle, divisions } = input;
-      const bs = sumBs(bundle, period.month, divisions);
+      const { period, bundle, divisions, isConsolidated } = input;
+      const bs = balanceSheetFor(bundle, period.month, divisions, isConsolidated);
       if (!bs) return unavailable('NO_DATA', 'No balance sheet loaded for this period.');
       const pl = sumPl(bundle, period.month, divisions);
 
@@ -395,8 +408,8 @@ const financeDefinitions: KpiDefinition[] = [
       const scope = balanceSheetScope(input);
       if (scope) return { value: null, unavailable: scope, citations: [] };
 
-      const { period, bundle, divisions } = input;
-      const bs = sumBs(bundle, period.month, divisions);
+      const { period, bundle, divisions, isConsolidated } = input;
+      const bs = balanceSheetFor(bundle, period.month, divisions, isConsolidated);
       if (!bs) return unavailable('NO_DATA', 'No balance sheet loaded for this period.');
       const pl = sumPl(bundle, period.month, divisions);
 
@@ -431,8 +444,8 @@ const financeDefinitions: KpiDefinition[] = [
       const scope = balanceSheetScope(input);
       if (scope) return { value: null, unavailable: scope, citations: [] };
 
-      const { period, bundle, divisions, options } = input;
-      const bs = sumBs(bundle, period.month, divisions);
+      const { period, bundle, divisions, options, isConsolidated } = input;
+      const bs = balanceSheetFor(bundle, period.month, divisions, isConsolidated);
       if (!bs) return unavailable('NO_DATA', 'No balance sheet loaded for this period.');
 
       const useTrailing = options?.variant === 'trailing_3m';
@@ -549,15 +562,19 @@ const financeDefinitions: KpiDefinition[] = [
     specReference: '§6 Finance, §7',
     notes:
       'Attainment ratio, NOT variance %. A deliberate Westport convention — preserve it. The two columns are labelled distinctly ("Attainment %" and "Variance $") because in the Excel a reader sees "−36,773" beside "84%" and reasonably assumes both are variances. Direction matters: above 100% is good on revenue and gross profit, bad on COGS, OpEx and payroll.',
-    compute: ({ period, bundle, divisions, options }) => {
-      const scenario = String(options?.scenario ?? 'MONTHLY_BUDGET');
+    compute: ({ period, bundle, divisions, options, isConsolidated }) => {
+      const scenario = String(options?.scenario ?? preferredBudgetScenario(bundle));
       const lineItem = (options?.lineItem ?? 'revenue') as 'revenue' | 'cogs' | 'opex';
       const months = options?.scope === 'ytd' ? period.ytdMonths : [period.month];
 
-      if (!hasBudget(bundle, scenario, months, divisions)) {
+      const budget = budgetFor(bundle, scenario, months, divisions, lineItem, isConsolidated);
+      if (budget === null) {
         return unavailable(
           'NO_DATA',
-          `No ${scenario} figures exist for this period. The 10X plan covers 2026–2029 only and is blank outside that range.`,
+          `No ${scenario === 'TENX' ? '10X plan' : 'budget'} figures exist for this period and scope. ` +
+            (scenario === 'TENX'
+              ? 'The 10X plan covers 2026–2029 only and is blank outside that range.'
+              : 'Create the budget in QuickBooks (or load a budget tab from Google Sheets) and pull again.'),
         );
       }
       if (!hasPl(bundle, period.month, divisions)) return unavailable('NO_DATA', NO_PL_FOR_PERIOD);
@@ -565,7 +582,6 @@ const financeDefinitions: KpiDefinition[] = [
       const actualPl = sumPlOverMonths(bundle, months, divisions);
       const actual =
         lineItem === 'revenue' ? actualPl.revenue : lineItem === 'cogs' ? actualPl.cogs : actualPl.opex;
-      const budget = sumBudget(bundle, scenario, months, divisions, lineItem);
 
       return {
         value: safeDiv(actual, budget),
@@ -630,7 +646,7 @@ const cashPosition: KpiDefinition = {
   compute: (input) => {
     const scope = balanceSheetScope(input);
     if (scope) return { value: null, unavailable: scope, citations: [] };
-    const bs = sumBs(input.bundle, input.period.month, input.divisions);
+    const bs = balanceSheetFor(input.bundle, input.period.month, input.divisions, input.isConsolidated);
     if (!bs) return unavailable('NO_DATA', 'No balance sheet loaded for this period.');
     return { value: bs.cash, citations: [money('Cash', bs.cash, 'QBO', input.period.month)] };
   },
@@ -753,7 +769,8 @@ const salesDefinitions: KpiDefinition[] = [
     name: 'Pipeline Value',
     category: 'sales',
     definition: 'Total value of deals still open as of the reporting date.',
-    formula: 'SUM(amount) WHERE deal is open, as of the reporting date',
+    formula: 'SUM(amount) of deals created by month end and not closed by month end',
+    notes: 'Reconstructed from each deal\'s create and close dates, so a past month shows the pipeline as it stood then. Amounts are the deal\'s current amount — HubSpot does not keep amount history on this connection.',
     sourceSystem: 'HubSpot',
     format: 'currency',
     higherIsBetter: true,
@@ -762,17 +779,25 @@ const salesDefinitions: KpiDefinition[] = [
     compute: (input) => {
       const scope = hubspotScope(input);
       if (scope) return { value: null, unavailable: scope, citations: [] };
-      const open = input.bundle.deals.filter(
-        (deal) =>
-          !deal.isClosed &&
-          (input.isConsolidated ||
-            (deal.divisionCode !== null && input.divisions.includes(deal.divisionCode))),
-      );
+      // Open AT THE END OF THE REPORTING MONTH, not today. A deal counts if it
+      // had been created by then and had not yet closed. Reading today's open
+      // deals for every month made each past month, and every "vs prior month",
+      // report the same figure — a flat line labelled as a trend.
+      const { endExclusive } = monthBounds(input.period.month);
+      const open = input.bundle.deals.filter((deal) => {
+        const inScope =
+          input.isConsolidated ||
+          (deal.divisionCode !== null && input.divisions.includes(deal.divisionCode));
+        if (!inScope) return false;
+        if (deal.createdate && deal.createdate >= endExclusive) return false;
+        if (!deal.isClosed) return true;
+        return deal.closedate !== null && deal.closedate >= endExclusive;
+      });
       const total = open.reduce((sum, deal) => sum.plus(deal.amount), ZERO);
       return {
         value: total,
         citations: [
-          { label: 'Open deals', value: String(open.length), source: 'HubSpot' },
+          { label: 'Open deals at month end', value: String(open.length), source: 'HubSpot' },
           money('Pipeline value', total, 'HubSpot'),
         ],
       };
@@ -886,14 +911,21 @@ const salesDefinitions: KpiDefinition[] = [
       if (scope) return { value: null, unavailable: scope, citations: [] };
       const { period, bundle, divisions } = input;
 
-      if (!hasBudget(bundle, 'MONTHLY_BUDGET', [period.month], divisions)) {
+      const budget = budgetFor(
+        bundle,
+        preferredBudgetScenario(bundle),
+        [period.month],
+        divisions,
+        'revenue',
+        input.isConsolidated,
+      );
+      if (budget === null) {
         return unavailable('NO_DATA', 'No budget exists for this period.');
       }
       const won = dealsClosedIn(bundle, period.month, divisions, input.isConsolidated).filter(
         (deal) => deal.isClosedWon,
       );
       const booked = won.reduce((sum, deal) => sum.plus(deal.amount), ZERO);
-      const budget = sumBudget(bundle, 'MONTHLY_BUDGET', [period.month], divisions, 'revenue');
       const qboRevenue = sumPl(bundle, period.month, divisions).revenue;
 
       return {
@@ -968,7 +1000,7 @@ const marketingDefinitions: KpiDefinition[] = [
       const spend = sumSpend(input.bundle.marketingSpend, [input.period.month], input.divisions);
       const leads = leadsIn(input.bundle, input.period.month, input.divisions, input.isConsolidated);
       if (leads.length === 0) {
-        return unavailable('NO_DATA', 'No leads were received in this period, so cost per lead is undefined.');
+        return unavailable('NO_DATA', 'No leads were received in this period, so there is no cost per lead to calculate.');
       }
       return {
         value: safeDiv(spend, leads.length),
@@ -999,7 +1031,7 @@ const marketingDefinitions: KpiDefinition[] = [
 
       const spend = sumSpend(input.bundle.marketingSpend, [input.period.month], input.divisions);
       if (spend.isZero()) {
-        return unavailable('NO_DATA', 'No marketing spend recorded in this period, so return on ad spend is undefined.');
+        return unavailable('NO_DATA', 'No marketing spend was recorded in this period, so there is no return on ad spend to calculate.');
       }
       const won = dealsClosedIn(input.bundle, input.period.month, input.divisions, input.isConsolidated).filter(
         (deal) => deal.isClosedWon,
@@ -1077,7 +1109,7 @@ const marketingDefinitions: KpiDefinition[] = [
             (contact.divisionCode !== null && input.divisions.includes(contact.divisionCode))),
       );
       if (newCustomers.length === 0) {
-        return unavailable('NO_DATA', 'No new customers were won in this period, so acquisition cost is undefined.');
+        return unavailable('NO_DATA', 'No new customers were won in this period, so there is no acquisition cost to calculate.');
       }
       return {
         value: safeDiv(spend, newCustomers.length),
@@ -1153,12 +1185,82 @@ const operationsDefinitions: KpiDefinition[] = [
 // The registry
 // ---------------------------------------------------------------------------
 
+/**
+ * Working capital — what Mario asked for by name: "This should come from the
+ * Balance Sheet." Current assets less current liabilities, from the company
+ * balance sheet at ARG Total.
+ */
+function currentPosition(bs: NonNullable<ReturnType<typeof balanceSheetFor>>) {
+  const currentAssets = bs.cash.plus(bs.accountsReceivable).plus(bs.otherCurrentAssets);
+  const currentLiabilities = bs.accountsPayable.plus(bs.ccLiability).plus(bs.otherCurrentLiabilities);
+  return { currentAssets, currentLiabilities };
+}
+
+const workingCapitalDefinitions: KpiDefinition[] = [
+  {
+    id: 'working_capital',
+    name: 'Working Capital',
+    category: 'finance',
+    definition: 'Current assets less current liabilities at month end, from the QuickBooks balance sheet.',
+    formula: '(cash + A/R + other current assets) − (A/P + credit cards + other current liabilities)',
+    sourceSystem: 'QuickBooks Online',
+    format: 'currency',
+    higherIsBetter: true,
+    refreshCadence: 'Daily while the month is open',
+    specReference: 'Client request, September 2026',
+    compute: (input) => {
+      const scope = balanceSheetScope(input);
+      if (scope) return { value: null, unavailable: scope, citations: [] };
+      const { period, bundle, divisions, isConsolidated } = input;
+      const bs = balanceSheetFor(bundle, period.month, divisions, isConsolidated);
+      if (!bs) return unavailable('NO_DATA', 'No balance sheet loaded for this period.');
+      const { currentAssets, currentLiabilities } = currentPosition(bs);
+      return {
+        value: currentAssets.minus(currentLiabilities),
+        citations: [
+          money('Current assets', currentAssets, 'QBO', period.month),
+          money('Current liabilities', currentLiabilities, 'QBO', period.month),
+        ],
+        components: { currentAssets, currentLiabilities },
+      };
+    },
+  },
+  {
+    id: 'current_ratio',
+    name: 'Current Ratio',
+    category: 'finance',
+    definition: 'Current assets divided by current liabilities. Above 1.0× means short-term obligations are covered.',
+    formula: 'current assets ÷ current liabilities',
+    sourceSystem: 'QuickBooks Online',
+    format: 'multiple',
+    higherIsBetter: true,
+    refreshCadence: 'Daily while the month is open',
+    specReference: 'Client request, September 2026',
+    compute: (input) => {
+      const scope = balanceSheetScope(input);
+      if (scope) return { value: null, unavailable: scope, citations: [] };
+      const { period, bundle, divisions, isConsolidated } = input;
+      const bs = balanceSheetFor(bundle, period.month, divisions, isConsolidated);
+      if (!bs) return unavailable('NO_DATA', 'No balance sheet loaded for this period.');
+      const { currentAssets, currentLiabilities } = currentPosition(bs);
+      return {
+        value: safeDiv(currentAssets, currentLiabilities),
+        citations: [
+          money('Current assets', currentAssets, 'QBO', period.month),
+          money('Current liabilities', currentLiabilities, 'QBO', period.month),
+        ],
+      };
+    },
+  },
+];
+
 export const KPI_REGISTRY: KpiDefinition[] = [
   ...baseDefinitions,
   ...ratioDefinitions,
   ...financeDefinitions,
   ...additionalRunRates,
   cashPosition,
+  ...workingCapitalDefinitions,
   ...salesDefinitions,
   ...marketingDefinitions,
   ...operationsDefinitions,
