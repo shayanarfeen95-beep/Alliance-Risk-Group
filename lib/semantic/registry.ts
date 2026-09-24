@@ -991,7 +991,7 @@ const marketingDefinitions: KpiDefinition[] = [
       const spend = sumSpend(input.bundle.marketingSpend, [input.period.month], input.divisions);
       const leads = leadsIn(input.bundle, input.period.month, input.divisions, input.isConsolidated);
       if (leads.length === 0) {
-        return unavailable('NO_DATA', 'No leads were received in this period, so cost per lead is undefined.');
+        return unavailable('NO_DATA', 'No leads were received in this period, so there is no cost per lead to calculate.');
       }
       return {
         value: safeDiv(spend, leads.length),
@@ -1022,7 +1022,7 @@ const marketingDefinitions: KpiDefinition[] = [
 
       const spend = sumSpend(input.bundle.marketingSpend, [input.period.month], input.divisions);
       if (spend.isZero()) {
-        return unavailable('NO_DATA', 'No marketing spend recorded in this period, so return on ad spend is undefined.');
+        return unavailable('NO_DATA', 'No marketing spend was recorded in this period, so there is no return on ad spend to calculate.');
       }
       const won = dealsClosedIn(input.bundle, input.period.month, input.divisions, input.isConsolidated).filter(
         (deal) => deal.isClosedWon,
@@ -1100,7 +1100,7 @@ const marketingDefinitions: KpiDefinition[] = [
             (contact.divisionCode !== null && input.divisions.includes(contact.divisionCode))),
       );
       if (newCustomers.length === 0) {
-        return unavailable('NO_DATA', 'No new customers were won in this period, so acquisition cost is undefined.');
+        return unavailable('NO_DATA', 'No new customers were won in this period, so there is no acquisition cost to calculate.');
       }
       return {
         value: safeDiv(spend, newCustomers.length),

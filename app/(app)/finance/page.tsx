@@ -1,6 +1,6 @@
 import type { Metadata } from 'next';
 import type { ReactNode } from 'react';
-import { CircleAlert, CircleCheck, Info } from 'lucide-react';
+import { CircleAlert, CircleCheck, Download, Info } from 'lucide-react';
 import { loadDashboardContext, type SearchParams } from '@/lib/dashboards/context';
 import {
   loadFinance,
@@ -13,6 +13,8 @@ import { buildDivisionColorMap } from '@/lib/charts/colors';
 import { formatNumber, formatSignedNumber, sentimentColorVar, sentimentOf } from '@/lib/format';
 import { ChartCard } from '@/components/charts/chart-card';
 import { Card, CardHeader, Chip, DataTable, Td, Th, Unavailable } from '@/components/ui/primitives';
+import { Headline, type HeadlineTile } from '@/components/finance/headline';
+import { SectionNav } from '@/components/finance/section-nav';
 
 export const metadata: Metadata = { title: 'Finance' };
 export const dynamic = 'force-dynamic';
@@ -27,18 +29,45 @@ export default async function FinancePage({
   const colors = buildDivisionColorMap(session.bundle.divisions);
   const model = loadFinance(session, divisionCode, colors);
 
+  const month = session.period.month.slice(0, 7);
+  const sections = [
+    { id: 'overview', label: 'Overview' },
+    ...(model.tieOut ? [{ id: 'tie-out', label: 'Ties to QuickBooks' }] : []),
+    { id: 'pl', label: 'Profit & loss' },
+    ...(model.divisionBreakdown ? [{ id: 'divisions', label: 'By division' }] : []),
+    { id: 'change', label: 'Change' },
+    { id: 'cash', label: 'Working capital & aging' },
+    { id: 'tenx', label: '10X plan' },
+    { id: 'balance-sheet', label: 'Balance sheet' },
+    { id: 'trend', label: 'Trend' },
+  ];
+
   return (
     <div className="space-y-6">
-      <header>
-        <h1 className="text-[19px] font-semibold tracking-tight">Finance</h1>
-        <p className="mt-1 max-w-3xl text-[12.5px] leading-relaxed text-[var(--text-secondary)]">
-          {model.divisionLabel} · {model.monthLabel} and year to date ({model.ytdLabel}) ·{' '}
-          {session.accountingBasis} basis, straight from QuickBooks.{' '}
-          {session.periodIsClosed
-            ? 'The books for this month are closed; figures are final.'
-            : 'The books for this month are not closed yet, so figures can still change.'}
-        </p>
+      <header id="overview" className="flex scroll-mt-32 flex-wrap items-start justify-between gap-4">
+        <div>
+          <h1 className="text-[19px] font-semibold tracking-tight">Finance</h1>
+          <p className="mt-1 max-w-3xl text-[12.5px] leading-relaxed text-[var(--text-secondary)]">
+            {model.divisionLabel} · {model.monthLabel} and year to date ({model.ytdLabel}) ·{' '}
+            {session.accountingBasis} basis, straight from QuickBooks.{' '}
+            {session.periodIsClosed
+              ? 'The books for this month are closed; figures are final.'
+              : 'The books for this month are not closed yet, so figures can still change.'}
+          </p>
+        </div>
+        <a
+          href={`/api/export/finance?month=${month}&division=${divisionCode}`}
+          className="inline-flex h-8 items-center gap-1.5 rounded-[var(--radius)] border px-3 text-[12px] font-medium"
+          style={{ borderColor: 'var(--border-strong)', background: 'var(--surface-1)', color: 'var(--text-primary)' }}
+          title="Download the P&L on this page — month, YTD, full year and the division split — as a spreadsheet"
+        >
+          <Download size={13} aria-hidden />
+          Download CSV
+        </a>
       </header>
+
+      <Headline tiles={headlineTiles(model)} />
+      <SectionNav sections={sections} />
 
       {!model.hasData ? (
         <Card>
@@ -50,15 +79,20 @@ export default async function FinancePage({
       ) : null}
 
       {/* --- Tie-out ------------------------------------------------------- */}
-      {model.tieOut ? <TieOut model={model} /> : null}
+      {model.tieOut ? (
+        <section id="tie-out" className="scroll-mt-32">
+          <TieOut model={model} />
+        </section>
+      ) : null}
 
       {/* --- P&L: month, YTD, full year ------------------------------------ */}
+      <section id="pl" className="scroll-mt-32">
       <Card>
         <CardHeader
           title="Profit & loss"
           subtitle={<BudgetSource model={model} />}
         />
-        <DataTable>
+        <DataTable dense>
           <thead>
             <tr>
               <GroupTh align="left"> </GroupTh>
@@ -92,14 +126,23 @@ export default async function FinancePage({
           operating expenses — shown for visibility, never subtracted again.
         </p>
       </Card>
+      </section>
+
+      {/* --- By division ---------------------------------------------------- */}
+      {model.divisionBreakdown ? (
+        <section id="divisions" className="scroll-mt-32">
+          <DivisionBreakdown model={model} />
+        </section>
+      ) : null}
 
       {/* --- Change --------------------------------------------------------- */}
+      <section id="change" className="scroll-mt-32">
       <Card>
         <CardHeader
           title="Change"
           subtitle={`${model.monthLabel} against the month before and the same month last year, and year to date against the same months of last year.`}
         />
-        <DataTable>
+        <DataTable dense>
           <thead>
             <tr>
               <GroupTh align="left"> </GroupTh>
@@ -150,17 +193,21 @@ export default async function FinancePage({
           that includes last year to fill the prior-year columns.
         </p>
       </Card>
+      </section>
 
       {/* --- Working capital and A/R --------------------------------------- */}
-      <div className="grid gap-4 xl:grid-cols-2">
+      <section id="cash" className="grid scroll-mt-32 gap-4 xl:grid-cols-2">
         <WorkingCapitalCard model={model} />
         <AgingCard model={model} />
-      </div>
+      </section>
 
       {/* --- 10X ------------------------------------------------------------ */}
-      <TenXCard model={model} />
+      <section id="tenx" className="scroll-mt-32">
+        <TenXCard model={model} />
+      </section>
 
       {/* --- Balance sheet -------------------------------------------------- */}
+      <section id="balance-sheet" className="scroll-mt-32">
       <Card>
         <CardHeader
           title="Balance sheet"
@@ -224,8 +271,10 @@ export default async function FinancePage({
           />
         )}
       </Card>
+      </section>
 
       {/* --- Rolling trend -------------------------------------------------- */}
+      <section id="trend" className="scroll-mt-32">
       <ChartCard
         title="Revenue trend"
         subtitle="Monthly revenue by division, the fifteen months to the selected month"
@@ -235,7 +284,152 @@ export default async function FinancePage({
         valueFormat="currency"
         height={280}
       />
+      </section>
     </div>
+  );
+}
+
+/** The headline row, from the same model as every table below it. */
+function headlineTiles(model: FinanceViewModel): HeadlineTile[] {
+  const line = (id: string) => model.lines.find((l) => l.id === id)!;
+  const revenue = line('revenue');
+  const grossMargin = line('gross_margin_pct');
+  const netProfit = line('net_profit');
+  const wc = model.workingCapital;
+  const ar = model.aging.ar;
+
+  const vsBudget = (f: Figure, higherIsBetter: boolean): Pick<HeadlineTile, 'context' | 'tone'> => {
+    if (f.attainment === null) return { context: 'No budget loaded', tone: 'neutral' };
+    const above = f.attainment >= 1;
+    return {
+      context: `${formatNumber(f.attainment, 'ratio')} of budget`,
+      tone: above === higherIsBetter ? 'good' : 'bad',
+    };
+  };
+
+  const vsPrior = (current: number | null, prior: number | null, label: string, higherIsBetter: boolean) => {
+    if (current === null || prior === null) return { context: `No ${label} to compare`, tone: 'neutral' as const };
+    const delta = current - prior;
+    return {
+      context: `${formatSignedNumber(delta, 'currency')} vs ${label}`,
+      tone: delta === 0 ? ('neutral' as const) : (delta > 0) === higherIsBetter ? ('good' as const) : ('bad' as const),
+    };
+  };
+
+  return [
+    { label: 'Revenue', value: money(revenue.month.actual), ...vsBudget(revenue.month, true), hint: 'Month revenue from the QuickBooks P&L, against the budget.', href: '#pl' },
+    {
+      label: 'Gross margin',
+      value: formatNumber(grossMargin.month.actual, 'percent'),
+      context: grossMargin.month.budget === null ? 'No budget loaded' : `${points(grossMargin.month.variance)} vs budget`,
+      tone: grossMargin.month.variance === null ? 'neutral' : grossMargin.month.variance >= 0 ? 'good' : 'bad',
+      hint: 'Gross profit ÷ revenue for the month.',
+      href: '#pl',
+    },
+    { label: 'Net profit', value: money(netProfit.month.actual), ...vsPrior(netProfit.month.actual, netProfit.priorMonth, shortLabel(model.priorMonthLabel), true), hint: 'Gross profit − operating expenses.', href: '#change' },
+    { label: 'YTD net profit', value: money(netProfit.ytd.actual), ...vsBudget(netProfit.ytd, true), hint: `Net profit ${model.ytdLabel}.`, href: '#pl' },
+    {
+      label: 'Working capital',
+      value: money(wc.workingCapital),
+      ...(wc.workingCapital === null
+        ? { context: model.isConsolidated ? 'Balance sheet not loaded' : 'ARG Total only', tone: 'neutral' as const }
+        : { context: `Current ratio ${formatNumber(wc.currentRatio, 'multiple')}`, tone: (wc.currentRatio ?? 0) >= 1 ? ('good' as const) : ('bad' as const) }),
+      hint: 'Current assets − current liabilities, from the QuickBooks balance sheet.',
+      href: '#cash',
+    },
+    {
+      label: 'Accounts receivable',
+      value: ar ? money(ar.total) : '—',
+      ...(ar
+        ? {
+            context: `${formatNumber(ar.total ? ar.over60 / ar.total : null, 'percent')} over 60 days`,
+            tone: ar.total && ar.over60 / ar.total > 0.25 ? ('bad' as const) : ('neutral' as const),
+          }
+        : { context: 'No open invoices loaded', tone: 'neutral' as const }),
+      hint: `Open invoices as of ${ar?.asOf ?? '—'}.`,
+      href: '#cash',
+    },
+  ];
+}
+
+function DivisionBreakdown({ model }: { model: FinanceViewModel }) {
+  const rows = model.divisionBreakdown!;
+  return (
+    <Card>
+      <CardHeader
+        title="By division"
+        subtitle={`Each division for ${model.monthLabel} beside ARG Total, with its share of revenue and its year to date.`}
+      />
+      <DataTable dense>
+        <thead>
+          <tr>
+            <GroupTh align="left"> </GroupTh>
+            <GroupTh span={8}>{model.monthLabel}</GroupTh>
+            <GroupTh span={3}>Year to date</GroupTh>
+          </tr>
+          <tr>
+            <Th align="left">Division</Th>
+            <Th>Revenue</Th>
+            <Th title="Share of ARG Total revenue">Share</Th>
+            <Th title="Month revenue ÷ the division's budgeted revenue">% of budget</Th>
+            <Th>Gross profit</Th>
+            <Th>Gross margin</Th>
+            <Th>Operating exp.</Th>
+            <Th>Net profit</Th>
+            <Th>Net margin</Th>
+            <Th>Revenue</Th>
+            <Th>Net profit</Th>
+            <Th>Net margin</Th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((row) => {
+            const weight = row.isTotal ? 600 : 400;
+            return (
+              <tr key={row.divisionCode}>
+                <Td align="left" numeric={false} style={{ fontWeight: weight }}>
+                  <span className="inline-flex items-center gap-2">
+                    {row.color ? (
+                      <span aria-hidden className="h-2.5 w-2.5 rounded-[2px]" style={{ background: row.color }} />
+                    ) : null}
+                    {row.label}
+                  </span>
+                </Td>
+                <Td style={{ fontWeight: weight }}>{money(row.revenue)}</Td>
+                <Td muted>
+                  <span className="inline-flex items-center justify-end gap-2">
+                    {!row.isTotal && row.revenueShare !== null ? (
+                      <span aria-hidden className="h-1.5 w-12 overflow-hidden rounded-full" style={{ background: 'var(--surface-2)' }}>
+                        <span className="block h-full rounded-full" style={{ width: `${Math.max(0, Math.min(1, row.revenueShare)) * 100}%`, background: row.color ?? 'var(--series-1)' }} />
+                      </span>
+                    ) : null}
+                    {formatNumber(row.revenueShare, 'percent')}
+                  </span>
+                </Td>
+                <Td style={{ color: sentimentColorVar(sentimentOf(row.budgetAttainment === null ? null : row.budgetAttainment - 1, true)) }}>
+                  {formatNumber(row.budgetAttainment, 'ratio')}
+                </Td>
+                <Td style={{ fontWeight: weight }}>{money(row.grossProfit)}</Td>
+                <Td muted>{formatNumber(row.grossMargin, 'percent')}</Td>
+                <Td>{money(row.opex)}</Td>
+                <Td style={{ fontWeight: weight, color: row.netProfit !== null && row.netProfit < 0 ? 'var(--delta-bad)' : undefined }}>
+                  {money(row.netProfit)}
+                </Td>
+                <Td muted>{formatNumber(row.netMargin, 'percent')}</Td>
+                <Td>{money(row.ytdRevenue)}</Td>
+                <Td style={{ color: row.ytdNetProfit !== null && row.ytdNetProfit < 0 ? 'var(--delta-bad)' : undefined }}>
+                  {money(row.ytdNetProfit)}
+                </Td>
+                <Td muted>{formatNumber(row.ytdNetMargin, 'percent')}</Td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </DataTable>
+      <p className="mt-3 text-[11px] text-[var(--text-muted)]">
+        Pick a division in the selector at the top to open its full P&amp;L.
+      </p>
+    </Card>
   );
 }
 
@@ -245,8 +439,10 @@ function money(value: number | null): string {
   return formatNumber(value, 'currency');
 }
 
+/** Lower-cases a leading word for use mid-sentence, leaving acronyms such as YTD alone. */
 function lowerFirst(text: string): string {
-  return text ? text[0]!.toLowerCase() + text.slice(1) : text;
+  if (!text || /^[A-Z]{2}/.test(text)) return text;
+  return text[0]!.toLowerCase() + text.slice(1);
 }
 
 /** "August 2025" → "Aug 2025", for a column heading. */

@@ -80,7 +80,7 @@ export function GlobalControls({ shell }: { shell: ShellData }) {
       className="sticky top-0 z-20 border-b backdrop-blur"
       style={{ background: 'color-mix(in srgb, var(--page) 88%, transparent)', borderColor: 'var(--border)' }}
     >
-      <div className="flex flex-wrap items-center gap-x-3 gap-y-2 px-6 py-2.5">
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-2 px-4 py-2.5 md:px-6">
         {/* One month selector, read by every dashboard. */}
         <label
           htmlFor="reporting-month"

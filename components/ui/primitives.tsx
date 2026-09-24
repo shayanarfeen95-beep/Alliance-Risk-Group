@@ -17,7 +17,9 @@ export function Card({
 }) {
   return (
     <section
-      className={`rounded-[var(--radius-lg)] border ${padded ? 'p-5' : ''} ${className}`}
+      // min-w-0: a card in a grid must be allowed to shrink, so a wide table
+      // scrolls inside it instead of pushing the whole page past the screen edge.
+      className={`min-w-0 rounded-[var(--radius-lg)] border ${padded ? 'p-4 sm:p-5' : ''} ${className}`}
       style={{
         background: 'var(--surface-1)',
         borderColor: 'var(--border)',
@@ -221,9 +223,12 @@ export function DataTable({
   children,
   className = '',
   maxHeight,
+  dense = false,
 }: {
   children: ReactNode;
   className?: string;
+  /** Tighter cell padding, for wide financial tables that should fit a laptop screen. */
+  dense?: boolean;
   /**
    * Caps the table's height and scrolls inside it.
    *
@@ -236,10 +241,14 @@ export function DataTable({
 }) {
   return (
     <div
-      className={`scroll-x -mx-5 px-5 ${maxHeight ? 'overflow-y-auto' : ''} ${className}`}
+      className={`scroll-x -mx-4 px-4 sm:-mx-5 sm:px-5 ${maxHeight ? 'overflow-y-auto' : ''} ${className}`}
       style={maxHeight ? { maxHeight } : undefined}
     >
-      <table className="w-full min-w-max border-collapse text-[12px]">{children}</table>
+      <table
+        className={`w-full min-w-max border-collapse text-[12px] ${dense ? '[&_td]:!px-2 [&_th]:!px-2' : ''}`}
+      >
+        {children}
+      </table>
     </div>
   );
 }

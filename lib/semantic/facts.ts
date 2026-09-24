@@ -823,7 +823,14 @@ export function budgetFor(
       new Decimal(0),
     );
   }
-  if (!hasBudget(bundle, scenario, months, divisions)) return null;
+  // The LINE must be budgeted, not just the scenario. A division budgeted for
+  // revenue with its costs kept unclassed has no COGS budget — reading that as $0
+  // makes its gross-profit budget equal its revenue, which is a wrong number
+  // rather than a missing one.
+  const budgeted = months.some((month) =>
+    divisions.some((division) => bundle.budget.has(`${scenario}|${month}|${division}|${lineItem}`)),
+  );
+  if (!budgeted) return null;
   return sumBudget(bundle, scenario, months, divisions, lineItem);
 }
 

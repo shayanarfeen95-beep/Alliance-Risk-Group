@@ -144,6 +144,27 @@ export interface TenXRow {
   paceGap: number | null;
 }
 
+/** One division's month and YTD, side by side with the others. */
+export interface DivisionBreakdownRow {
+  divisionCode: string;
+  label: string;
+  color: string | null;
+  isTotal: boolean;
+  revenue: number | null;
+  grossProfit: number | null;
+  grossMargin: number | null;
+  opex: number | null;
+  netProfit: number | null;
+  netMargin: number | null;
+  /** Share of ARG Total revenue for the month. */
+  revenueShare: number | null;
+  ytdRevenue: number | null;
+  ytdNetProfit: number | null;
+  ytdNetMargin: number | null;
+  /** Month revenue against the division's budget. */
+  budgetAttainment: number | null;
+}
+
 export interface FinanceViewModel {
   divisionLabel: string;
   isConsolidated: boolean;
@@ -169,6 +190,8 @@ export interface FinanceViewModel {
   balanceSheetUnavailable?: string;
   aging: { ar: AgingBlock | null; ap: AgingBlock | null; note: string | null };
   tenX: { rows: TenXRow[]; source: string | null } | null;
+  /** Each division beside ARG Total. Only at ARG Total, where there is more than one. */
+  divisionBreakdown: DivisionBreakdownRow[] | null;
   trend: Array<{ x: string; xLabel: string } & Record<string, number | null | string>>;
   trendSeries: Array<{ id: string; label: string; color: string }>;
 }
@@ -625,6 +648,47 @@ export function loadFinance(
     return row;
   });
 
+  // --- Division breakdown ---------------------------------------------------
+  let divisionBreakdown: DivisionBreakdownRow[] | null = null;
+  if (isConsolidated && bundle.divisions.length > 1) {
+    const totalRevenue = monthPl ? monthPl.revenue.toNumber() : null;
+    const rowFor = (codes: string[], label: string, code: string, color: string | null, isTotal: boolean): DivisionBreakdownRow => {
+      const month = hasPl(bundle, period.month, codes) ? sumPl(bundle, period.month, codes) : null;
+      const ytd = period.ytdMonths.some((m) => hasPl(bundle, m, codes))
+        ? sumPlOverMonths(bundle, period.ytdMonths, codes)
+        : null;
+      const revenue = month ? month.revenue.toNumber() : null;
+      const gp = month ? month.revenue.minus(month.cogs).toNumber() : null;
+      const np = month ? month.revenue.minus(month.cogs).minus(month.opex).toNumber() : null;
+      const ytdRevenue = ytd ? ytd.revenue.toNumber() : null;
+      const ytdNp = ytd ? ytd.revenue.minus(ytd.cogs).minus(ytd.opex).toNumber() : null;
+      const budget = num(budgetFor(bundle, scenario, [period.month], codes, 'revenue', isTotal));
+      return {
+        divisionCode: code,
+        label,
+        color,
+        isTotal,
+        revenue,
+        grossProfit: gp,
+        grossMargin: ratio(gp, revenue),
+        opex: month ? month.opex.toNumber() : null,
+        netProfit: np,
+        netMargin: ratio(np, revenue),
+        revenueShare: ratio(revenue, totalRevenue),
+        ytdRevenue,
+        ytdNetProfit: ytdNp,
+        ytdNetMargin: ratio(ytdNp, ytdRevenue),
+        budgetAttainment: ratio(revenue, budget),
+      };
+    };
+    divisionBreakdown = [
+      ...bundle.divisions.map((d) =>
+        rowFor([d.divisionCode], d.divisionName, d.divisionCode, divisionColors[d.divisionCode] ?? null, false),
+      ),
+      rowFor(divisions, 'ARG Total', CONSOLIDATED_CODE, null, true),
+    ];
+  }
+
   const ytdFirst = period.ytdMonths[0]!;
   const priorYtdFirst = period.priorYearYtdMonths[0] ?? period.priorYearMonth;
 
@@ -655,6 +719,7 @@ export function loadFinance(
     balanceSheetUnavailable,
     aging,
     tenX,
+    divisionBreakdown,
     trend,
     trendSeries,
   };
