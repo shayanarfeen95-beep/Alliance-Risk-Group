@@ -276,7 +276,7 @@ export function DataControls(props: DataControlsProps) {
 
           step.rowsWritten += outcome.rowsWritten;
           step.recordsRead += outcome.recordsRead;
-          if (outcome.notes?.length) step.notes = outcome.notes;
+          if (outcome.notes?.length) step.notes = [...step.notes, ...outcome.notes];
 
           if (!outcome.ok) {
             step.state = 'failed';
@@ -364,16 +364,25 @@ export function DataControls(props: DataControlsProps) {
       <div className="rounded-[var(--radius)] border p-4" style={{ borderColor: 'var(--border)' }}>
         <div className="flex flex-wrap items-start justify-between gap-4">
           <div className="max-w-2xl">
-            <p className="text-[13px] font-semibold">Pull the latest data</p>
-            <p className="mt-1 text-[11.5px] leading-relaxed text-[var(--text-muted)]">
-              Fetches <strong>only what has changed</strong> since the last successful pull, so a
-              refresh reads the hundred records that moved rather than the sixty thousand that did
-              not. QuickBooks is read a month at a time, ending at the current month and reaching
-              twelve months back; HubSpot and Sheets are not read by month at all — HubSpot pulls
-              the whole portal. QuickBooks goes into the profit and loss and balance sheet, HubSpot
-              into deals, contacts and meetings, Sheets into budget and headcount. Each entity is saved as it
-              lands, so the dashboards update while the pull is still running. Closed months are
-              left untouched. The reconciliation controls run at the end.
+            <p className="text-[13px] font-semibold">Pull what is new or changed</p>
+            <ul className="mt-1 list-disc space-y-0.5 pl-4 text-[11.5px] leading-relaxed text-[var(--text-muted)]">
+              <li>
+                <strong>QuickBooks</strong>, month by month in the range below: months not yet loaded,
+                the latest three (books still open), and any month QuickBooks&apos; change log shows was
+                edited since the last check. Months already loaded and unchanged are not fetched or
+                re-imported.
+              </li>
+              <li>
+                <strong>Google Sheets</strong> and QuickBooks lists (accounts, classes, budgets, aging):
+                read, compared with what was last imported, and imported only if different.
+              </li>
+              <li>
+                <strong>HubSpot</strong>: only records modified since the last pull.
+              </li>
+            </ul>
+            <p className="mt-1 text-[11px] leading-relaxed text-[var(--text-muted)]">
+              The nightly refresh does the same. Every run is written to the pull log below — what was
+              new, what changed, what was left alone. The data checks run at the end.
             </p>
           </div>
 
@@ -391,7 +400,7 @@ export function DataControls(props: DataControlsProps) {
               ) : (
                 <RefreshCw size={12} aria-hidden />
               )}
-              {busy ? 'Pulling…' : 'Pull everything'}
+              {busy ? 'Pulling…' : 'Pull new & changed'}
             </button>
           )}
         </div>
@@ -542,10 +551,10 @@ export function DataControls(props: DataControlsProps) {
               Re-import everything from scratch
             </button>
             <p className="mt-1 max-w-2xl text-[10.5px] leading-relaxed text-[var(--text-muted)]">
-              Ignores what has already been pulled and reads each source from the beginning. Needed
-              only when the warehouse and the source have genuinely diverged — a mapping changed, or
-              records were edited in a way the provider does not stamp as a change. It reads
-              everything, so it takes as long as the first pull did.
+              Fetches and imports every month and record in the range again, changed or not. Rarely
+              needed: a change to the importer or to the class mapping already triggers a re-import of
+              what it affects. Use it if QuickBooks was edited in a way its change log does not show —
+              payroll, for example — in a month more than three months back.
             </p>
           </div>
         )}
@@ -609,8 +618,13 @@ export function DataControls(props: DataControlsProps) {
                     <span className="text-[var(--text-muted)]">queued</span>
                   ) : (
                     <span className="text-[var(--text-muted)]">
-                      {step.rowsWritten.toLocaleString()} row{step.rowsWritten === 1 ? '' : 's'}
-                      {step.state === 'running' ? ' so far…' : ''}
+                      {step.state === 'done' &&
+                      step.rowsWritten === 0 &&
+                      step.notes.some((note) => /unchanged|nothing to fetch|not re-imported/i.test(note))
+                        ? 'up to date — nothing re-imported'
+                        : `${step.rowsWritten.toLocaleString()} row${step.rowsWritten === 1 ? '' : 's'}${
+                            step.state === 'running' ? ' so far…' : ''
+                          }`}
                     </span>
                   )}
                   {step.notes.map((note, noteIndex) => (

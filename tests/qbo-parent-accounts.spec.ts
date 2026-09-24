@@ -20,6 +20,7 @@ import { and, eq } from 'drizzle-orm';
 import { createTestDb, type TestDb } from './helpers/db';
 import { seedDatabase } from '@/lib/seed/load';
 import { conformBatch, isPayrollAccount } from '@/lib/etl/conform';
+import { checkPlTiesToQuickBooks } from '@/lib/recon/checks';
 import * as t from '@/lib/db/schema';
 import type { RawBatch } from '@/lib/connectors/types';
 
@@ -188,6 +189,65 @@ describe('parent accounts in a QuickBooks P&L', () => {
     const divisionOpex = await Promise.all(['CLAIMS', 'LITS', 'SHRC', 'TP'].map(plRow));
     const sum = divisionOpex.reduce((total, row) => total.plus(row.opex), new Decimal(0));
     expect(new Decimal(byLine.opex!).minus(sum).toFixed(2)).toBe('-50.50');
+  });
+});
+
+describe('what sits on classes that are not a division', () => {
+  it('is recorded per class, so the tie-out can name it', async () => {
+    const rows = await harness.db
+      .select()
+      .from(t.factCompanyTotal)
+      .where(and(eq(t.factCompanyTotal.periodMonth, MONTH), eq(t.factCompanyTotal.statement, 'PL_UNASSIGNED')));
+    const byLine = Object.fromEntries(rows.map((row) => [row.line, new Decimal(row.amount).toFixed(2)]));
+    expect(byLine.opex).toBe('-50.50');
+    expect(byLine['opex|Z Alloc']).toBe('-52.26');
+    expect(byLine['opex|Not Specified']).toBe('1.76');
+  });
+
+  it('lets the check pass when the divisions plus those classes equal QuickBooks, and say so', async () => {
+    const divisions = (await Promise.all(['CLAIMS', 'LITS', 'SHRC', 'TP'].map(plRow))).reduce(
+      (total, row) => total.plus(row.opex),
+      new Decimal(0),
+    );
+    // QuickBooks = divisions + 50,000 on Not Specified: far outside 0.1%, fully explained.
+    await harness.db
+      .update(t.factCompanyTotal)
+      .set({ amount: divisions.plus(50000).toFixed(2) })
+      .where(and(eq(t.factCompanyTotal.periodMonth, MONTH), eq(t.factCompanyTotal.statement, 'PL'), eq(t.factCompanyTotal.line, 'opex')));
+    await harness.db
+      .update(t.factCompanyTotal)
+      .set({ amount: '50000.00' })
+      .where(
+        and(
+          eq(t.factCompanyTotal.periodMonth, MONTH),
+          eq(t.factCompanyTotal.statement, 'PL_UNASSIGNED'),
+          eq(t.factCompanyTotal.line, 'opex'),
+        ),
+      );
+    const explained = (await checkPlTiesToQuickBooks(harness.db, { fromMonth: MONTH, toMonth: MONTH })).find(
+      (finding) => finding.checkName.startsWith('Operating expense'),
+    )!;
+    expect(explained.status).toBe('PASS');
+    expect(explained.detail).toMatch(/50000\.00 on classes that are not a division/);
+
+    // And an amount nothing explains still fails.
+    await harness.db
+      .update(t.factCompanyTotal)
+      .set({ amount: '10000.00' })
+      .where(
+        and(
+          eq(t.factCompanyTotal.periodMonth, MONTH),
+          eq(t.factCompanyTotal.statement, 'PL_UNASSIGNED'),
+          eq(t.factCompanyTotal.line, 'opex'),
+        ),
+      );
+    const failing = (await checkPlTiesToQuickBooks(harness.db, { fromMonth: MONTH, toMonth: MONTH })).find(
+      (finding) => finding.checkName.startsWith('Operating expense'),
+    )!;
+    expect(failing.status).toBe('FAIL');
+
+    // Leave the month as QuickBooks reported it for the tests that follow.
+    await conformBatch(harness.db, null as never, batch('profit_and_loss', PROFIT_AND_LOSS));
   });
 });
 

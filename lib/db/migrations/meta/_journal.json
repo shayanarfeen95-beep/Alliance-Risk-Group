@@ -106,6 +106,13 @@
       "when": 1789090000000,
       "tag": "0014_unpin_seeded_month",
       "breakpoints": true
+    },
+    {
+      "idx": 15,
+      "version": "7",
+      "when": 1789100000000,
+      "tag": "0015_sync_fingerprints",
+      "breakpoints": true
     }
   ]
 }

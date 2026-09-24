@@ -1066,6 +1066,32 @@ export const syncState = pgTable(
 );
 
 /**
+ * What each piece of source data looked like the last time it was imported.
+ *
+ * One row per QuickBooks month of a report, per Sheets tab, per reference list.
+ * A pull compares what it fetched against this fingerprint and imports only what
+ * is new or different — so pressing Pull, or the nightly refresh, does not
+ * re-import a year of unchanged books every time, and the log can say exactly
+ * which months were new, which changed and which were left alone.
+ */
+export const syncFingerprint = pgTable(
+  'sync_fingerprint',
+  {
+    sourceSystem: text('source_system').notNull(),
+    entity: text('entity').notNull(),
+    /** A month (YYYY-MM-01) for a monthly report; 'all' for a whole list or tab. */
+    scope: text('scope').notNull(),
+    contentHash: text('content_hash').notNull(),
+    /** Last time the source was fetched and compared. */
+    checkedAt: timestamp('checked_at', { withTimezone: true }).notNull().defaultNow(),
+    /** Last time the content was different and was imported. */
+    changedAt: timestamp('changed_at', { withTimezone: true }).notNull().defaultNow(),
+    loadRunId: uuid('load_run_id').references(() => loadRun.id),
+  },
+  (t) => [primaryKey({ columns: [t.sourceSystem, t.entity, t.scope] })],
+);
+
+/**
  * What each QuickBooks class means.
  *
  * Class is how ARG separates divisions in QuickBooks, and the mapping used to

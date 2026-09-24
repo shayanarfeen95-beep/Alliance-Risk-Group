@@ -721,6 +721,8 @@ const getFinanceOverview: ToolDefinition = {
                 quickbooksTotal: formatNumber(row.quickbooks, 'currency_precise'),
                 fourDivisions: formatNumber(row.divisions, 'currency_precise'),
                 notInADivision: formatNumber(-row.difference, 'currency_precise'),
+                ...(row.unassignedDetail ? { onClassesThatAreNotDivisions: row.unassignedDetail } : {}),
+                explainedByThoseClasses: row.ties,
               })),
             }
           : 'Only checked at ARG Total.',

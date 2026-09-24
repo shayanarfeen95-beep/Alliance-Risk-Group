@@ -70,7 +70,7 @@ export default async function AdminPage({
   const [config, recentRuns, reconSummary, failingChecks, auditTrail, userRows, accessRows, divisionRows, classMap, dataHealth, lastGood, loadedRows] =
     await Promise.all([
       db.select().from(t.appConfig).orderBy(t.appConfig.key),
-      db.select().from(t.loadRun).where(notSeed).orderBy(desc(t.loadRun.startedAt)).limit(25),
+      db.select().from(t.loadRun).where(notSeed).orderBy(desc(t.loadRun.startedAt)).limit(60),
       db
         .select({
           checkId: t.reconResult.checkId,
@@ -385,7 +385,7 @@ export default async function AdminPage({
             <DataHealthPanel health={dataHealth} canManage={canManageData} />
           </section>
           <Card>
-            <CardHeader title="Load history" subtitle="Every pull is timestamped, reproducible and reversible. Open a failed one to see why." />
+            <CardHeader title="Pull log" subtitle="Every pull, newest first: what was fetched, what was new or changed and imported, and what was already up to date and left alone. Open “What happened” on any row." />
             <LoadTable runs={recentRuns} />
           </Card>
         </div>
@@ -596,6 +596,17 @@ function Banner({ tone, children }: { tone: 'good' | 'critical'; children: React
 
 type LoadRunRow = typeof t.loadRun.$inferSelect;
 
+/** The run's own account of itself: which months were new, changed or left alone. */
+function notesOf(run: LoadRunRow): string[] {
+  const plan = (run.plan ?? {}) as { notes?: unknown };
+  return Array.isArray(plan.notes) ? (plan.notes.filter((note) => typeof note === 'string') as string[]) : [];
+}
+
+/** Succeeded without importing anything, because nothing had changed. */
+function upToDate(run: LoadRunRow): boolean {
+  return run.status === 'SUCCEEDED' && run.rowsWritten === 0 && notesOf(run).some((note) => /unchanged|nothing to fetch|not re-imported/i.test(note));
+}
+
 /** Pulls with a status you can read at a glance, and the reason for any that failed. */
 function LoadTable({ runs }: { runs: LoadRunRow[] }) {
   if (!runs.length) {
@@ -631,7 +642,21 @@ function LoadTable({ runs }: { runs: LoadRunRow[] }) {
               {run.windowStart ? `${run.windowStart.slice(0, 7)} → ${run.windowEnd?.slice(0, 7)}` : '—'}
             </Td>
             <Td align="left" numeric={false} className="!whitespace-normal">
-              <StatusPill tone={toneOf(run.status)}>{label(run.status)}</StatusPill>
+              {upToDate(run) ? (
+                <StatusPill tone="neutral">No changes</StatusPill>
+              ) : (
+                <StatusPill tone={toneOf(run.status)}>{label(run.status)}</StatusPill>
+              )}
+              {notesOf(run).length ? (
+                <details className="mt-1 max-w-lg text-[11px] text-[var(--text-secondary)]">
+                  <summary className="cursor-pointer text-[var(--text-muted)]">What happened</summary>
+                  <ul className="mt-1 list-disc space-y-0.5 pl-4 leading-relaxed">
+                    {notesOf(run).map((note, index) => (
+                      <li key={index}>{note}</li>
+                    ))}
+                  </ul>
+                </details>
+              ) : null}
               {run.status === 'FAILED' && run.errorMessage ? (
                 <details className="mt-1 max-w-md text-[11px] text-[var(--text-secondary)]">
                   <summary className="cursor-pointer text-[var(--text-muted)]">Why</summary>

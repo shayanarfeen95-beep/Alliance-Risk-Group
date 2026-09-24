@@ -54,6 +54,38 @@ Also worth confirming with ARG: the QuickBooks class **PS-TP** is mapped to
 LITS in Admin → Class mapping, while the division list names "PS - TP" as a TP
 legacy code. It carries no current P&L column, but decide which is right.
 
+### Pulls import only what is new or changed
+
+`sync_fingerprint` (migration 0015) holds a fingerprint of every QuickBooks
+month, Sheets tab and QuickBooks list as it was last imported. **Pull new &
+changed** — and the nightly refresh — then:
+
+- **QuickBooks reports** (P&L, balance sheet, trial balance): fetch months never
+  loaded, the latest three (books still open), and months QuickBooks' change
+  log (CDC, 30 days) shows were edited since the last check. A balance-sheet edit
+  re-checks every later month. When the change log cannot be used (older than 29
+  days, unreadable, a deletion with no date) every month is fetched — then only
+  the ones whose content differs are imported.
+- **Sheets tabs and QuickBooks lists**: fetched, compared, imported only if different.
+- **HubSpot**: unchanged — only records modified since the last pull.
+
+A change to the importer (`CONFORM_VERSION` in `lib/etl/fingerprint.ts`) or to
+the class mapping re-imports what it affects automatically. **Re-import
+everything** remains for the case the change log cannot see: payroll paychecks
+(not in Intuit's API) edited more than three months back. Every run's notes —
+what was new, changed, left alone — are in **Admin → Data → Pull log**.
+
+The first pull after deploying 0015 fetches everything once, since nothing has
+a fingerprint yet.
+
+### Ties to QuickBooks, explained
+
+The P&L import now records what QuickBooks holds on classes that belong to no
+division (`PL_UNASSIGNED`, per class). *P&L ties to QuickBooks* passes when the
+four divisions plus those amounts equal QuickBooks to the dollar, and the detail
+names the classes — e.g. September OpEx sitting on Not Specified until it is
+allocated. A difference nothing explains still fails.
+
 ---
 
 ## Refresh schedule

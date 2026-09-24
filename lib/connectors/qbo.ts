@@ -286,7 +286,10 @@ async function fetchMonthlyReport(
   // Conform replaces a month wholesale, so half a month landing on its own would
   // read as a genuine collapse in that month's figures rather than as an
   // unfinished pull. A month is fetched entirely or not at all.
-  const months = monthsInWindow(window);
+  // Only the months the pull asked for, when it asked: the others are already
+  // held and unchanged (see FetchOptions.months).
+  const inWindow = monthsInWindow(window);
+  const months = options?.months ? inWindow.filter((month) => options.months!.includes(month)) : inWindow;
   const resumeAt = options?.cursor ? months.indexOf(options.cursor) : 0;
   const from = resumeAt < 0 ? 0 : resumeAt;
 
@@ -369,6 +372,46 @@ async function queryAll(entityName: QueryEntity, where?: string): Promise<RawRec
   return records;
 }
 
+/**
+ * Every transaction type that moves a P&L or balance-sheet figure.
+ *
+ * Fed to QuickBooks' change-data-capture endpoint, which lists what was created,
+ * edited or deleted since a moment (up to 30 days back). Payroll paychecks are
+ * not exposed by Intuit's API at all, which is one reason the latest months are
+ * always re-checked regardless of what this reports.
+ */
+const CDC_ENTITIES = [
+  'Invoice', 'SalesReceipt', 'CreditMemo', 'RefundReceipt', 'Payment', 'Deposit',
+  'Bill', 'BillPayment', 'VendorCredit', 'Purchase', 'JournalEntry', 'Transfer',
+];
+
+/** QuickBooks keeps change data for 30 days; a day's margin stays inside it. */
+export const CDC_HORIZON_DAYS = 29;
+
+export async function qboChangedMonths(since: Date): Promise<{ months: string[]; undated: number }> {
+  const payload = (await callApi('cdc', {
+    entities: CDC_ENTITIES.join(','),
+    changedSince: since.toISOString().replace(/\.\d{3}Z$/, 'Z'),
+  })) as {
+    CDCResponse?: Array<{ QueryResponse?: Array<Record<string, unknown>> }>;
+  };
+
+  const months = new Set<string>();
+  let undated = 0;
+  for (const response of payload.CDCResponse ?? []) {
+    for (const group of response.QueryResponse ?? []) {
+      for (const [key, value] of Object.entries(group)) {
+        if (!Array.isArray(value) || !CDC_ENTITIES.includes(key)) continue;
+        for (const item of value as Array<{ TxnDate?: string; status?: string }>) {
+          if (item.TxnDate && /^\d{4}-\d{2}/.test(item.TxnDate)) months.add(`${item.TxnDate.slice(0, 7)}-01`);
+          else undated += 1;
+        }
+      }
+    }
+  }
+  return { months: [...months].sort(), undated };
+}
+
 export const qboConnector: SourceConnector = {
   sourceSystem: 'QBO',
   label: 'QuickBooks Online',
@@ -376,6 +419,8 @@ export const qboConnector: SourceConnector = {
   entities: () => ENTITIES,
 
   isConfigured: () => isConnected('QBO'),
+
+  changedMonths: qboChangedMonths,
 
   async fetch(entity: string, window: FetchWindow, options?: FetchOptions): Promise<RawBatch> {
     if (!(await qboConnector.isConfigured())) throw new ConnectorNotConfiguredError('QBO');

@@ -246,6 +246,8 @@ function divisionColumns(
   columns: Array<{ index: number; divisionCode: string }>;
   unmapped: string[];
   excluded: string[];
+  /** Columns on classes deliberately outside every division (Not Specified, Z Alloc). */
+  excludedColumns: Array<{ index: number; title: string }>;
   /** QuickBooks' company-level column, or null when the report has none. */
   totalIndex: number | null;
 } {
@@ -253,6 +255,7 @@ function divisionColumns(
   const columns: Array<{ index: number; divisionCode: string }> = [];
   const unmapped: string[] = [];
   const excluded: string[] = [];
+  const excludedColumns: Array<{ index: number; title: string }> = [];
   let totalIndex: number | null = null;
 
   all.forEach((column, index) => {
@@ -279,11 +282,13 @@ function divisionColumns(
     // Deliberately excluded: left out of every divisional figure and out of ARG
     // Total, which is what an allocation or unclassified bucket should do. The
     // caller reports it so under-reporting is stated rather than discovered.
-    else if (isExcluded(lookup, classRef, title)) excluded.push(title);
-    else unmapped.push(title);
+    else if (isExcluded(lookup, classRef, title)) {
+      excluded.push(title);
+      excludedColumns.push({ index, title });
+    } else unmapped.push(title);
   });
 
-  return { columns, unmapped, excluded, totalIndex };
+  return { columns, unmapped, excluded, excludedColumns, totalIndex };
 }
 
 /**
@@ -431,7 +436,7 @@ async function conformProfitAndLoss(
   report: QboReport,
   lookup: DivisionLookup,
 ): Promise<number> {
-  const { columns, unmapped, totalIndex } = divisionColumns(report, lookup);
+  const { columns, unmapped, totalIndex, excludedColumns } = divisionColumns(report, lookup);
 
   if (unmapped.length) {
     throw new UnmappedSourceDataError(
@@ -462,6 +467,7 @@ async function conformProfitAndLoss(
   const seenAccounts = new Map<string, { name: string; line: ReportingLine }>();
   const unmappedAccounts: string[] = [];
   const companyRows: GlRowForTotal[] = [];
+  const unassignedRows = new Map<string, GlRowForTotal[]>();
 
   for (const { group, cells, ancestors } of leafRows(report.Rows?.Row, undefined)) {
     const label = cells[0]?.value?.trim();
@@ -496,6 +502,13 @@ async function conformProfitAndLoss(
 
     if (totalIndex !== null) {
       companyRows.push({ accountId, reportingLine: line, amount: amount(cells[totalIndex]) });
+    }
+    for (const column of excludedColumns) {
+      const value = amount(cells[column.index]);
+      if (value.isZero()) continue;
+      const rows = unassignedRows.get(column.title) ?? [];
+      rows.push({ accountId, reportingLine: line, amount: value });
+      unassignedRows.set(column.title, rows);
     }
   }
 
@@ -610,6 +623,27 @@ async function conformProfitAndLoss(
       opex: company.opex,
     });
   }
+
+  // What QuickBooks holds on classes that belong to no division — "Not
+  // Specified" (posted with no class) and allocation classes such as Z Alloc.
+  // ARG Total is the four divisions, so these amounts are in QuickBooks' total
+  // and not in ours. Recording them is what lets the tie-out say "the $94,267
+  // difference is September OpEx not yet on any division" instead of only
+  // "does not tie".
+  const unassigned: Record<string, Decimal> = {
+    revenue: new Decimal(0),
+    cogs: new Decimal(0),
+    opex: new Decimal(0),
+  };
+  for (const [title, rows] of unassignedRows) {
+    const lines = rollUpGl(rows);
+    for (const line of ['revenue', 'cogs', 'opex'] as const) {
+      if (lines[line].isZero()) continue;
+      unassigned[line] = unassigned[line]!.plus(lines[line]);
+      unassigned[`${line}|${title}`] = lines[line];
+    }
+  }
+  written += await writeCompanyTotals(db, loadRunId, month, 'PL_UNASSIGNED', unassigned);
 
   return written;
 }
@@ -1979,10 +2013,10 @@ function sectionLine(title: string): 'revenue' | 'cogs' | 'opex' | null {
   return null;
 }
 
-export interface SectionedCell {
+export interface SectionedCell<Line extends string = 'revenue' | 'cogs' | 'opex'> {
   periodMonth: string;
   divisionLabel: string;
-  lineItem: 'revenue' | 'cogs' | 'opex';
+  lineItem: Line;
   amount: string;
 }
 
@@ -2002,6 +2036,27 @@ export interface SectionedCell {
  * in the title is not read.
  */
 export function readSectionedGrid(values: unknown[][]): { cells: SectionedCell[]; sections: string[] } | null {
+  return readSections(values, sectionLine, null);
+}
+
+/**
+ * The same layout for headcount: a Divisions × JAN…DEC grid of people, under a
+ * "Headcount" title or under no title at all.
+ */
+export function readHeadcountGrid(values: unknown[][]): { cells: SectionedCell<'headcount'>[]; sections: string[] } | null {
+  return readSections(
+    values,
+    (title) => (/head\s*count|\bfte\b|employees?|staff|people/i.test(title) ? 'headcount' : null),
+    'headcount',
+  );
+}
+
+function readSections<Line extends string>(
+  values: unknown[][],
+  classify: (title: string) => Line | null,
+  /** The line a grid is read as before any title has named one. */
+  untitled: Line | null,
+): { cells: SectionedCell<Line>[]; sections: string[] } | null {
   const text = (cell: unknown) => String(cell ?? '').trim();
 
   let titleYear: number | null = null;
@@ -2016,9 +2071,10 @@ export function readSectionedGrid(values: unknown[][]): { cells: SectionedCell[]
     if (titleYear) break;
   }
 
-  const cells: SectionedCell[] = [];
+  const cells: SectionedCell<Line>[] = [];
   const sections: string[] = [];
-  let line: 'revenue' | 'cogs' | 'opex' | null = null;
+  let line: Line | null = untitled;
+  let titled = false;
   let grid: { divisionColumn: number; months: Array<{ index: number; month: string }> } | null = null;
   let sawHeader = false;
 
@@ -2029,9 +2085,15 @@ export function readSectionedGrid(values: unknown[][]): { cells: SectionedCell[]
     // A title: one lone piece of text. Starts a new section and forgets the
     // previous grid, so rows can never be read under the wrong line.
     if (filled.length === 1 && !/^-?[\d,.]+$/.test(filled[0]!)) {
-      line = sectionLine(filled[0]!);
+      const named = classify(filled[0]!);
+      // Before the first title that names a line, an untitled grid keeps its
+      // default; once titles are in use, a title naming nothing ends the section.
+      if (named || titled) {
+        line = named;
+        titled = true;
+      }
       grid = null;
-      if (line) sections.push(filled[0]!);
+      if (named) sections.push(filled[0]!);
       continue;
     }
 
@@ -2363,12 +2425,22 @@ async function conformHeadcount(
   }
 
   const table = longTable ? null : findSheetTable(values);
-  if (!longTable && !table) {
+  const sectioned = longTable || table ? null : readHeadcountGrid(values);
+  if (!longTable && !table && !sectioned) {
     throw new UnmappedSourceDataError(
-      'The headcount sheet has no header row this can read. Nothing was written. Two shapes are ' +
-        'understood: one row per month per division with a Headcount column, or a grid with a ' +
-        'Division column and one column per month.',
+      'The headcount sheet has no header row this can read. Nothing was written. Three shapes are ' +
+        'understood: one row per month per division with a Headcount column; a grid with a ' +
+        'Division column and one column per month; or, like the budget tab, a Divisions × ' +
+        'JAN…DEC grid with the year in the title.',
     );
+  }
+
+  if (sectioned) {
+    for (const cell of sectioned.cells) {
+      const divisionCode = lookup.byKey.get(cell.divisionLabel.toLowerCase());
+      if (!divisionCode) continue;
+      rows.push({ periodMonth: cell.periodMonth, divisionCode, headcount: new Decimal(cell.amount).toFixed(2) });
+    }
   }
 
   if (table) {

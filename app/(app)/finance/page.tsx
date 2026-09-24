@@ -588,15 +588,20 @@ function TieOut({ model }: { model: FinanceViewModel }) {
               <Td>{formatNumber(row.divisions, 'currency_precise')}</Td>
               <Td style={{ color: row.ties ? 'var(--text-muted)' : 'var(--status-critical)' }}>
                 {formatNumber(-row.difference, 'currency_precise')}
+                {row.unassignedDetail ? (
+                  <span className="block text-[10.5px] font-normal text-[var(--text-muted)]">{row.unassignedDetail}</span>
+                ) : null}
               </Td>
             </tr>
           ))}
         </tbody>
       </DataTable>
       <p className="mt-3 text-[11px] leading-relaxed text-[var(--text-muted)]">
-        QuickBooks&apos; total includes every class. Amounts on classes that are not a division — such as
-        Not Specified and Z Alloc — are in QuickBooks&apos; total but in no division, and are shown here
-        rather than hidden.
+        QuickBooks&apos; total includes every class. Amounts on classes that are not a division — Not
+        Specified (posted with no class) and allocation classes such as Z Alloc — are in QuickBooks&apos;
+        total but in no division, and are shown here by class rather than hidden. It ties when the four
+        divisions plus those amounts equal QuickBooks to the dollar; in an open month, a large amount on
+        Not Specified usually means entries not yet allocated to a division.
       </p>
     </Card>
   );

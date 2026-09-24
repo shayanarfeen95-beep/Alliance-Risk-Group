@@ -144,7 +144,7 @@ export async function loadDataHealth(db: Database): Promise<DataHealth> {
             : `${connector.label} is not signed in, so nothing can be fetched from it.`;
       } else if (!run) {
         state = 'NEVER_PULLED';
-        detail = 'This has never been pulled. Press Pull everything in Admin.';
+        detail = 'This has never been pulled. Press Pull new & changed in Admin → Data.';
       } else if (run.status === 'FAILED') {
         state = 'BLOCKED';
         detail = run.error?.slice(0, 300) ?? 'The last pull failed and gave no reason.';

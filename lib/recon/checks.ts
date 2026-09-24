@@ -493,6 +493,21 @@ export async function checkPlTiesToQuickBooks(
     .where(and(eq(t.factCompanyTotal.statement, 'PL'), windowFilter(t.factCompanyTotal.periodMonth, options)));
   if (!companyRows.length) return [];
 
+  // What QuickBooks holds on classes that belong to no division, per month and
+  // line, and per class — recorded by the P&L import.
+  const unassignedRows = await db
+    .select()
+    .from(t.factCompanyTotal)
+    .where(
+      and(eq(t.factCompanyTotal.statement, 'PL_UNASSIGNED'), windowFilter(t.factCompanyTotal.periodMonth, options)),
+    );
+  const unassigned = new Map<string, Map<string, Decimal>>();
+  for (const row of unassignedRows) {
+    const lines = unassigned.get(row.periodMonth) ?? new Map<string, Decimal>();
+    lines.set(row.line, d(row.amount));
+    unassigned.set(row.periodMonth, lines);
+  }
+
   const plRows = await db
     .select()
     .from(t.factPlActual)
@@ -521,9 +536,39 @@ export async function checkPlTiesToQuickBooks(
     const ours = divisionTotals.get(row.periodMonth)?.[line] ?? new Decimal(0);
     const variance = ours.minus(quickbooks);
     const tolerance = Decimal.max(TOL, quickbooks.abs().times(0.001));
-    const pass = variance.abs().lessThanOrEqualTo(tolerance);
     const month = row.periodMonth.slice(0, 7);
 
+    // Explained: the divisions plus what sits on no-division classes equal
+    // QuickBooks. The importer then accounted for every dollar, and the gap is
+    // a bookkeeping fact (unclassed or unallocated entries), not a load error.
+    const outside = unassigned.get(row.periodMonth);
+    const onNoDivision = outside?.get(line) ?? null;
+    if (onNoDivision && !variance.abs().lessThanOrEqualTo(tolerance)) {
+      const unexplained = ours.plus(onNoDivision).minus(quickbooks);
+      if (unexplained.abs().lessThanOrEqualTo(TOL)) {
+        const classes = [...outside!.entries()]
+          .filter(([key]) => key.startsWith(`${line}|`))
+          .map(([key, amount]) => `${key.split('|')[1]} ${amount.toFixed(2)}`)
+          .join(', ');
+        findings.push({
+          checkId: 'PL_TIES_TO_QUICKBOOKS',
+          checkName: `${labels[line]} ties to QuickBooks`,
+          periodMonth: row.periodMonth,
+          divisionCode: null,
+          status: 'PASS',
+          expected: quickbooks,
+          actual: ours.plus(onNoDivision),
+          variance: unexplained,
+          detail:
+            `${labels[line]} for ${month}: QuickBooks ${quickbooks.toFixed(2)} = the four divisions ` +
+            `${ours.toFixed(2)} + ${onNoDivision.toFixed(2)} on classes that are not a division (${classes}). ` +
+            `Every dollar is accounted for; that amount is in QuickBooks' total and in no division until it is classed or allocated.`,
+        });
+        continue;
+      }
+    }
+
+    const pass = variance.abs().lessThanOrEqualTo(tolerance);
     findings.push({
       checkId: 'PL_TIES_TO_QUICKBOOKS',
       checkName: `${labels[line]} ties to QuickBooks`,

@@ -6,6 +6,7 @@ import {
   balanceSheetFor,
   budgetFor,
   companyPl,
+  companyUnassigned,
   hasPl,
   sumPl,
   sumPlOverMonths,
@@ -15,6 +16,7 @@ import {
   type PlMeasures,
 } from '@/lib/semantic/facts';
 import { preferredBudgetScenario } from '@/lib/semantic/registry';
+import { formatNumber } from '@/lib/format';
 import { formatMonth, formatMonthShort, monthRange, type MonthKey } from '@/lib/semantic/periods';
 
 /**
@@ -85,7 +87,12 @@ export interface TieOutRow {
   quickbooks: number;
   divisions: number;
   difference: number;
+  /** Divisions plus what sits on no-division classes equals QuickBooks. */
   ties: boolean;
+  /** QuickBooks' amount on classes that belong to no division, when recorded. */
+  unassigned: number | null;
+  /** "Not Specified $94,267 · Z Alloc $200" — which classes hold it. */
+  unassignedDetail: string | null;
 }
 
 export interface BalanceSheetRow {
@@ -470,16 +477,26 @@ export function loadFinance(
   let tieOut: FinanceViewModel['tieOut'] = null;
   const company = isConsolidated ? companyPl(bundle, period.month) : null;
   if (company && monthPl) {
+    const outside = companyUnassigned(bundle, period.month);
     const rows = (['revenue', 'cogs', 'opex'] as const).map((line) => {
       const quickbooks = company[line].toNumber();
       const inDivisions = monthPl[line].toNumber();
       const difference = inDivisions - quickbooks;
+      const unassigned = outside ? outside.totals[line].toNumber() : null;
+      const explained = inDivisions + (unassigned ?? 0) - quickbooks;
       return {
         label: line === 'revenue' ? 'Revenue' : line === 'cogs' ? 'Cost of goods sold' : 'Operating expenses',
         quickbooks,
         divisions: inDivisions,
         difference,
-        ties: Math.abs(difference) <= Math.max(1, Math.abs(quickbooks) * 0.001),
+        ties: Math.abs(explained) <= Math.max(1, Math.abs(quickbooks) * 0.001),
+        unassigned,
+        unassignedDetail: outside
+          ? outside.byClass
+              .filter((entry) => entry.line === line)
+              .map((entry) => `${entry.className} ${formatNumber(entry.amount.toNumber(), 'currency')}`)
+              .join(' · ') || null
+          : null,
       };
     });
     tieOut = { rows, allTie: rows.every((row) => row.ties) };

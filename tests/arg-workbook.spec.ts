@@ -139,3 +139,23 @@ describe('the Running Forecast Log tab', () => {
     expect(rows.some((row) => row.periodMonth === '2026-04-01')).toBe(false);
   });
 });
+
+describe('a Headcount tab laid out like the budget', () => {
+  it('loads people by division and month, with the year from the title', async () => {
+    const values = [
+      ['', 'Monthly Headcount - 2026'],
+      [],
+      ['', 'Divisions', 'JAN', 'FEB', 'MAR', 'YEAR'],
+      ['', 'SHRC', 21, 22, 22, ''],
+      ['', 'Claims', 12, 12, 13, ''],
+      ['', 'ARG Total', 33, 34, 35, ''],
+    ];
+    const outcome = await load('headcount', values);
+    expect(outcome.rowsWritten).toBe(6);
+    const [row] = await harness.db
+      .select()
+      .from(t.factHeadcount)
+      .where(and(eq(t.factHeadcount.periodMonth, '2026-03-01'), eq(t.factHeadcount.divisionCode, 'CLAIMS')));
+    expect(new Decimal(row!.headcount).toNumber()).toBe(13);
+  });
+});

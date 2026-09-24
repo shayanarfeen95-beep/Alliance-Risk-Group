@@ -788,6 +788,32 @@ export function companyPl(bundle: FactBundle, month: MonthKey): PlMeasures | nul
   };
 }
 
+/**
+ * What QuickBooks holds for a month on classes that belong to no division, per
+ * line and per class. Null when the month was loaded before this was recorded.
+ */
+export function companyUnassigned(
+  bundle: FactBundle,
+  month: MonthKey,
+): { totals: Record<'revenue' | 'cogs' | 'opex', Decimal>; byClass: Array<{ line: string; className: string; amount: Decimal }> } | null {
+  const lines = bundle.company.get(`PL_UNASSIGNED|${month}`);
+  if (!lines) return null;
+  const zero = new Decimal(0);
+  const byClass: Array<{ line: string; className: string; amount: Decimal }> = [];
+  for (const [key, amount] of lines) {
+    const [line, className] = key.split('|');
+    if (className) byClass.push({ line: line!, className, amount });
+  }
+  return {
+    totals: {
+      revenue: lines.get('revenue') ?? zero,
+      cogs: lines.get('cogs') ?? zero,
+      opex: lines.get('opex') ?? zero,
+    },
+    byClass,
+  };
+}
+
 export function sumBudget(
   bundle: FactBundle,
   scenario: string,
