@@ -445,12 +445,152 @@ export async function checkNoUnmappedRecords(db: Database): Promise<ReconFinding
 // Runner
 // ---------------------------------------------------------------------------
 
+/** The first of the month we are in. */
+function currentMonth(): string {
+  return `${new Date().toISOString().slice(0, 7)}-01`;
+}
+
+/**
+ * The months a check covers — never later than the month we are in.
+ *
+ * A month that has not happened has nothing to reconcile. Checking one anyway is
+ * what put "3 failing" in the header all September: QuickBooks had a few future-
+ * dated entries in October to December, so those months held one or two
+ * divisions each and failed "all divisions present" — a red badge about months
+ * nobody had kept yet, sitting over an August that was the thing being read.
+ */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function windowFilter(column: any, options: ReconOptions) {
   const clauses = [];
   if (options.fromMonth) clauses.push(gte(column, options.fromMonth));
-  if (options.toMonth) clauses.push(lte(column, options.toMonth));
-  return clauses.length ? and(...clauses) : undefined;
+  const ceiling = options.toMonth && options.toMonth < currentMonth() ? options.toMonth : currentMonth();
+  clauses.push(lte(column, ceiling));
+  return and(...clauses);
+}
+
+// ---------------------------------------------------------------------------
+// The P&L ties to QuickBooks' own company total
+// ---------------------------------------------------------------------------
+
+/**
+ * ARG Total (the four divisions) against QuickBooks' TOTAL column, per line.
+ *
+ * This is the check Mario ran by hand: "revenue in August was $482,405" against
+ * a dashboard showing $321,078. Had it existed, the parent-account parsing bug
+ * would have failed it on the first pull instead of reaching the CFO.
+ *
+ * A difference within $1 — or within 0.1% of the line, which is what an amount
+ * left on an allocation class like Z Alloc typically is — passes, and the detail
+ * always states the exact amount that sits outside the divisions.
+ */
+export async function checkPlTiesToQuickBooks(
+  db: Database,
+  options: ReconOptions = {},
+): Promise<ReconFinding[]> {
+  const companyRows = await db
+    .select()
+    .from(t.factCompanyTotal)
+    .where(and(eq(t.factCompanyTotal.statement, 'PL'), windowFilter(t.factCompanyTotal.periodMonth, options)));
+  if (!companyRows.length) return [];
+
+  const plRows = await db
+    .select()
+    .from(t.factPlActual)
+    .where(windowFilter(t.factPlActual.periodMonth, options));
+
+  const divisionTotals = new Map<string, Record<'revenue' | 'cogs' | 'opex', Decimal>>();
+  for (const row of plRows) {
+    const totals = divisionTotals.get(row.periodMonth) ?? {
+      revenue: new Decimal(0),
+      cogs: new Decimal(0),
+      opex: new Decimal(0),
+    };
+    totals.revenue = totals.revenue.plus(d(row.revenue));
+    totals.cogs = totals.cogs.plus(d(row.cogs));
+    totals.opex = totals.opex.plus(d(row.opex));
+    divisionTotals.set(row.periodMonth, totals);
+  }
+
+  const labels = { revenue: 'Revenue', cogs: 'COGS', opex: 'Operating expense' } as const;
+  const findings: ReconFinding[] = [];
+
+  for (const row of companyRows) {
+    if (!(row.line in labels)) continue;
+    const line = row.line as keyof typeof labels;
+    const quickbooks = d(row.amount);
+    const ours = divisionTotals.get(row.periodMonth)?.[line] ?? new Decimal(0);
+    const variance = ours.minus(quickbooks);
+    const tolerance = Decimal.max(TOL, quickbooks.abs().times(0.001));
+    const pass = variance.abs().lessThanOrEqualTo(tolerance);
+    const month = row.periodMonth.slice(0, 7);
+
+    findings.push({
+      checkId: 'PL_TIES_TO_QUICKBOOKS',
+      checkName: `${labels[line]} ties to QuickBooks`,
+      periodMonth: row.periodMonth,
+      divisionCode: null,
+      status: pass ? 'PASS' : 'FAIL',
+      expected: quickbooks,
+      actual: ours,
+      variance,
+      detail: variance.abs().lessThanOrEqualTo(TOL)
+        ? `${labels[line]} for ${month} is ${quickbooks.toFixed(2)} in QuickBooks and in the four divisions.`
+        : pass
+          ? `${labels[line]} for ${month}: QuickBooks ${quickbooks.toFixed(2)}, the four divisions ${ours.toFixed(2)}. ` +
+            `The ${variance.negated().toFixed(2)} difference is on classes that belong to no division (Not Specified, Z Alloc).`
+          : `${labels[line]} for ${month} does NOT tie: QuickBooks ${quickbooks.toFixed(2)}, the four divisions ` +
+            `${ours.toFixed(2)}, out by ${variance.toFixed(2)}. Check the class mapping, then pull again.`,
+    });
+  }
+
+  return findings;
+}
+
+/** QuickBooks' company balance sheet: assets equal liabilities plus equity. */
+export async function checkCompanyBalanceSheetBalances(
+  db: Database,
+  options: ReconOptions = {},
+): Promise<ReconFinding[]> {
+  const rows = await db
+    .select()
+    .from(t.factCompanyTotal)
+    .where(and(eq(t.factCompanyTotal.statement, 'BS'), windowFilter(t.factCompanyTotal.periodMonth, options)));
+
+  const byMonth = new Map<string, Map<string, Decimal>>();
+  for (const row of rows) {
+    const lines = byMonth.get(row.periodMonth) ?? new Map<string, Decimal>();
+    lines.set(row.line, d(row.amount));
+    byMonth.set(row.periodMonth, lines);
+  }
+
+  const sum = (lines: Map<string, Decimal>, keys: string[]) =>
+    keys.reduce((total, key) => total.plus(lines.get(key) ?? 0), new Decimal(0));
+
+  return [...byMonth].map(([periodMonth, lines]) => {
+    const assets = sum(lines, ['cash', 'accounts_receivable', 'other_current_assets', 'fixed_assets']);
+    const liabilitiesAndEquity = sum(lines, [
+      'accounts_payable',
+      'cc_liability',
+      'other_current_liabilities',
+      'lt_liabilities',
+      'shareholder_equity',
+    ]);
+    return verdict(
+      {
+        checkId: 'BALANCE_SHEET_BALANCES',
+        checkName: 'Company balance sheet balances',
+        periodMonth,
+        divisionCode: null,
+        expected: assets,
+        actual: liabilitiesAndEquity,
+        detail: '',
+      },
+      assets,
+      liabilitiesAndEquity,
+      'Total assets equal total liabilities and equity on the QuickBooks company balance sheet.',
+      (v) => `Assets minus liabilities and equity is ${v.toFixed(2)} on the company balance sheet.`,
+    );
+  });
 }
 
 export interface ReconSummary {
@@ -470,6 +610,8 @@ export async function runAllChecks(
     ...(await checkPlTiesToTrialBalance(db, options)),
     ...(await checkDivisionSumsTieToTotal(db, options)),
     ...(await checkBalanceSheetBalances(db, options)),
+    ...(await checkPlTiesToQuickBooks(db, options)),
+    ...(await checkCompanyBalanceSheetBalances(db, options)),
     ...(await checkAgingTiesToBalanceSheet(db, options)),
     ...(await checkNoUnmappedRecords(db)),
   ];

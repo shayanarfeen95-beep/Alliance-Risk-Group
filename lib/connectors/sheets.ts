@@ -38,6 +38,13 @@ const ENTITIES: EntityDescriptor[] = [
     description: 'Annual targets divided straight-line by 12.',
   },
   {
+    entity: 'forecast',
+    label: 'Forecast (rest of year)',
+    cadence: 'MONTHLY',
+    description:
+      'The latest reforecast by division and month, in the same shape as the budget. Optional: a spreadsheet with no forecast tab is not an error. Feeds the full-year outlook on the Finance page.',
+  },
+  {
     entity: 'headcount',
     label: 'Monthly headcount',
     cadence: 'MONTHLY',
@@ -103,7 +110,18 @@ async function accessToken(): Promise<string> {
 const EXPLICIT_RANGES: Record<string, string | undefined> = {
   monthly_budget: process.env.SHEETS_RANGE_MONTHLY_BUDGET,
   tenx_budget: process.env.SHEETS_RANGE_TENX_BUDGET,
+  forecast: process.env.SHEETS_RANGE_FORECAST,
   headcount: process.env.SHEETS_RANGE_HEADCOUNT,
+};
+
+/** Entities a spreadsheet may simply not have. Their absence is reported, not failed. */
+const OPTIONAL_ENTITIES = new Set(['forecast']);
+
+const RANGE_VARIABLE: Record<string, string> = {
+  monthly_budget: 'SHEETS_RANGE_MONTHLY_BUDGET',
+  tenx_budget: 'SHEETS_RANGE_TENX_BUDGET',
+  forecast: 'SHEETS_RANGE_FORECAST',
+  headcount: 'SHEETS_RANGE_HEADCOUNT',
 };
 
 /**
@@ -117,6 +135,7 @@ const EXPLICIT_RANGES: Record<string, string | undefined> = {
  */
 const TAB_PATTERNS: Record<string, RegExp[]> = {
   tenx_budget: [/\b10\s*x\b/i, /\bten\s*x\b/i, /growth\s*plan/i],
+  forecast: [/re-?forecast/i, /forecast/i, /\bfcst\b/i, /outlook/i],
   monthly_budget: [/monthly\s*budget/i, /\bbudget\b/i, /\bplan\b/i],
   headcount: [/head\s*count/i, /\bfte\b/i, /employees?/i, /staff/i],
 };
@@ -266,7 +285,7 @@ export function matchTab(entity: string, tabs: string[]): string | null {
 }
 
 /** Most specific first. A tab is offered to each entity in this order. */
-const TAB_PRIORITY = ['tenx_budget', 'headcount', 'monthly_budget'];
+const TAB_PRIORITY = ['tenx_budget', 'forecast', 'headcount', 'monthly_budget'];
 
 /** A whole tab. Columns are bounded generously; empty ones cost nothing. */
 function rangeForTab(tab: string): string {
@@ -376,19 +395,21 @@ export const sheetsConnector: SourceConnector = {
       tabs = await listTabs(spreadsheetId);
       const tab = matchTab(entity, tabs);
 
+      if (!tab && OPTIONAL_ENTITIES.has(entity)) {
+        // Nothing to read is an answer for an optional tab, and conform says so.
+        const records: RawRecord[] = [
+          { entity, key: 'absent', payload: { range: null, values: [], absent: true, tabs } },
+        ];
+        return { sourceSystem: 'SHEETS', entity, window, records, fetchedAt: new Date(), nextCursor: null };
+      }
+
       if (!tab) {
         // Naming the tabs that DO exist is the whole point. Anybody can fix a
         // wrong tab name in seconds once they can see the list.
         throw new Error(
           `No tab in the connected spreadsheet looks like "${entity.replace(/_/g, ' ')}". ` +
             `The tabs it has are: ${tabs.join(', ')}. ` +
-            `Rename the right one, or set ${
-              entity === 'monthly_budget'
-                ? 'SHEETS_RANGE_MONTHLY_BUDGET'
-                : entity === 'tenx_budget'
-                  ? 'SHEETS_RANGE_TENX_BUDGET'
-                  : 'SHEETS_RANGE_HEADCOUNT'
-            } to an explicit A1 range.`,
+            `Rename the right one, or set ${RANGE_VARIABLE[entity]} to an explicit A1 range.`,
         );
       }
       range = rangeForTab(tab);

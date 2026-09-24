@@ -360,6 +360,41 @@ export const factGlBalance = pgTable(
   ],
 );
 
+/**
+ * QuickBooks' own company-level figures — the TOTAL column of each report.
+ *
+ * Two jobs, both about agreeing with the books rather than with ourselves:
+ *
+ *   1. **The balance sheet.** ARG's balance sheet is not usable by class: the
+ *      classed report shows CLAIMS with $424k of assets against $942k of
+ *      liabilities and equity, $849k of assets on "Not Specified" and −$2.16M on
+ *      "Z Alloc". Only the TOTAL column balances, so the balance sheet, working
+ *      capital, DSO, DPO and Cash Runway at ARG Total are read from here.
+ *   2. **The P&L tie-out.** ARG Total is the sum of the four divisions (§3), and
+ *      anything on an excluded class — Not Specified, Z Alloc — is in QuickBooks'
+ *      total but in no division. Holding QuickBooks' total beside ours is what
+ *      lets the Finance page say "ties to QuickBooks" or name the difference.
+ *
+ * `statement` is 'PL', 'BS', 'AR_AGING' or 'AP_AGING'; `line` is a P&L reporting
+ * line, a fact_bs_actual field, or an aging bucket. Company-level rows carry no
+ * division, so this table is read only by users entitled to every division.
+ */
+export const factCompanyTotal = pgTable(
+  'fact_company_total',
+  {
+    periodMonth: date('period_month')
+      .notNull()
+      .references(() => dimPeriod.periodMonth),
+    statement: text('statement').notNull(),
+    line: text('line').notNull(),
+    amount: money('amount').notNull().default('0'),
+    sourceSystem: sourceSystem('source_system').notNull(),
+    loadRunId: uuid('load_run_id').references(() => loadRun.id),
+    loadedAt: timestamp('loaded_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.periodMonth, t.statement, t.line] })],
+);
+
 // ---------------------------------------------------------------------------
 // §4.4 FACT_BUDGET — month × division × scenario × line item
 // ---------------------------------------------------------------------------

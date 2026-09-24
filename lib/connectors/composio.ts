@@ -245,6 +245,8 @@ export interface ConnectedAccount {
   id: string;
   status: string;
   toolkitSlug: string | null;
+  /** The Composio user the connection was made under — required by tool calls. */
+  userId?: string | null;
   /** Non-secret identifiers the provider returned — the QuickBooks realm, say. */
   metadata: Record<string, unknown>;
   createdAt: string | null;
@@ -261,6 +263,9 @@ export async function getConnectedAccount(id: string): Promise<ConnectedAccount>
     id: pick<string>(raw, 'id', 'nanoid') ?? id,
     status: String(pick<string>(raw, 'status', 'connectionStatus') ?? 'UNKNOWN').toUpperCase(),
     toolkitSlug: pick<string>(toolkit, 'slug') ?? pick<string>(raw, 'toolkit_slug') ?? null,
+    userId:
+      pick<string>(raw, 'user_id', 'userId', 'entity_id', 'entityId', 'client_unique_user_id') ??
+      null,
     // Tokens are redacted by Composio; what survives is the non-secret context —
     // account ids, portal ids, the QuickBooks realm — which is exactly what the
     // connectors need to address the right company.
@@ -340,10 +345,37 @@ export async function proxy<T>(input: {
  * Used where a tool knows something the raw API does not make easy — the
  * QuickBooks company id being the case that matters here.
  */
+const connectionUsers = new Map<string, string>();
+
+/**
+ * The Composio user a connected account belongs to.
+ *
+ * Composio refuses a packaged tool call that names a connected account without
+ * its user ("User ID is required with connected account", code 1811). That one
+ * omission failed every Google Sheets read — budget, 10X plan and headcount —
+ * while the connection itself showed as healthy. The account record carries the
+ * user, so it is read from there rather than requiring anybody to reconnect.
+ */
+async function userForConnection(connectedAccountId: string): Promise<string | null> {
+  const cached = connectionUsers.get(connectedAccountId);
+  if (cached) return cached;
+  try {
+    const account = await getConnectedAccount(connectedAccountId);
+    if (account.userId) connectionUsers.set(connectedAccountId, account.userId);
+    return account.userId ?? null;
+  } catch {
+    return null;
+  }
+}
+
 export async function executeTool<T>(
   slug: string,
   input: { connectedAccountId?: string; userId?: string; arguments?: Record<string, unknown> },
 ): Promise<T> {
+  const userId =
+    input.userId ??
+    (input.connectedAccountId ? await userForConnection(input.connectedAccountId) : null);
+
   const response = await call<Record<string, unknown>>(
     `/tools/execute/${encodeURIComponent(slug)}`,
     {
@@ -352,7 +384,9 @@ export async function executeTool<T>(
         ...(input.connectedAccountId
           ? { connected_account_id: input.connectedAccountId, connectedAccountId: input.connectedAccountId }
           : {}),
-        ...(input.userId ? { user_id: input.userId, userId: input.userId } : {}),
+        // Composio has named this user_id and entity_id in different API
+        // versions, and its own error names entity_id; all spellings are sent.
+        ...(userId ? { user_id: userId, userId, entity_id: userId } : {}),
         arguments: input.arguments ?? {},
         allow_tracing: false,
       }),
@@ -372,6 +406,26 @@ export async function executeTool<T>(
 /** Exposed for tests: the silent-zero guard is worth asserting directly. */
 export function unwrapForTest<T>(response: Record<string, unknown>, what: string): T {
   return unwrap<T>(response, what);
+}
+
+/**
+ * A provider body Composio handed back as TEXT rather than as parsed JSON.
+ *
+ * The proxy does this for some providers — Google Sheets among them — and a body
+ * that is a string has no `sheets` or `values` key to read, so every Sheets pull
+ * failed with "the response carried: string" while the request itself had
+ * worked. Anything that parses as a JSON object or array is parsed; anything
+ * else is returned as it came.
+ */
+function parseJsonText(value: unknown): unknown {
+  if (typeof value !== 'string') return value;
+  const text = value.trim();
+  if (!(text.startsWith('{') || text.startsWith('['))) return value;
+  try {
+    return JSON.parse(text);
+  } catch {
+    return value;
+  }
 }
 
 function unwrap<T>(response: Record<string, unknown>, what: string): T {
@@ -401,13 +455,13 @@ function unwrap<T>(response: Record<string, unknown>, what: string): T {
   // Recognising the envelope by its shape rather than by counting its keys is
   // what makes that impossible: an envelope is a `data` key sitting beside a
   // status or headers key, however many other fields ride along with it.
-  let body = data;
-  if (data && typeof data === 'object' && 'data' in data) {
+  let body: unknown = parseJsonText(data);
+  if (body && typeof body === 'object' && 'data' in body) {
     const looksLikeEnvelope =
-      'status' in data || 'status_code' in data || 'statusCode' in data || 'headers' in data;
-    const inner = (data as { data?: unknown }).data;
+      'status' in body || 'status_code' in body || 'statusCode' in body || 'headers' in body;
+    const inner = parseJsonText((body as { data?: unknown }).data);
     if (looksLikeEnvelope && inner && typeof inner === 'object') {
-      body = inner as Record<string, unknown>;
+      body = inner;
     }
   }
 

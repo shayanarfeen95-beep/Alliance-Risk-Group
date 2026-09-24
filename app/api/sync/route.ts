@@ -143,9 +143,15 @@ async function plan(
   const windowEnd =
     configured?.value && configured.value > thisMonth ? configured.value : thisMonth;
 
-  // Twelve, not three. A first load of a year of books is the common case, and
-  // three months was not enough to fill a single trailing-twelve chart.
-  const months = Math.min(Math.max(body.months ?? 12, 1), 36);
+  // From January of LAST year, not a trailing twelve. The Finance page compares
+  // every month with the same month a year earlier and every YTD with last
+  // year's YTD; twelve months ending September leaves August's comparison month
+  // and all of last year's January–August unloaded, so every YoY and PY YTD cell
+  // reads blank. Twenty-one months at most, well inside the 36-month cap.
+  const months = Math.min(
+    Math.max(body.months ?? monthSpan(`${Number(windowEnd.slice(0, 4)) - 1}-01-01`, windowEnd), 1),
+    36,
+  );
   const trailingStart = shiftMonths(windowEnd, -(months - 1));
 
   /**
@@ -171,6 +177,13 @@ async function plan(
     rangeStart = explicitStart ?? explicitEnd!;
     rangeEnd = explicitEnd ?? explicitStart!;
     if (rangeStart > rangeEnd) [rangeStart, rangeEnd] = [rangeEnd, rangeStart];
+
+    // Never past the month we are in. QuickBooks answers a future month with
+    // whatever is already dated into it — recurring entries, a prepaid bill —
+    // and those land as tiny, real-looking P&Ls for October to December that
+    // nobody has kept yet. That is what put $521.63 of "OpEx" into Dec 2026.
+    if (rangeEnd > windowEnd) rangeEnd = windowEnd;
+    if (rangeStart > rangeEnd) rangeStart = rangeEnd;
 
     // The same 36-month ceiling the trailing window has. A pull of ten years of
     // monthly reports is hundreds of QuickBooks calls and will not finish; a

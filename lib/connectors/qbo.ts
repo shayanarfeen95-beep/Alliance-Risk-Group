@@ -71,6 +71,13 @@ const ENTITIES: EntityDescriptor[] = [
       'Month-end balances. Drives DSO, DPO, CCC and Cash Runway. Availability by division depends on whether ARG classes its balance sheet (open item 1).',
   },
   {
+    entity: 'budgets',
+    label: 'Budgets (QuickBooks)',
+    cadence: 'DAILY',
+    description:
+      'The profit-and-loss budgets kept in QuickBooks, by account, class and month. The budget the Finance page measures against; a budget named "Forecast" feeds the rest-of-year outlook.',
+  },
+  {
     entity: 'trial_balance',
     label: 'Trial Balance (company level)',
     cadence: 'ON_CLOSE',
@@ -318,13 +325,14 @@ async function fetchMonthlyReport(
  * losing its tail silently, which is the same class of failure as the active
  * filter and just as hard to notice.
  */
-type QueryEntity = 'Account' | 'Class' | 'Invoice' | 'Bill';
+type QueryEntity = 'Account' | 'Class' | 'Invoice' | 'Bill' | 'Budget';
 
 const QUERY_ENTITY_TO_ENTITY: Record<QueryEntity, string> = {
   Account: 'accounts',
   Class: 'classes',
   Invoice: 'ar_aging',
   Bill: 'ap_aging',
+  Budget: 'budgets',
 };
 
 async function queryAll(entityName: QueryEntity, where?: string): Promise<RawRecord[]> {
@@ -411,6 +419,12 @@ export const qboConnector: SourceConnector = {
         break;
       case 'classes':
         records = await queryAll('Class');
+        break;
+      // Every budget, active or not; conform chooses which one is current. A
+      // budget is not windowed by the pull: it is a plan for a whole year, and a
+      // partial one would read as a budget that stops in the month the pull did.
+      case 'budgets':
+        records = await queryAll('Budget');
         break;
       default:
         throw new Error(`Unknown QBO entity "${entity}".`);

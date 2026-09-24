@@ -157,6 +157,16 @@ export interface FactBundle {
   dealStages: DealStageRecord[];
   config: Map<string, ConfigValue>;
   /**
+   * QuickBooks' own company-level figures, keyed `${statement}|${month}` then by
+   * line (see fact_company_total). Loaded only for a caller entitled to every
+   * division — a company total discloses all of them — and empty otherwise.
+   */
+  company: Map<string, Map<string, Decimal>>;
+  /** When each company statement was last loaded, keyed `${statement}|${month}`. */
+  companyLoadedAt: Map<string, Date>;
+  /** Budget scenarios by code: what each is called and where it came from. */
+  scenarios: Map<string, { name: string; description: string | null }>;
+  /**
    * Source systems that have completed at least one successful load.
    *
    * The difference between "HubSpot says ARG booked nothing this month" and
@@ -243,10 +253,17 @@ export async function loadFactBundle(
       companies: [],
       dealStages: [],
       config: new Map(),
+      company: new Map(),
+      companyLoadedAt: new Map(),
+      scenarios: new Map(),
       loadedSources: new Set(),
       lastRefreshedAt: null,
     };
   }
+
+  // A company total is every division at once, so only a caller who may see
+  // every active division gets one.
+  const companyScope = divisions.every((row) => allowedDivisions.includes(row.divisionCode));
 
   const inWindow = (column: never) => and(gte(column, from), lte(column, to));
 
@@ -273,6 +290,8 @@ export async function loadFactBundle(
     glRows,
     configRows,
     lastRun,
+    companyTotalRows,
+    scenarioRows,
   ] = await Promise.all([
     db.select().from(t.dimPeriod),
     db
@@ -354,6 +373,20 @@ export async function loadFactBundle(
       )
       .orderBy(sql`${t.loadRun.finishedAt} desc nulls last`)
       .limit(1),
+    companyScope
+      ? db
+          .select()
+          .from(t.factCompanyTotal)
+          .where(
+            and(
+              // Aging is a snapshot filed under the month it was taken, which can
+              // be later than the month being viewed — so it is not windowed.
+              sql`(${t.factCompanyTotal.statement} in ('AR_AGING', 'AP_AGING') or (${t.factCompanyTotal.periodMonth} >= ${from} and ${t.factCompanyTotal.periodMonth} <= ${to}))`,
+              excludeSeed(t.factCompanyTotal.loadRunId as never),
+            ),
+          )
+      : Promise.resolve([] as Array<typeof t.factCompanyTotal.$inferSelect>),
+    db.select().from(t.budgetScenario),
   ]);
 
   const loadedSourceRows = await db
@@ -492,6 +525,17 @@ export async function loadFactBundle(
     gl.set(k, list);
   }
 
+  const company = new Map<string, Map<string, Decimal>>();
+  const companyLoadedAt = new Map<string, Date>();
+  for (const row of companyTotalRows) {
+    const k = `${row.statement}|${row.periodMonth}`;
+    const lines = company.get(k) ?? new Map<string, Decimal>();
+    lines.set(row.line, d(row.amount));
+    company.set(k, lines);
+    const seen = companyLoadedAt.get(k);
+    if (!seen || row.loadedAt > seen) companyLoadedAt.set(k, row.loadedAt);
+  }
+
   const config = new Map<string, ConfigValue>();
   for (const row of configRows) {
     config.set(row.key, {
@@ -593,6 +637,11 @@ export async function loadFactBundle(
       isWon: row.isWon,
     })),
     config,
+    company,
+    companyLoadedAt,
+    scenarios: new Map(
+      scenarioRows.map((row) => [row.scenarioCode, { name: row.scenarioName, description: row.description }]),
+    ),
     loadedSources: new Set(loadedSourceRows.map((row) => row.sourceSystem)),
     lastRefreshedAt: lastRun[0]?.finishedAt ?? null,
   };
@@ -679,6 +728,64 @@ export function sumBs(
   return total;
 }
 
+const BS_LINE_TO_FIELD: Record<string, keyof BsMeasures> = {
+  cash: 'cash',
+  accounts_receivable: 'accountsReceivable',
+  other_current_assets: 'otherCurrentAssets',
+  fixed_assets: 'fixedAssets',
+  accounts_payable: 'accountsPayable',
+  cc_liability: 'ccLiability',
+  other_current_liabilities: 'otherCurrentLiabilities',
+  lt_liabilities: 'ltLiabilities',
+  shareholder_equity: 'shareholderEquity',
+};
+
+/** QuickBooks' company balance sheet for a month, or null when none is loaded. */
+export function companyBs(bundle: FactBundle, month: MonthKey): BsMeasures | null {
+  const lines = bundle.company.get(`BS|${month}`);
+  if (!lines) return null;
+  const total = {} as BsMeasures;
+  for (const [line, field] of Object.entries(BS_LINE_TO_FIELD)) {
+    total[field] = lines.get(line) ?? new Decimal(0);
+  }
+  return total;
+}
+
+/**
+ * The balance sheet for a reporting scope.
+ *
+ * At ARG Total it is QuickBooks' own company balance sheet whenever one is
+ * loaded: ARG's classed balance sheet does not balance by class, so a sum of
+ * divisional rows is not a balance sheet. At division level it is the
+ * divisional rows, when ARG classes its balance sheet at all.
+ */
+export function balanceSheetFor(
+  bundle: FactBundle,
+  month: MonthKey,
+  divisions: string[],
+  isConsolidated: boolean,
+): BsMeasures | null {
+  if (isConsolidated) {
+    const company = companyBs(bundle, month);
+    if (company) return company;
+  }
+  return sumBs(bundle, month, divisions);
+}
+
+/** QuickBooks' company P&L for a month — the tie-out figure — or null. */
+export function companyPl(bundle: FactBundle, month: MonthKey): PlMeasures | null {
+  const lines = bundle.company.get(`PL|${month}`);
+  if (!lines) return null;
+  const zero = new Decimal(0);
+  return {
+    revenue: lines.get('revenue') ?? zero,
+    payrollDirect: lines.get('payroll_direct') ?? zero,
+    cogs: lines.get('cogs') ?? zero,
+    payrollExpense: lines.get('payroll_expense') ?? zero,
+    opex: lines.get('opex') ?? zero,
+  };
+}
+
 export function sumBudget(
   bundle: FactBundle,
   scenario: string,
@@ -693,6 +800,31 @@ export function sumBudget(
     }
   }
   return total;
+}
+
+/**
+ * A scenario's budget for a scope, over some months.
+ *
+ * At ARG Total the whole budget is used when QuickBooks supplied one — including
+ * lines not split by class, which belong to no division but are still part of
+ * the plan ARG Total is measured against. Otherwise it is the divisional sum.
+ */
+export function budgetFor(
+  bundle: FactBundle,
+  scenario: string,
+  months: MonthKey[],
+  divisions: string[],
+  lineItem: 'revenue' | 'cogs' | 'opex',
+  isConsolidated: boolean,
+): Decimal | null {
+  if (isConsolidated && months.every((month) => bundle.company.has(`${scenario}|${month}`))) {
+    return months.reduce(
+      (total, month) => total.plus(bundle.company.get(`${scenario}|${month}`)?.get(lineItem) ?? 0),
+      new Decimal(0),
+    );
+  }
+  if (!hasBudget(bundle, scenario, months, divisions)) return null;
+  return sumBudget(bundle, scenario, months, divisions, lineItem);
 }
 
 /** True when any budget row exists for the scenario in the window. */

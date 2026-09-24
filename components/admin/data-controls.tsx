@@ -92,7 +92,7 @@ export function DataControls(props: DataControlsProps) {
    * redeploy for that is why months of books sat unfetched.
    */
   const [rangeMode, setRangeMode] = useState<'trailing' | 'year' | 'custom'>('trailing');
-  const [trailingMonths, setTrailingMonths] = useState(12);
+  const [trailingMonths, setTrailingMonths] = useState(24);
   const [year, setYear] = useState(() => new Date().getFullYear());
   const [fromMonth, setFromMonth] = useState(() => currentMonth(-11));
   const [toMonth, setToMonth] = useState(() => currentMonth(0));

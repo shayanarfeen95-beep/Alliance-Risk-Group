@@ -74,6 +74,7 @@ const ROW_SOURCE: Record<string, () => { table: string; column?: string; kind?: 
   'QBO:ap_aging': () => ({ table: 'fact_aging', kind: 'AP' }),
   'QBO:accounts': () => ({ table: 'dim_account' }),
   'QBO:classes': () => ({ table: 'dim_class_map' }),
+  'QBO:budgets': () => ({ table: 'fact_budget' }),
   'HUBSPOT:deals': () => ({ table: 'fact_deal' }),
   'HUBSPOT:contacts': () => ({ table: 'fact_contact' }),
   'HUBSPOT:meetings': () => ({ table: 'fact_meeting' }),
@@ -82,6 +83,7 @@ const ROW_SOURCE: Record<string, () => { table: string; column?: string; kind?: 
   'HUBSPOT:owners': () => ({ table: 'fact_deal', column: 'owner_name' }),
   'SHEETS:monthly_budget': () => ({ table: 'fact_budget' }),
   'SHEETS:tenx_budget': () => ({ table: 'fact_budget' }),
+  'SHEETS:forecast': () => ({ table: 'fact_budget' }),
   'SHEETS:headcount': () => ({ table: 'fact_headcount' }),
 };
 

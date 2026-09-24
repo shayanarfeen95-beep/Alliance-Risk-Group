@@ -27,7 +27,7 @@ describe('the order QuickBooks entities are pulled in', () => {
   it('pulls the chart of accounts before the reports that resolve against it', () => {
     expect(positionOf('accounts')).toBeGreaterThanOrEqual(0);
 
-    for (const dependent of ['profit_and_loss', 'balance_sheet', 'trial_balance']) {
+    for (const dependent of ['profit_and_loss', 'balance_sheet', 'budgets', 'trial_balance']) {
       expect(positionOf('accounts')).toBeLessThan(positionOf(dependent));
     }
   });
@@ -46,6 +46,7 @@ describe('the order QuickBooks entities are pulled in', () => {
         'classes',
         'profit_and_loss',
         'balance_sheet',
+        'budgets',
         'trial_balance',
         'ar_aging',
         'ap_aging',

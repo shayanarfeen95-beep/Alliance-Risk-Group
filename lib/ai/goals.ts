@@ -2,7 +2,7 @@ import { and, eq, sql } from 'drizzle-orm';
 import Decimal from 'decimal.js';
 import * as t from '@/lib/db/schema';
 import type { Database } from '@/lib/db/client';
-import { d, formatValue } from '@/lib/money';
+import { d, formatValue, type ValueFormat } from '@/lib/money';
 import { openSemanticSession, resolveKpi, CONSOLIDATED_CODE, type SemanticSession } from '@/lib/semantic/resolve';
 import { getKpiDefinition } from '@/lib/semantic/registry';
 import type { MonthKey } from '@/lib/semantic/periods';
@@ -90,7 +90,7 @@ function severityFor(gapRatio: Decimal): Severity {
 function distinguish(
   actual: Decimal,
   threshold: Decimal,
-  format: 'percent' | 'ratio' | 'currency' | 'days' | 'months' | 'count' | 'currency_precise',
+  format: ValueFormat,
 ): { actual: string; threshold: string } {
   const plain = { actual: formatValue(actual, format), threshold: formatValue(threshold, format) };
   if (plain.actual !== plain.threshold) return plain;
