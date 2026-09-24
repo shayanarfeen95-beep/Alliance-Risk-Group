@@ -8,7 +8,7 @@ import type { SessionUser } from '@/lib/auth/session';
 import { formatMonth, monthRange, addMonths, type MonthKey } from '@/lib/semantic/periods';
 import { KPI_REGISTRY, getKpiDefinition, isSpecKpi } from '@/lib/semantic/registry';
 import { resolveKpi, CONSOLIDATED_CODE, type SemanticSession } from '@/lib/semantic/resolve';
-import { sumPl, key } from '@/lib/semantic/facts';
+import { companyPl, hasPl, sumPl, key } from '@/lib/semantic/facts';
 import { connectorStatuses, getConnector, type SourceSystemCode } from '@/lib/connectors';
 import { executeViewSpec, viewSpecJsonSchema, ViewSpecError } from './viewspec';
 import { executeSavedView, pipelineViewJsonSchema } from '@/lib/views/spec';
@@ -515,6 +515,122 @@ const getVarianceDrivers: ToolDefinition = {
   },
 };
 
+/**
+ * "Where did you get the $321,078 revenue number?"
+ *
+ * The question ARG's controller actually asked, and the one the assistant
+ * answered with a report on seeded data, an ISO date and a "raw value". A
+ * finance reader wants what a controller would say: which QuickBooks report,
+ * which accounts, how it splits by division, and whether it agrees with
+ * QuickBooks' own total. This returns exactly that, already formatted.
+ */
+const explainFigure: ToolDefinition = {
+  name: 'explain_figure',
+  description:
+    'Explain where a profit-and-loss figure comes from: the QuickBooks report and basis, the accounts that make it up, the split by division, and whether it ties to QuickBooks\' own company total. Call this whenever the user asks where a number came from, how it was calculated, or why it differs from their own figures.',
+  input_schema: {
+    type: 'object',
+    required: ['line'],
+    properties: {
+      line: {
+        type: 'string',
+        enum: ['revenue', 'cogs', 'gross_profit', 'opex', 'net_profit'],
+        description: 'The P&L line being asked about.',
+      },
+      division: DIVISION_ARG,
+      month: MONTH_ARG,
+    },
+  },
+  async run(input, context) {
+    const { session } = context;
+    const month = normaliseMonth(input.month, session.period.month);
+    const division = divisionOf(input.division, context);
+    const line = String(input.line) as 'revenue' | 'cogs' | 'gross_profit' | 'opex' | 'net_profit';
+    const divisions = division === CONSOLIDATED_CODE ? session.visibleDivisions : [division];
+    const { bundle } = session;
+    const usd = (value: number) =>
+      value.toLocaleString('en-US', { style: 'currency', currency: 'USD', minimumFractionDigits: 2 });
+
+    if (!hasPl(bundle, month, divisions)) {
+      return {
+        result: {
+          available: false,
+          explanation: `No QuickBooks profit and loss is loaded for ${formatMonth(month)}.`,
+        },
+      };
+    }
+
+    const pick = (pl: ReturnType<typeof sumPl>) =>
+      line === 'revenue'
+        ? pl.revenue
+        : line === 'cogs'
+          ? pl.cogs
+          : line === 'opex'
+            ? pl.opex
+            : line === 'gross_profit'
+              ? pl.revenue.minus(pl.cogs)
+              : pl.revenue.minus(pl.cogs).minus(pl.opex);
+
+    const total = pick(sumPl(bundle, month, divisions));
+    const byDivision = divisions.map((code) => ({
+      division: bundle.divisions.find((d) => d.divisionCode === code)?.divisionName ?? code,
+      amount: usd(pick(sumPl(bundle, month, [code])).toNumber()),
+    }));
+
+    const accountLines =
+      line === 'revenue' ? ['revenue'] : line === 'cogs' ? ['cogs', 'payroll_direct'] : line === 'opex' ? ['opex', 'payroll_expense'] : [];
+    const accounts = new Map<string, Decimal>();
+    for (const code of divisions) {
+      for (const detail of bundle.gl.get(key(month, code)) ?? []) {
+        if (!accountLines.includes(detail.reportingLine ?? '')) continue;
+        accounts.set(detail.accountName, (accounts.get(detail.accountName) ?? new Decimal(0)).plus(detail.amount));
+      }
+    }
+
+    const company = division === CONSOLIDATED_CODE ? companyPl(bundle, month) : null;
+    const quickbooksTotal = company ? pick(company) : null;
+    const difference = quickbooksTotal ? total.minus(quickbooksTotal) : null;
+
+    const lineName = {
+      revenue: 'Revenue',
+      cogs: 'Cost of goods sold',
+      gross_profit: 'Gross profit',
+      opex: 'Operating expenses',
+      net_profit: 'Net profit',
+    }[line];
+
+    return {
+      result: {
+        figure: `${lineName}, ${division === CONSOLIDATED_CODE ? 'ARG Total' : byDivision[0]!.division}, ${formatMonth(month)}: ${usd(total.toNumber())}`,
+        source: `QuickBooks Online Profit and Loss report for ${formatMonth(month)}, ${session.accountingBasis} basis, summarised by class. Each QuickBooks class maps to a division; ARG Total is the four divisions added together.`,
+        calculation:
+          line === 'gross_profit'
+            ? 'Revenue minus cost of goods sold.'
+            : line === 'net_profit'
+              ? 'Gross profit minus operating expenses.'
+              : `The sum of every ${lineName.toLowerCase()} account on the QuickBooks P&L, including sub-accounts and amounts posted directly to parent accounts.`,
+        byDivision,
+        accounts: [...accounts.entries()]
+          .sort((a, b) => b[1].abs().comparedTo(a[1].abs()))
+          .slice(0, 12)
+          .map(([name, amount]) => ({ account: name, amount: usd(amount.toNumber()) })),
+        tiesToQuickBooks: quickbooksTotal
+          ? {
+              quickbooksCompanyTotal: usd(quickbooksTotal.toNumber()),
+              difference: usd(difference!.toNumber()),
+              ties: difference!.abs().lessThanOrEqualTo(Decimal.max(1, quickbooksTotal.abs().times(0.001))),
+              note: 'Any difference sits on QuickBooks classes that are not a division (Not Specified, Z Alloc).',
+            }
+          : 'Division-level figure; QuickBooks has no company total to compare a single division against.',
+        booksClosed: bundle.periodState.get(month)?.isClosed ?? false,
+        instruction:
+          'Answer like a controller: the figure, the QuickBooks report it comes from, the division split and the largest accounts, and whether it ties to QuickBooks. Use the formatted amounts exactly as given and write months as "August 2026". If the books are not closed, say the figure can still change. Do not mention internal tables, raw values, load windows or seeded data.',
+      },
+      activity: `Explained ${lineName.toLowerCase()} · ${division} · ${formatMonth(month)}`,
+    };
+  },
+};
+
 const getPeriodState: ToolDefinition = {
   name: 'get_period_state',
   description:
@@ -763,7 +879,7 @@ const getLoadHistory: ToolDefinition = {
 const getDataProvenance: ToolDefinition = {
   name: 'get_data_provenance',
   description:
-    'Report where the figures currently in the warehouse came from: which source system wrote each fact table, when, and whether any of it is still seeded demonstration data rather than the live books. Call this whenever the user asks whether the numbers are real, live, seeded or up to date.',
+    'Report which source systems loaded the warehouse and when. Use this ONLY when the user asks whether the data is live, real or up to date — never to explain where a particular figure comes from (use explain_figure for that).',
   input_schema: { type: 'object', properties: {} },
   async run(_input, context) {
     const [plSources, dealCount, budgetSources, lastLoads, connectors] = await Promise.all([
@@ -1034,6 +1150,7 @@ export const AGENT_TOOLS: ToolDefinition[] = [
   getKpi,
   comparePeriods,
   getPlStatement,
+  explainFigure,
   getVarianceDrivers,
   getPeriodState,
   getReconStatus,

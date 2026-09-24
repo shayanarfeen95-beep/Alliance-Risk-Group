@@ -28,6 +28,34 @@ It is never "the dashboard and the assistant disagree." They cannot.
 
 ---
 
+## September 2026: the Finance reconciliation fixes
+
+ARG's controller checked August 2026 against the books: the dashboard said
+revenue was $321,078, QuickBooks said $482,405. The causes, all fixed, and what
+has to happen once after deploying:
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| Revenue low by a third; TP $0 revenue Feb–Aug; COGS % ~85%; net margin ~−47% | The P&L parser skipped QuickBooks section **headers**, which is where a parent account's own postings sit ("Litigation Support Income", "Tampa Process Income", "Pass Throughs") | Headers carrying amounts are read (`leafRows` in `lib/etl/conform.ts`); test built from ARG's March 2026 report ties every division to the cent |
+| Working capital blank | Balance sheet never loaded: "Net Income" (no account id) failed it, and the classed balance sheet does not balance by class | Rows placed by QuickBooks section; the company balance sheet is read from QuickBooks' TOTAL column into `fact_company_total` |
+| Budget, Variance, Attainment blank | No budget source had ever loaded: Sheets failed ("User ID is required"; JSON body returned as text) and QuickBooks budgets were never read | QuickBooks **Budgets** are pulled (the newest active P&L budget per year); Sheets fixed; a budget or tab named *Forecast* feeds the full-year outlook |
+| "3 failing" in the header | Future months (Oct–Dec 2026) loaded by a pull window running to December | Pulls stop at the current month; checks ignore months not yet begun; migration 0013 removes the future-dated rows |
+| Dashboards open on March 2026 | `DEFAULT_REPORTING_MONTH` never moved | They open on the last completed month |
+| Nightly refresh never touched recent months | Cron window ended at `DEFAULT_REPORTING_MONTH` | Cron refreshes the three months ending this month |
+
+**After deploying, run Admin → Data → Pull everything once** (the default is now
+24 months, so last year's comparisons fill in). The figures already stored were
+written by the old parser and stay wrong until they are re-pulled. Then check
+the **Ties to QuickBooks** card at the top of Finance: revenue, COGS and OpEx for
+ARG Total should equal the QuickBooks P&L total column, with anything on Not
+Specified or Z Alloc shown as "not in a division".
+
+Also worth confirming with ARG: the QuickBooks class **PS-TP** is mapped to
+LITS in Admin → Class mapping, while the division list names "PS - TP" as a TP
+legacy code. It carries no current P&L column, but decide which is right.
+
+---
+
 ## Refresh schedule
 
 | What | When | Source | Owner |

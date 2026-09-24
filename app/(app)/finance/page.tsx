@@ -1,21 +1,18 @@
 import type { Metadata } from 'next';
-import { CircleAlert, CircleCheck } from 'lucide-react';
+import type { ReactNode } from 'react';
+import { CircleAlert, CircleCheck, Info } from 'lucide-react';
 import { loadDashboardContext, type SearchParams } from '@/lib/dashboards/context';
-import { loadFinance, type PlRow, type YtdRow } from '@/lib/dashboards/finance';
+import {
+  loadFinance,
+  type AgingBlock,
+  type Figure,
+  type FinanceViewModel,
+  type PlLine,
+} from '@/lib/dashboards/finance';
 import { buildDivisionColorMap } from '@/lib/charts/colors';
-import { formatMonth, formatMonthShort } from '@/lib/semantic/periods';
 import { formatNumber, formatSignedNumber, sentimentColorVar, sentimentOf } from '@/lib/format';
 import { ChartCard } from '@/components/charts/chart-card';
-import {
-  Card,
-  CardHeader,
-  Chip,
-  DataTable,
-  SectionTitle,
-  Td,
-  Th,
-  Unavailable,
-} from '@/components/ui/primitives';
+import { Card, CardHeader, Chip, DataTable, Td, Th, Unavailable } from '@/components/ui/primitives';
 
 export const metadata: Metadata = { title: 'Finance' };
 export const dynamic = 'force-dynamic';
@@ -29,392 +26,599 @@ export default async function FinancePage({
   const { session, divisionCode } = context;
   const colors = buildDivisionColorMap(session.bundle.divisions);
   const model = loadFinance(session, divisionCode, colors);
-  const { period } = session;
-
-  const divisionLabel =
-    divisionCode === 'ARG_TOTAL'
-      ? 'ARG Total'
-      : (session.bundle.divisions.find((d) => d.divisionCode === divisionCode)?.divisionName ??
-        divisionCode);
 
   return (
     <div className="space-y-6">
       <header>
         <h1 className="text-[19px] font-semibold tracking-tight">Finance</h1>
-        <p className="mt-1 max-w-2xl text-[12.5px] leading-relaxed text-[var(--text-secondary)]">
-          The full profit and loss, balance sheet and working capital, by division.
-        </p>
-        <p className="mt-0.5 text-[12px] text-[var(--text-muted)]">
-          {divisionLabel} · {formatMonth(period.month)} · {session.accountingBasis} basis ·{' '}
-          {session.periodIsClosed ? 'closed period' : 'open period, figures preliminary'}
+        <p className="mt-1 max-w-3xl text-[12.5px] leading-relaxed text-[var(--text-secondary)]">
+          {model.divisionLabel} · {model.monthLabel} and year to date ({model.ytdLabel}) ·{' '}
+          {session.accountingBasis} basis, straight from QuickBooks.{' '}
+          {session.periodIsClosed
+            ? 'The books for this month are closed; figures are final.'
+            : 'The books for this month are not closed yet, so figures can still change.'}
         </p>
       </header>
 
-      {/* --- P&L block ---------------------------------------------------- */}
+      {!model.hasData ? (
+        <Card>
+          <Unavailable
+            reason="NO_DATA"
+            detail={`No QuickBooks profit and loss has been loaded for ${model.monthLabel}. Run a pull in Admin → Data.`}
+          />
+        </Card>
+      ) : null}
+
+      {/* --- Tie-out ------------------------------------------------------- */}
+      {model.tieOut ? <TieOut model={model} /> : null}
+
+      {/* --- P&L: month, YTD, full year ------------------------------------ */}
       <Card>
         <CardHeader
           title="Profit & loss"
-          subtitle={`Prior month (${formatMonthShort(period.priorMonth)}) and prior year (${formatMonthShort(period.priorYearMonth)}) against actual and budget. Payroll rows are memo lines — they are components of COGS and OpEx, never deducted again.`}
+          subtitle={<BudgetSource model={model} />}
         />
         <DataTable>
           <thead>
             <tr>
+              <GroupTh align="left"> </GroupTh>
+              <GroupTh span={4}>{model.monthLabel}</GroupTh>
+              <GroupTh span={4}>Year to date · {model.ytdLabel}</GroupTh>
+              <GroupTh span={2}>Full year {model.fiscalYear}</GroupTh>
+            </tr>
+            <tr>
               <Th align="left">Line</Th>
-              <Th title="Prior month — the selected month minus one">PM</Th>
-              <Th title="Prior year — the same calendar month one year earlier">PY</Th>
+              <Th>Actual</Th>
+              <Th title="From the budget named above the table">Budget</Th>
+              <Th title="Actual − budget">Variance</Th>
+              <Th title="Actual ÷ budget. Above 100% is good on revenue and profit, bad on costs.">% of budget</Th>
               <Th>Actual</Th>
               <Th>Budget</Th>
-              <Th title="Actual − budget, in dollars">Variance $</Th>
-              <Th title="Actual ÷ budget. Direction depends on the line: above 100% is good on revenue, bad on COGS and OpEx.">
-                Attainment %
-              </Th>
+              <Th>Variance</Th>
+              <Th>% of budget</Th>
+              <Th>Budget</Th>
+              <Th title={model.budget.outlookSource}>Outlook</Th>
             </tr>
           </thead>
           <tbody>
-            {model.pl.map((row) => (
-              <PlTableRow key={row.label} row={row} />
+            {model.lines.map((line) => (
+              <PlRow key={line.id} line={line} />
             ))}
           </tbody>
         </DataTable>
+        <p className="mt-3 text-[11px] leading-relaxed text-[var(--text-muted)]">
+          <strong className="font-medium">Outlook</strong> is {lowerFirst(model.budget.outlookSource)}{' '}
+          Hover any line for how it is calculated. The two payroll rows are already inside COGS and
+          operating expenses — shown for visibility, never subtracted again.
+        </p>
       </Card>
 
-      <div className="grid gap-4 xl:grid-cols-3">
-        {/* --- Ratio block ------------------------------------------------ */}
-        <Card>
-          <CardHeader title="Ratios" subtitle="As a share of revenue for the month" />
-          <ul className="space-y-2">
-            {model.ratios.map((ratio) => (
-              <li
-                key={ratio.label}
-                className="flex items-baseline justify-between gap-3 border-b pb-2 last:border-b-0"
-                style={{ borderColor: 'var(--border)' }}
-                title={ratio.hint}
-              >
-                <span className="text-[12px] text-[var(--text-secondary)]">{ratio.label}</span>
-                <span className="tnum text-[13px] font-medium">
-                  {formatNumber(ratio.value, 'percent')}
-                </span>
-              </li>
-            ))}
-          </ul>
-        </Card>
-
-        {/* --- Change block ----------------------------------------------- */}
-        <Card>
-          <CardHeader title="Change" subtitle="Month over month and year over year" />
-          <DataTable>
-            <thead>
-              <tr>
-                <Th align="left">Measure</Th>
-                <Th>MoM</Th>
-                <Th>YoY</Th>
-              </tr>
-            </thead>
-            <tbody>
-              {model.changes.map((row) => (
-                <tr key={row.label}>
-                  <Td align="left" numeric={false}>
-                    {row.label}
-                  </Td>
-                  <Td style={{ color: sentimentColorVar(sentimentOf(row.monthOverMonth, row.higherIsBetter)) }}>
-                    {formatSignedNumber(row.monthOverMonth, 'percent')}
-                  </Td>
-                  <Td style={{ color: sentimentColorVar(sentimentOf(row.yearOverYear, row.higherIsBetter)) }}>
-                    {formatSignedNumber(row.yearOverYear, 'percent')}
-                  </Td>
-                </tr>
-              ))}
-            </tbody>
-          </DataTable>
-        </Card>
-
-        {/* --- Working capital -------------------------------------------- */}
-        <Card>
-          <CardHeader
-            title="Working capital"
-            subtitle="Cash runway is shown both ways: the single-month figure ties to the Excel, the trailing average removes the swing that Defect 6 describes."
-          />
-          {model.workingCapital.dso.unavailable ? (
-            <Unavailable reason="NOT_AVAILABLE_BY_DIVISION" detail={model.workingCapital.dso.unavailable} />
-          ) : (
-            <ul className="space-y-2">
-              <Metric label="Days Sales Outstanding" value={model.workingCapital.dso.value} format="days" />
-              <Metric label="Days Payable Outstanding" value={model.workingCapital.dpo.value} format="days" />
-              <Metric label="Cash Conversion Cycle" value={model.workingCapital.ccc.value} format="days" hint="DSO − DPO. No inventory term — ARG is a services business." />
-              <Metric label="Cash Runway (this month's OpEx)" value={model.workingCapital.runwaySingleMonth.value} format="months" />
-              <Metric label="Cash Runway (trailing 3-month OpEx)" value={model.workingCapital.runwayTrailing.value} format="months" />
-            </ul>
-          )}
-        </Card>
-      </div>
-
-      {/* --- YTD block ---------------------------------------------------- */}
+      {/* --- Change --------------------------------------------------------- */}
       <Card>
         <CardHeader
-          title="Year to date"
-          subtitle="Prior-year YTD covers comparable periods only — January through the same month last year, never a full prior year against a partial current one."
+          title="Change"
+          subtitle={`${model.monthLabel} against the month before and the same month last year, and year to date against the same months of last year.`}
         />
         <DataTable>
           <thead>
             <tr>
+              <GroupTh align="left"> </GroupTh>
+              <GroupTh>{model.monthLabel}</GroupTh>
+              <GroupTh span={3}>vs {model.priorMonthLabel} (prior month)</GroupTh>
+              <GroupTh span={3}>vs {model.priorYearLabel} (same month last year)</GroupTh>
+              <GroupTh span={4}>YTD {model.ytdLabel} vs {model.priorYtdLabel}</GroupTh>
+            </tr>
+            <tr>
               <Th align="left">Line</Th>
-              <Th>PY YTD</Th>
-              <Th>YTD actual</Th>
-              <Th>YTD budget</Th>
-              <Th>Variance $</Th>
-              <Th>Attainment %</Th>
+              <Th>Actual</Th>
+              <Th>{shortLabel(model.priorMonthLabel)}</Th>
+              <Th>Change $</Th>
+              <Th>Change %</Th>
+              <Th>{shortLabel(model.priorYearLabel)}</Th>
+              <Th>Change $</Th>
+              <Th>Change %</Th>
+              <Th>This year</Th>
+              <Th>Last year</Th>
+              <Th>Change $</Th>
+              <Th>Change %</Th>
             </tr>
           </thead>
           <tbody>
-            {model.ytd.map((row) => (
-              <YtdTableRow key={row.label} row={row} />
+            {model.changes.map((row) => (
+              <tr key={row.label}>
+                <Td align="left" numeric={false}>
+                  {row.label}
+                </Td>
+                <Td>{money(row.current)}</Td>
+                <Td muted>{money(row.vsPriorMonth.base)}</Td>
+                <Delta value={row.vsPriorMonth.dollars} higherIsBetter={row.higherIsBetter} format="currency" />
+                <Delta value={row.vsPriorMonth.percent} higherIsBetter={row.higherIsBetter} format="percent" />
+                <Td muted>{money(row.vsPriorYear.base)}</Td>
+                <Delta value={row.vsPriorYear.dollars} higherIsBetter={row.higherIsBetter} format="currency" />
+                <Delta value={row.vsPriorYear.percent} higherIsBetter={row.higherIsBetter} format="percent" />
+                <Td>{money(row.ytdVsPriorYtd.current)}</Td>
+                <Td muted>{money(row.ytdVsPriorYtd.base)}</Td>
+                <Delta value={row.ytdVsPriorYtd.dollars} higherIsBetter={row.higherIsBetter} format="currency" />
+                <Delta value={row.ytdVsPriorYtd.percent} higherIsBetter={row.higherIsBetter} format="percent" />
+              </tr>
             ))}
           </tbody>
         </DataTable>
+        <p className="mt-3 text-[11px] leading-relaxed text-[var(--text-muted)]">
+          Change % is measured against the size of the earlier figure, so a smaller loss reads as an
+          improvement. A dash means that period has not been loaded from QuickBooks — pull a range
+          that includes last year to fill the prior-year columns.
+        </p>
       </Card>
 
-      {/* --- 10X block ---------------------------------------------------- */}
+      {/* --- Working capital and A/R --------------------------------------- */}
+      <div className="grid gap-4 xl:grid-cols-2">
+        <WorkingCapitalCard model={model} />
+        <AgingCard model={model} />
+      </div>
+
+      {/* --- 10X ------------------------------------------------------------ */}
+      <TenXCard model={model} />
+
+      {/* --- Balance sheet -------------------------------------------------- */}
       <Card>
         <CardHeader
-          title="10X plan"
-          subtitle="Shown for 2026–2029 only, and blank outside that range."
+          title="Balance sheet"
+          subtitle={`Month end ${model.monthLabel}, from the QuickBooks balance sheet, against the prior year end and the same month last year.`}
+          action={
+            model.balanceCheck ? (
+              <Chip
+                tone={model.balanceCheck.passes ? 'good' : 'critical'}
+                icon={
+                  model.balanceCheck.passes ? (
+                    <CircleCheck size={13} aria-hidden />
+                  ) : (
+                    <CircleAlert size={13} aria-hidden />
+                  )
+                }
+                title="Total assets − (total liabilities + equity). Equity is loaded from QuickBooks rather than plugged, so this is a real check."
+              >
+                {model.balanceCheck.passes
+                  ? 'Balances'
+                  : `Out by ${formatNumber(model.balanceCheck.difference, 'currency')}`}
+              </Chip>
+            ) : undefined
+          }
         />
-        {model.tenX ? (
+        {model.balanceSheet ? (
           <DataTable>
             <thead>
               <tr>
                 <Th align="left">Line</Th>
-                <Th>Month actual</Th>
-                <Th>Month plan</Th>
-                <Th>Variance $</Th>
-                <Th>YTD actual</Th>
-                <Th>YTD plan</Th>
-                <Th>YTD variance $</Th>
+                <Th>{model.monthLabel}</Th>
+                <Th>Dec {model.fiscalYear - 1}</Th>
+                <Th>{model.priorYearLabel}</Th>
+                <Th>% of assets</Th>
               </tr>
             </thead>
             <tbody>
-              {model.tenX.map((row) => (
+              {model.balanceSheet.map((row) => (
                 <tr key={row.label}>
-                  <Td align="left" numeric={false}>
+                  <Td
+                    align="left"
+                    numeric={false}
+                    style={{ fontWeight: row.isSubtotal ? 600 : 400, paddingLeft: row.indent ? 24 : undefined }}
+                  >
                     {row.label}
                   </Td>
-                  <Td>{formatNumber(row.monthActual, 'currency')}</Td>
-                  <Td muted>{formatNumber(row.monthPlan, 'currency')}</Td>
-                  <Td style={{ color: sentimentColorVar(sentimentOf(row.monthVariance, row.higherIsBetter)) }}>
-                    {formatSignedNumber(row.monthVariance, 'currency')}
-                  </Td>
-                  <Td>{formatNumber(row.ytdActual, 'currency')}</Td>
-                  <Td muted>{formatNumber(row.ytdPlan, 'currency')}</Td>
-                  <Td style={{ color: sentimentColorVar(sentimentOf(row.ytdVariance, row.higherIsBetter)) }}>
-                    {formatSignedNumber(row.ytdVariance, 'currency')}
-                  </Td>
+                  <Td style={{ fontWeight: row.isSubtotal ? 600 : 400 }}>{money(row.current)}</Td>
+                  <Td muted>{money(row.priorYearEnd)}</Td>
+                  <Td muted>{money(row.priorYearSameMonth)}</Td>
+                  <Td muted>{formatNumber(row.percentOfAssets, 'percent')}</Td>
                 </tr>
               ))}
             </tbody>
           </DataTable>
         ) : (
-          <p className="text-[12px] text-[var(--text-muted)]">
-            The 10X plan covers 2026 through 2029. {formatMonth(period.month)} falls outside that
-            range, so this block is intentionally blank.
-          </p>
+          <Unavailable
+            reason="NOT_AVAILABLE_BY_DIVISION"
+            detail={
+              model.balanceSheetUnavailable ??
+              `No balance sheet has been loaded for ${model.monthLabel} yet. It loads with the next QuickBooks pull.`
+            }
+          />
         )}
       </Card>
 
-      {/* --- Balance sheet ------------------------------------------------ */}
-      <div className="grid gap-4 xl:grid-cols-[2fr_1fr]">
-        <Card>
-          <CardHeader
-            title="Balance sheet"
-            subtitle="Each line as a share of total assets, against prior year end and the same month last year."
-            action={
-              model.balanceCheck ? (
-                <Chip
-                  tone={model.balanceCheck.passes ? 'good' : 'critical'}
-                  icon={
-                    model.balanceCheck.passes ? (
-                      <CircleCheck size={13} aria-hidden />
-                    ) : (
-                      <CircleAlert size={13} aria-hidden />
-                    )
-                  }
-                  title="Assets − (liabilities + equity). Equity is loaded from source rather than plugged, so this is a real assertion."
-                >
-                  {model.balanceCheck.passes
-                    ? 'Balances'
-                    : `Out by ${formatNumber(model.balanceCheck.difference, 'currency')}`}
-                </Chip>
-              ) : undefined
-            }
-          />
-          {model.balanceSheet ? (
-            <DataTable>
-              <thead>
-                <tr>
-                  <Th align="left">Line</Th>
-                  <Th>Current</Th>
-                  <Th>Prior year end</Th>
-                  <Th>PY same month</Th>
-                  <Th>% of assets</Th>
-                </tr>
-              </thead>
-              <tbody>
-                {model.balanceSheet.map((row) => (
-                  <tr key={row.label}>
-                    <Td
-                      align="left"
-                      numeric={false}
-                      style={{ fontWeight: row.isSubtotal ? 600 : 400 }}
-                    >
-                      {row.label}
-                    </Td>
-                    <Td style={{ fontWeight: row.isSubtotal ? 600 : 400 }}>
-                      {formatNumber(row.current, 'currency')}
-                    </Td>
-                    <Td muted>{formatNumber(row.priorYearEnd, 'currency')}</Td>
-                    <Td muted>{formatNumber(row.priorYearSameMonth, 'currency')}</Td>
-                    <Td muted>{formatNumber(row.percentOfAssets, 'percent')}</Td>
-                  </tr>
-                ))}
-              </tbody>
-            </DataTable>
-          ) : (
-            <Unavailable
-              reason="NOT_AVAILABLE_BY_DIVISION"
-              detail={model.balanceSheetUnavailable ?? 'No balance sheet loaded for this period.'}
-            />
-          )}
-        </Card>
-
-        <Card>
-          <CardHeader title="A/R and A/P aging" subtitle="Month-end balances by bucket" />
-          <DataTable>
-            <thead>
-              <tr>
-                <Th align="left">Bucket</Th>
-                <Th>A/R</Th>
-                <Th>A/P</Th>
-              </tr>
-            </thead>
-            <tbody>
-              {model.aging.map((row) => (
-                <tr key={row.bucket}>
-                  <Td align="left" numeric={false}>
-                    {row.label}
-                  </Td>
-                  <Td>{formatNumber(row.ar, 'currency')}</Td>
-                  <Td>{formatNumber(row.ap, 'currency')}</Td>
-                </tr>
-              ))}
-            </tbody>
-          </DataTable>
-        </Card>
-      </div>
-
-      {/* --- Rolling trend ------------------------------------------------ */}
+      {/* --- Rolling trend -------------------------------------------------- */}
       <ChartCard
         title="Revenue trend"
-        subtitle="Rolling fifteen months"
+        subtitle="Monthly revenue by division, the fifteen months to the selected month"
         series={model.trendSeries}
         data={model.trend}
         form="line"
         valueFormat="currency"
         height={280}
       />
+    </div>
+  );
+}
 
-      <SectionTitle hint="Every figure above resolves through the semantic layer and is drillable to its underlying accounts">
-        Notes
-      </SectionTitle>
-      <p className="text-[11px] leading-relaxed text-[var(--text-muted)]">
-        Gross profit is revenue less COGS, and net profit is gross profit less OpEx. The two
-        payroll rows are memo lines that already sit inside COGS and OpEx respectively — subtracting
-        them a second time would double-count payroll and understate profit at every division, in
-        every month.
+// ---------------------------------------------------------------------------
+
+function money(value: number | null): string {
+  return formatNumber(value, 'currency');
+}
+
+function lowerFirst(text: string): string {
+  return text ? text[0]!.toLowerCase() + text.slice(1) : text;
+}
+
+/** "August 2025" → "Aug 2025", for a column heading. */
+function shortLabel(label: string): string {
+  const [month, year] = label.split(' ');
+  return `${(month ?? '').slice(0, 3)} ${year ?? ''}`.trim();
+}
+
+function GroupTh({ children, span = 1, align = 'center' }: { children: ReactNode; span?: number; align?: 'left' | 'center' }) {
+  return (
+    <th
+      colSpan={span}
+      className="whitespace-nowrap border-b px-3 pb-1 pt-2 text-[11px] font-semibold"
+      style={{ textAlign: align, borderColor: 'var(--border)', color: 'var(--text-secondary)' }}
+    >
+      {children}
+    </th>
+  );
+}
+
+function Delta({
+  value,
+  higherIsBetter,
+  format,
+}: {
+  value: number | null;
+  higherIsBetter: boolean;
+  format: 'currency' | 'percent';
+}) {
+  return (
+    <Td style={{ color: sentimentColorVar(sentimentOf(value, higherIsBetter)) }}>
+      {formatSignedNumber(value, format)}
+    </Td>
+  );
+}
+
+function BudgetSource({ model }: { model: FinanceViewModel }) {
+  if (!model.budget.loaded) {
+    return (
+      <span className="inline-flex items-start gap-1.5">
+        <Info size={13} className="mt-px shrink-0" aria-hidden />
+        No budget is loaded for {model.fiscalYear}, so the budget columns are empty. The budget is read
+        from QuickBooks (Budgets) on every pull; create it there, or load a budget tab from Google
+        Sheets, and pull again.
+      </span>
+    );
+  }
+  return (
+    <span>
+      Budget: <strong className="font-medium text-[var(--text-primary)]">{model.budget.source}</strong>.
+      Gross and net profit budgets are derived from the budgeted revenue, COGS and operating expenses.
+    </span>
+  );
+}
+
+function PlRow({ line }: { line: PlLine }) {
+  const format = line.kind === 'percent' ? 'percent' : 'currency';
+  const weight = line.isSubtotal ? 600 : 400;
+  const color = line.isMemo || line.isRatio ? 'var(--text-muted)' : undefined;
+  const value = (v: number | null) => formatNumber(v, format);
+
+  const cells = (f: Figure) => (
+    <>
+      <Td style={{ fontWeight: weight, color }}>{value(f.actual)}</Td>
+      <Td muted>{value(f.budget)}</Td>
+      <Td style={{ color: sentimentColorVar(sentimentOf(f.variance, line.higherIsBetter)) }}>
+        {line.kind === 'percent' ? points(f.variance) : formatSignedNumber(f.variance, 'currency')}
+      </Td>
+      <Td
+        style={{
+          color: sentimentColorVar(sentimentOf(f.attainment === null ? null : f.attainment - 1, line.higherIsBetter)),
+        }}
+      >
+        {line.kind === 'percent' ? '' : formatNumber(f.attainment, 'ratio')}
+      </Td>
+    </>
+  );
+
+  return (
+    <tr title={line.formula}>
+      <Td
+        align="left"
+        numeric={false}
+        style={{
+          fontWeight: weight,
+          color,
+          paddingLeft: line.isMemo || line.isRatio ? 24 : undefined,
+          fontStyle: line.isMemo ? 'italic' : undefined,
+        }}
+      >
+        {line.label}
+      </Td>
+      {cells(line.month)}
+      {cells(line.ytd)}
+      <Td muted>{value(line.fullYear.budget)}</Td>
+      <Td style={{ fontWeight: weight, color }}>{value(line.fullYear.outlook)}</Td>
+    </tr>
+  );
+}
+
+/** A difference between two percentages, in points: +2.1 pts. */
+function points(value: number | null): string {
+  if (value === null || Number.isNaN(value)) return '—';
+  const pts = value * 100;
+  const rounded = Math.round(pts * 10) / 10;
+  return `${rounded > 0 ? '+' : rounded < 0 ? '−' : ''}${Math.abs(rounded).toFixed(1)} pts`;
+}
+
+function TieOut({ model }: { model: FinanceViewModel }) {
+  const tie = model.tieOut!;
+  return (
+    <Card>
+      <CardHeader
+        title="Ties to QuickBooks"
+        subtitle={`ARG Total — the four divisions added up — against QuickBooks' own company total for ${model.monthLabel}.`}
+        action={
+          <Chip
+            tone={tie.allTie ? 'good' : 'critical'}
+            icon={tie.allTie ? <CircleCheck size={13} aria-hidden /> : <CircleAlert size={13} aria-hidden />}
+          >
+            {tie.allTie ? 'Ties' : 'Does not tie'}
+          </Chip>
+        }
+      />
+      <DataTable>
+        <thead>
+          <tr>
+            <Th align="left">Line</Th>
+            <Th>QuickBooks total</Th>
+            <Th>Four divisions</Th>
+            <Th title="Four divisions − QuickBooks. Anything here sits on a class that is not a division (Not Specified, Z Alloc).">
+              Not in a division
+            </Th>
+          </tr>
+        </thead>
+        <tbody>
+          {tie.rows.map((row) => (
+            <tr key={row.label}>
+              <Td align="left" numeric={false}>
+                {row.label}
+              </Td>
+              <Td>{formatNumber(row.quickbooks, 'currency_precise')}</Td>
+              <Td>{formatNumber(row.divisions, 'currency_precise')}</Td>
+              <Td style={{ color: row.ties ? 'var(--text-muted)' : 'var(--status-critical)' }}>
+                {formatNumber(-row.difference, 'currency_precise')}
+              </Td>
+            </tr>
+          ))}
+        </tbody>
+      </DataTable>
+      <p className="mt-3 text-[11px] leading-relaxed text-[var(--text-muted)]">
+        QuickBooks&apos; total includes every class. Amounts on classes that are not a division — such as
+        Not Specified and Z Alloc — are in QuickBooks&apos; total but in no division, and are shown here
+        rather than hidden.
+      </p>
+    </Card>
+  );
+}
+
+function WorkingCapitalCard({ model }: { model: FinanceViewModel }) {
+  const wc = model.workingCapital;
+  const change =
+    wc.workingCapital !== null && wc.priorMonthWorkingCapital !== null
+      ? wc.workingCapital - wc.priorMonthWorkingCapital
+      : null;
+
+  return (
+    <Card>
+      <CardHeader
+        title="Working capital"
+        subtitle={`From the QuickBooks balance sheet at month end ${model.monthLabel}.`}
+      />
+      {wc.unavailable ? (
+        <Unavailable reason="NOT_AVAILABLE_BY_DIVISION" detail={wc.unavailable} />
+      ) : (
+        <ul className="space-y-2">
+          <Metric
+            label="Working capital"
+            value={money(wc.workingCapital)}
+            strong
+            hint="Current assets − current liabilities."
+            extra={
+              change === null ? undefined : (
+                <span style={{ color: sentimentColorVar(sentimentOf(change, true)) }}>
+                  {formatSignedNumber(change, 'currency')} vs {model.priorMonthLabel}
+                </span>
+              )
+            }
+          />
+          <Metric label="Current assets" value={money(wc.currentAssets)} hint="Cash + accounts receivable + other current assets." />
+          <Metric label="Current liabilities" value={money(wc.currentLiabilities)} hint="Accounts payable + credit cards + other current liabilities." />
+          <Metric label="Current ratio" value={formatNumber(wc.currentRatio, 'multiple')} hint="Current assets ÷ current liabilities. Above 1.0× means short-term obligations are covered." />
+          <Metric label="Cash" value={money(wc.cash)} />
+          <Metric label="Days sales outstanding" value={formatNumber(wc.dso, 'days')} hint="A/R at month end ÷ revenue for the month × days in the month." />
+          <Metric label="Days payable outstanding" value={formatNumber(wc.dpo, 'days')} hint="A/P at month end ÷ COGS for the month × days in the month." />
+          <Metric label="Cash conversion cycle" value={formatNumber(wc.ccc, 'days')} hint="DSO − DPO. No inventory term — ARG is a services business." />
+          <Metric label="Cash runway (this month's OpEx)" value={formatNumber(wc.runwaySingleMonth, 'months')} hint="Cash ÷ operating expenses for the month." />
+          <Metric label="Cash runway (3-month average OpEx)" value={formatNumber(wc.runwayTrailing, 'months')} hint="Cash ÷ average monthly operating expenses over the last three months." />
+        </ul>
+      )}
+    </Card>
+  );
+}
+
+function AgingCard({ model }: { model: FinanceViewModel }) {
+  const { ar, ap, note } = model.aging;
+  return (
+    <Card>
+      <CardHeader title="Receivables and payables aging" subtitle={note ?? undefined} />
+      {ar || ap ? (
+        <div className="space-y-5">
+          {ar ? <AgingTable block={ar} title="Accounts receivable" /> : null}
+          {ap ? <AgingTable block={ap} title="Accounts payable" /> : null}
+        </div>
+      ) : (
+        <Unavailable reason="NO_DATA" detail="No open invoices or bills have been loaded yet. They load with the next QuickBooks pull." />
+      )}
+    </Card>
+  );
+}
+
+function AgingTable({ block, title }: { block: AgingBlock; title: string }) {
+  return (
+    <div>
+      <div className="mb-1.5 flex items-baseline justify-between gap-3">
+        <span className="text-[12px] font-semibold">
+          {title} · {money(block.total)}
+        </span>
+        <span className="text-[11px] text-[var(--text-muted)]">as of {block.asOf}</span>
+      </div>
+      <DataTable>
+        <thead>
+          <tr>
+            <Th align="left">Bucket</Th>
+            <Th>Amount</Th>
+            <Th>% of total</Th>
+            <Th align="left"> </Th>
+          </tr>
+        </thead>
+        <tbody>
+          {block.buckets.map((row) => (
+            <tr key={row.bucket}>
+              <Td align="left" numeric={false}>
+                {row.label}
+              </Td>
+              <Td>{money(row.amount)}</Td>
+              <Td muted>{formatNumber(row.share, 'percent')}</Td>
+              <Td align="left" numeric={false} className="w-[30%]">
+                <span
+                  className="block h-1.5 rounded-full"
+                  style={{
+                    width: `${Math.max(0, Math.min(1, row.share ?? 0)) * 100}%`,
+                    background:
+                      row.bucket === 'current'
+                        ? 'var(--status-good)'
+                        : row.bucket === '1_30' || row.bucket === '31_60'
+                          ? 'var(--status-warning)'
+                          : 'var(--status-critical)',
+                  }}
+                  aria-hidden
+                />
+              </Td>
+            </tr>
+          ))}
+          <tr>
+            <Td align="left" numeric={false} style={{ fontWeight: 600 }}>
+              Total
+            </Td>
+            <Td style={{ fontWeight: 600 }}>{money(block.total)}</Td>
+            <Td muted>{block.total ? '100%' : '—'}</Td>
+            <Td align="left" numeric={false}>
+              {' '}
+            </Td>
+          </tr>
+        </tbody>
+      </DataTable>
+      <p className="mt-1.5 text-[11px] text-[var(--text-muted)]">
+        {money(block.over60)} ({formatNumber(block.total ? block.over60 / block.total : null, 'percent')}) is more
+        than 60 days past due.
       </p>
     </div>
   );
 }
 
-function PlTableRow({ row }: { row: PlRow }) {
-  return (
-    <tr>
-      <Td
-        align="left"
-        numeric={false}
-        muted={row.isMemo}
-        style={{
-          fontWeight: row.isSubtotal ? 600 : 400,
-          paddingLeft: row.isMemo ? 24 : undefined,
-        }}
-      >
-        {row.label}
-        {row.isMemo ? (
-          <span
-            className="ml-1.5 rounded px-1 py-px text-[9.5px] uppercase tracking-wide"
-            style={{ background: 'var(--surface-2)', color: 'var(--text-muted)' }}
-            title="Memo line — already included in the total above it. Never subtracted separately."
-          >
-            memo
-          </span>
-        ) : null}
-      </Td>
-      <Td muted>{formatNumber(row.priorMonth, 'currency')}</Td>
-      <Td muted>{formatNumber(row.priorYear, 'currency')}</Td>
-      <Td style={{ fontWeight: row.isSubtotal ? 600 : 400 }}>
-        {formatNumber(row.actual, 'currency')}
-      </Td>
-      <Td muted>{formatNumber(row.budget, 'currency')}</Td>
-      <Td style={{ color: sentimentColorVar(sentimentOf(row.varianceDollars, row.higherIsBetter)) }}>
-        {formatSignedNumber(row.varianceDollars, 'currency')}
-      </Td>
-      <Td
-        style={{
-          color: sentimentColorVar(
-            sentimentOf(row.attainment === null ? null : row.attainment - 1, row.higherIsBetter),
-          ),
-        }}
-      >
-        {formatNumber(row.attainment, 'ratio')}
-      </Td>
-    </tr>
-  );
-}
+function TenXCard({ model }: { model: FinanceViewModel }) {
+  if (!model.tenX) {
+    return (
+      <Card>
+        <CardHeader title="10X plan" />
+        <p className="text-[12px] text-[var(--text-muted)]">
+          The 10X plan covers 2026 through 2029. {model.monthLabel} falls outside that range.
+        </p>
+      </Card>
+    );
+  }
 
-function YtdTableRow({ row }: { row: YtdRow }) {
-  const format = row.isPercent ? 'percent' : 'currency';
+  const loaded = model.tenX.rows.some((row) => row.annualTarget !== null);
   return (
-    <tr>
-      <Td align="left" numeric={false}>
-        {row.label}
-      </Td>
-      <Td muted>{formatNumber(row.priorYearYtd, format)}</Td>
-      <Td style={{ fontWeight: 500 }}>{formatNumber(row.ytdActual, format)}</Td>
-      <Td muted>{formatNumber(row.ytdBudget, format)}</Td>
-      <Td style={{ color: sentimentColorVar(sentimentOf(row.varianceDollars, row.higherIsBetter)) }}>
-        {row.isPercent ? '—' : formatSignedNumber(row.varianceDollars, 'currency')}
-      </Td>
-      <Td
-        style={{
-          color: sentimentColorVar(
-            sentimentOf(row.attainment === null ? null : row.attainment - 1, row.higherIsBetter),
-          ),
-        }}
-      >
-        {row.isPercent ? '—' : formatNumber(row.attainment, 'ratio')}
-      </Td>
-    </tr>
+    <Card>
+      <CardHeader
+        title="10X plan — are we on pace?"
+        subtitle={
+          loaded
+            ? `Year to date against the 10X targets (${model.tenX.source ?? '10X plan'}), and where ${model.fiscalYear} lands at the current pace.`
+            : 'The 10X targets have not been loaded. They are read from the 10X tab of the connected Google Sheet on every pull.'
+        }
+      />
+      <DataTable>
+        <thead>
+          <tr>
+            <Th align="left">Line</Th>
+            <Th>{model.fiscalYear} 10X target</Th>
+            <Th>YTD target</Th>
+            <Th>YTD actual</Th>
+            <Th title="YTD actual − YTD target">Variance to goal</Th>
+            <Th title="YTD actual ÷ YTD target">% of goal</Th>
+            <Th title="YTD actual ÷ months elapsed × 12">Full year at current pace</Th>
+            <Th>Pace</Th>
+          </tr>
+        </thead>
+        <tbody>
+          {model.tenX.rows.map((row) => {
+            const onPace = row.paceGap === null ? null : row.higherIsBetter ? row.paceGap >= 0 : row.paceGap <= 0;
+            return (
+              <tr key={row.label}>
+                <Td align="left" numeric={false}>
+                  {row.label}
+                </Td>
+                <Td muted>{money(row.annualTarget)}</Td>
+                <Td muted>{money(row.ytdTarget)}</Td>
+                <Td style={{ fontWeight: 500 }}>{money(row.ytdActual)}</Td>
+                <Delta value={row.ytdVariance} higherIsBetter={row.higherIsBetter} format="currency" />
+                <Td
+                  style={{
+                    color: sentimentColorVar(
+                      sentimentOf(row.ytdAttainment === null ? null : row.ytdAttainment - 1, row.higherIsBetter),
+                    ),
+                  }}
+                >
+                  {formatNumber(row.ytdAttainment, 'ratio')}
+                </Td>
+                <Td>{money(row.projectedFullYear)}</Td>
+                <Td>
+                  {onPace === null ? (
+                    '—'
+                  ) : (
+                    <Chip tone={onPace ? 'good' : 'critical'}>
+                      {onPace ? 'On pace' : `Behind by ${formatNumber(Math.abs(row.paceGap!), 'currency')}`}
+                    </Chip>
+                  )}
+                </Td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </DataTable>
+    </Card>
   );
 }
 
 function Metric({
   label,
   value,
-  format,
   hint,
+  strong,
+  extra,
 }: {
   label: string;
-  value: number | null;
-  format: 'days' | 'months';
+  value: string;
   hint?: string;
+  strong?: boolean;
+  extra?: ReactNode;
 }) {
   return (
     <li
@@ -423,7 +627,10 @@ function Metric({
       title={hint}
     >
       <span className="text-[12px] text-[var(--text-secondary)]">{label}</span>
-      <span className="tnum text-[13px] font-medium">{formatNumber(value, format)}</span>
+      <span className="text-right">
+        <span className={`tnum ${strong ? 'text-[15px] font-semibold' : 'text-[13px] font-medium'}`}>{value}</span>
+        {extra ? <span className="ml-2 text-[11px]">{extra}</span> : null}
+      </span>
     </li>
   );
 }
