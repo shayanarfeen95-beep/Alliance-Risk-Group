@@ -204,7 +204,7 @@ export function EmptyState({
       <p className="max-w-md text-[12px] leading-relaxed text-[var(--text-muted)]">{detail}</p>
       {showDiagnosis && (
         <Link
-          href="/admin#data-health"
+          href="/admin?tab=data#data-health"
           className="mt-1.5 text-[11.5px] font-medium underline underline-offset-2"
           style={{ color: 'var(--text-secondary)' }}
         >
