@@ -82,7 +82,7 @@ const ENTITIES: EntityDescriptor[] = [
     label: 'Trial Balance (company level)',
     cadence: 'ON_CLOSE',
     description:
-      'QuickBooks gives the trial balance no class dimension, so it produces no divisional rows by design. It is landed in full as the company-level tie-out against the classed P&L and balance sheet, and carried in the audit pack. Account-level detail BY division comes from the classed P&L.',
+      'Every account’s debit and credit for the month, at company level (QuickBooks gives the trial balance no class). Stored beside the other company totals and checked: debits must equal credits. Account-level detail BY division comes from the classed P&L.',
   },
   {
     entity: 'ar_aging',

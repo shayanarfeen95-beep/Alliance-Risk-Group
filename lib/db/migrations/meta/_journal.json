@@ -99,6 +99,13 @@
       "when": 1789080000000,
       "tag": "0013_company_totals",
       "breakpoints": true
+    },
+    {
+      "idx": 14,
+      "version": "7",
+      "when": 1789090000000,
+      "tag": "0014_unpin_seeded_month",
+      "breakpoints": true
     }
   ]
 }

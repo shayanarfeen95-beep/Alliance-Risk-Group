@@ -14,7 +14,7 @@
  * watches rows land source by source rather than staring at a spinner, and an
  * interrupted pull keeps everything it had already written.
  */
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useRef, useState, useSyncExternalStore } from 'react';
 import { useRouter } from 'next/navigation';
 import {
   CircleAlert,
@@ -71,17 +71,74 @@ const SLICE_RETRIES = 2;
 /** Guards against a connector that keeps claiming there is more to fetch. */
 const MAX_SLICES_PER_ENTITY = 200;
 
-export function DataControls(props: DataControlsProps) {
-  const router = useRouter();
-  const [busy, setBusy] = useState(false);
-  const [steps, setSteps] = useState<StepProgress[]>([]);
-  const [window_, setWindow] = useState<string | null>(null);
+/**
+ * The pull's progress lives outside the component, for the life of the tab.
+ *
+ * It used to live in component state, and the component cancelled its pull when
+ * it unmounted. The Admin sections are separate pages, so opening Connections to
+ * paste a spreadsheet link unmounted this panel and silently stopped a pull at
+ * "11 of 14" — the last three HubSpot entities and the reconciliation never ran.
+ * Held here, a pull keeps going while you look at another section, and coming
+ * back shows it where it is.
+ */
+interface PullState {
+  busy: boolean;
+  steps: StepProgress[];
+  window: string | null;
   // Whether the month range means anything for what was pulled. It does for
   // QuickBooks, which is fetched a report per month; it does not for HubSpot,
   // which is fetched by object.
-  const [windowApplies, setWindowApplies] = useState(false);
-  const [reconciliation, setReconciliation] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  windowApplies: boolean;
+  reconciliation: string | null;
+  error: string | null;
+}
+
+const IDLE: PullState = {
+  busy: false,
+  steps: [],
+  window: null,
+  windowApplies: false,
+  reconciliation: null,
+  error: null,
+};
+let pullState: PullState = IDLE;
+const pullListeners = new Set<() => void>();
+
+function setPull(patch: Partial<PullState>) {
+  pullState = { ...pullState, ...patch };
+  for (const listener of pullListeners) listener();
+}
+function subscribePull(listener: () => void) {
+  pullListeners.add(listener);
+  return () => {
+    pullListeners.delete(listener);
+  };
+}
+const readPull = () => pullState;
+const readIdle = () => IDLE;
+
+const setBusy = (busy: boolean) => setPull({ busy });
+const setSteps = (steps: StepProgress[]) => setPull({ steps });
+const setWindow = (window: string | null) => setPull({ window });
+const setWindowApplies = (windowApplies: boolean) => setPull({ windowApplies });
+const setReconciliation = (reconciliation: string | null) => setPull({ reconciliation });
+const setError = (error: string | null) => setPull({ error });
+
+/** For the Admin header: is a pull running, and how far has it got? */
+export function usePullProgress(): { busy: boolean; finished: number; total: number } {
+  const state = useSyncExternalStore(subscribePull, readPull, readIdle);
+  return {
+    busy: state.busy,
+    finished: state.steps.filter((step) => step.state === 'done' || step.state === 'failed').length,
+    total: state.steps.length,
+  };
+}
+
+export function DataControls(props: DataControlsProps) {
+  const router = useRouter();
+  const pull = useSyncExternalStore(subscribePull, readPull, readIdle);
+  const { busy, steps, windowApplies, reconciliation, error } = pull;
+  const window_ = pull.window;
 
   /**
    * How far the next pull reaches.
@@ -96,13 +153,8 @@ export function DataControls(props: DataControlsProps) {
   const [year, setYear] = useState(() => new Date().getFullYear());
   const [fromMonth, setFromMonth] = useState(() => currentMonth(-11));
   const [toMonth, setToMonth] = useState(() => currentMonth(0));
+  // Never set by unmounting any more (see PullState): a pull runs to the end.
   const cancelled = useRef(false);
-
-  // A pull that is still running when the panel unmounts must stop driving, or
-  // it keeps posting slices at a page nobody is looking at.
-  useEffect(() => () => {
-    cancelled.current = true;
-  }, []);
 
   const post = useCallback(async (body: Record<string, unknown>) => {
     const response = await fetch('/api/sync', {
@@ -134,6 +186,7 @@ export function DataControls(props: DataControlsProps) {
   }
 
   async function sync(sources?: string[], fullRefresh = false) {
+    if (pullState.busy) return;
     cancelled.current = false;
     setBusy(true);
     setError(null);

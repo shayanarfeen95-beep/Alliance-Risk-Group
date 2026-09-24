@@ -1102,15 +1102,23 @@ export function balanceSheetLineFor(accountType: string | undefined): string | n
  * loaded before this mapping existed, without touching a single mapping anybody
  * has actually made.
  */
-async function conformAccounts(db: Database, payload: QboQueryResponse): Promise<number> {
+export interface AccountSync {
+  /** Accounts QuickBooks returned and that are now in dim_account. */
+  synced: number;
+  added: number;
+  updated: number;
+  inactive: number;
+}
+
+async function conformAccounts(db: Database, payload: QboQueryResponse): Promise<AccountSync> {
   const accounts = payload.QueryResponse?.Account ?? [];
-  if (!accounts.length) return 0;
+  const result: AccountSync = { synced: 0, added: 0, updated: 0, inactive: 0 };
+  if (!accounts.length) return result;
 
   const existing = new Map(
     (await db.select().from(t.dimAccount)).map((row) => [row.accountId, row]),
   );
 
-  let written = 0;
   for (const account of accounts) {
     const accountId = account.Id?.trim();
     if (!accountId) continue;
@@ -1145,19 +1153,29 @@ async function conformAccounts(db: Database, payload: QboQueryResponse): Promise
             : null;
 
     const balanceSheetLine = balanceSheetLineFor(account.AccountType);
+    const isActive = account.Active ?? true;
+    const accountName = account.Name ?? accountId;
+    const accountNumber = account.AcctNum ?? null;
+
+    result.synced += 1;
+    if (!isActive) result.inactive += 1;
 
     const known = existing.get(accountId);
-
     if (known) {
-      // Only ever fills a hole. A line already set — by Westport, by an earlier
-      // load, by hand — is left exactly as it is.
-      const fills: Record<string, unknown> = {};
-      if (!known.reportingLine && reportingLine) fills.reportingLine = reportingLine;
-      if (!known.balanceSheetLine && balanceSheetLine) fills.balanceSheetLine = balanceSheetLine;
-      if (Object.keys(fills).length === 0) continue;
-
-      await db.update(t.dimAccount).set(fills).where(eq(t.dimAccount.accountId, accountId));
-      written += 1;
+      // What QuickBooks owns — the name, the number, whether it is active — is
+      // refreshed, so a renamed or deactivated account reads as it does in the
+      // books. The reporting lines only ever fill a hole: a line already set by
+      // Westport, by an earlier load or by hand is left exactly as it is.
+      const changes: Record<string, unknown> = {};
+      if (known.accountName !== accountName) changes.accountName = accountName;
+      if ((known.accountNumber ?? null) !== accountNumber) changes.accountNumber = accountNumber;
+      if (known.isActive !== isActive) changes.isActive = isActive;
+      if (!known.reportingLine && reportingLine) changes.reportingLine = reportingLine;
+      if (!known.balanceSheetLine && balanceSheetLine) changes.balanceSheetLine = balanceSheetLine;
+      if (Object.keys(changes).length) {
+        await db.update(t.dimAccount).set(changes).where(eq(t.dimAccount.accountId, accountId));
+        result.updated += 1;
+      }
       continue;
     }
 
@@ -1165,8 +1183,8 @@ async function conformAccounts(db: Database, payload: QboQueryResponse): Promise
       .insert(t.dimAccount)
       .values({
         accountId,
-        accountNumber: account.AcctNum ?? null,
-        accountName: account.Name ?? accountId,
+        accountNumber,
+        accountName,
         accountType: isCogs ? 'COGS' : accountType,
         reportingLine,
         balanceSheetLine,
@@ -1174,13 +1192,91 @@ async function conformAccounts(db: Database, payload: QboQueryResponse): Promise
         // loaded and marked inactive rather than skipped. Skipping it does not
         // remove it from a prior balance sheet — it only removes our ability to
         // read one.
-        isActive: account.Active ?? true,
+        isActive,
       })
       .onConflictDoNothing();
-
-    written += 1;
+    result.added += 1;
   }
 
+  return result;
+}
+
+/**
+ * The trial balance, one month: every account's debit or credit, and the totals.
+ *
+ * It used to be landed and dropped — "0 rows" on the pull screen, which read as
+ * QuickBooks returning nothing. It is company-level by nature (QuickBooks gives
+ * it no class), so it is filed with the other company totals as statement 'TB':
+ * one line per account (debit − credit) plus the two column totals, which the
+ * "trial balance balances" check compares.
+ */
+export function readTrialBalance(report: QboReport): {
+  accounts: Array<{ id: string; name: string; net: Decimal }>;
+  debits: Decimal;
+  credits: Decimal;
+} {
+  const accounts: Array<{ id: string; name: string; net: Decimal }> = [];
+  let debits = new Decimal(0);
+  let credits = new Decimal(0);
+  let reportedDebits: Decimal | null = null;
+  let reportedCredits: Decimal | null = null;
+
+  const walk = (rows: QboRow[] | undefined) => {
+    for (const row of rows ?? []) {
+      if (row.Rows?.Row) walk(row.Rows.Row);
+      if (row.ColData?.length) {
+        const [label, debit, credit] = row.ColData;
+        const name = (label?.value ?? '').trim();
+        if (!name) continue;
+        const d = amount(debit);
+        const c = amount(credit);
+        debits = debits.plus(d);
+        credits = credits.plus(c);
+        accounts.push({ id: (label?.id ?? name).trim(), name, net: d.minus(c) });
+      }
+      if (row.Summary?.ColData?.length && /total/i.test(row.Summary.ColData[0]?.value ?? '')) {
+        reportedDebits = amount(row.Summary.ColData[1]);
+        reportedCredits = amount(row.Summary.ColData[2]);
+      }
+    }
+  };
+  walk(report.Rows?.Row);
+
+  // QuickBooks' own TOTAL row wins when it is there: it is what an accountant
+  // sees at the foot of the report.
+  return {
+    accounts,
+    debits: reportedDebits ?? debits,
+    credits: reportedCredits ?? credits,
+  };
+}
+
+async function conformTrialBalance(
+  db: Database,
+  loadRunId: string,
+  month: string,
+  report: QboReport,
+  notes: string[],
+): Promise<number> {
+  const { accounts, debits, credits } = readTrialBalance(report);
+  if (!accounts.length) {
+    notes.push(`${month.slice(0, 7)}: QuickBooks returned a trial balance with no accounts.`);
+    return 0;
+  }
+
+  const lines: Record<string, Decimal> = { total_debits: debits, total_credits: credits };
+  for (const account of accounts) {
+    const key = `account:${account.id}`;
+    lines[key] = (lines[key] ?? new Decimal(0)).plus(account.net);
+  }
+  const written = await writeCompanyTotals(db, loadRunId, month, 'TB', lines);
+
+  if (!debits.minus(credits).abs().lte(0.01)) {
+    notes.push(
+      `${month.slice(0, 7)}: the trial balance does not balance — debits ${debits.toFixed(2)}, ` +
+        `credits ${credits.toFixed(2)}.`,
+    );
+  }
   return written;
 }
 
@@ -1191,9 +1287,12 @@ async function conformAccounts(db: Database, payload: QboQueryResponse): Promise
  * exactly what §3 forbids. What this does is report which classes have no
  * division, which is the alert the spec asks for.
  */
-async function checkClasses(db: Database, payload: QboQueryResponse): Promise<string[]> {
+async function checkClasses(
+  db: Database,
+  payload: QboQueryResponse,
+): Promise<{ unmapped: string[]; recorded: number; active: number }> {
   const classes = payload.QueryResponse?.Class ?? [];
-  if (!classes.length) return [];
+  if (!classes.length) return { unmapped: [], recorded: 0, active: 0 };
 
   const lookup = await divisionLookup(db);
   const unmapped: string[] = [];
@@ -1234,7 +1333,11 @@ async function checkClasses(db: Database, payload: QboQueryResponse): Promise<st
     }
   }
 
-  return unmapped;
+  return {
+    unmapped,
+    recorded: classes.length,
+    active: classes.filter((entry) => entry.Active !== false).length,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -1728,10 +1831,13 @@ function looksLikeHeaderRow(row: string[]): boolean {
 }
 
 /** A column whose header names one of the five reporting concepts. */
+// A forecast log prefixes its figures — "FC Revenue" beside "Act Revenue" — so
+// the forecast prefix is accepted and an actuals column never is.
+const FORECAST_PREFIX = String.raw`(?:(?:fc|fcst|forecast(?:ed)?)\s+)?`;
 const LONG_VALUE_COLUMNS: Array<{ line: 'revenue' | 'cogs' | 'opex'; pattern: RegExp }> = [
-  { line: 'revenue', pattern: /^revenue\b/i },
-  { line: 'cogs', pattern: /^(cogs|cost of (goods|sales))\b/i },
-  { line: 'opex', pattern: /^(opex|operating expenses?)\b/i },
+  { line: 'revenue', pattern: new RegExp(`^${FORECAST_PREFIX}revenue\\b`, 'i') },
+  { line: 'cogs', pattern: new RegExp(`^${FORECAST_PREFIX}(cogs|cost of (goods|sales))\\b`, 'i') },
+  { line: 'opex', pattern: new RegExp(`^${FORECAST_PREFIX}(opex|operating expenses?)\\b`, 'i') },
 ];
 
 export interface LongSheetTable {
@@ -1846,6 +1952,129 @@ export function findSheetTable(values: string[][]): SheetTable | null {
   }
 
   return null;
+}
+
+const MONTH_NAMES = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
+
+/** "JAN", "Jan", "January" — a month NAME with no year. */
+function monthNameIndex(value: unknown): number {
+  const text = String(value ?? '').trim().toLowerCase();
+  if (!/^[a-z]{3,9}\.?$/.test(text)) return -1;
+  const index = MONTH_NAMES.indexOf(text.slice(0, 3));
+  if (index === -1) return -1;
+  // "Mar" and "March" are months; "Marketing" is not.
+  const full = new Date(Date.UTC(2000, index, 1)).toLocaleString('en-US', { month: 'long', timeZone: 'UTC' });
+  return full.toLowerCase().startsWith(text.replace(/\.$/, '')) ? index : -1;
+}
+
+/** Which reporting line a section title names; null for derived lines (GP, NOI). */
+function sectionLine(title: string): 'revenue' | 'cogs' | 'opex' | null {
+  const text = title.trim().toLowerCase();
+  // Derived lines are recomputed, never imported: loading GP beside revenue and
+  // COGS would let the identity drift the moment someone edits one cell.
+  if (/\b(gp|gross profit|noi|net|ebitda|margin|profit)\b/.test(text)) return null;
+  if (/\bcogs\b|cost of (goods|sales|revenue)/.test(text)) return 'cogs';
+  if (/\bop\s*ex\b|operating expense/.test(text)) return 'opex';
+  if (/\brev(enue)?s?\b|\bsales\b/.test(text)) return 'revenue';
+  return null;
+}
+
+export interface SectionedCell {
+  periodMonth: string;
+  divisionLabel: string;
+  lineItem: 'revenue' | 'cogs' | 'opex';
+  amount: string;
+}
+
+/**
+ * The SECTIONED layout: a title row naming the line ("Monthly Rev $",
+ * "COGS Budget (10X Plan)"), then a Divisions × JAN…DEC grid under it, repeated
+ * for each line.
+ *
+ * This is how ARG's own FP&A workbook lays out both the Monthly Budget and the
+ * 10X plan, and neither of the other readers could see it: the header says
+ * "Divisions", not "Division", and its months are bare names with the year held
+ * elsewhere — in the sheet title ("Budget - 2026") or in a row of years above
+ * the months (the 10X plan runs 2026 to 2028 across one row). So every budget
+ * pull failed with "no header row this can read" on a sheet that was full.
+ *
+ * The year is never guessed: a month column with no year above it and no year
+ * in the title is not read.
+ */
+export function readSectionedGrid(values: unknown[][]): { cells: SectionedCell[]; sections: string[] } | null {
+  const text = (cell: unknown) => String(cell ?? '').trim();
+
+  let titleYear: number | null = null;
+  for (const row of values.slice(0, 6)) {
+    for (const cell of row ?? []) {
+      const match = text(cell).match(/\b(20\d{2})\b/);
+      if (match && !/^\d+(\.\d+)?$/.test(text(cell))) {
+        titleYear = Number(match[1]);
+        break;
+      }
+    }
+    if (titleYear) break;
+  }
+
+  const cells: SectionedCell[] = [];
+  const sections: string[] = [];
+  let line: 'revenue' | 'cogs' | 'opex' | null = null;
+  let grid: { divisionColumn: number; months: Array<{ index: number; month: string }> } | null = null;
+  let sawHeader = false;
+
+  for (let index = 0; index < values.length; index++) {
+    const row = values[index] ?? [];
+    const filled = row.map(text).filter(Boolean);
+
+    // A title: one lone piece of text. Starts a new section and forgets the
+    // previous grid, so rows can never be read under the wrong line.
+    if (filled.length === 1 && !/^-?[\d,.]+$/.test(filled[0]!)) {
+      line = sectionLine(filled[0]!);
+      grid = null;
+      if (line) sections.push(filled[0]!);
+      continue;
+    }
+
+    const divisionColumn = row.findIndex((cell) => /^div(ision)?s?$/i.test(text(cell)));
+    const monthColumns = row
+      .map((cell, column) => ({ column, month: monthNameIndex(cell) }))
+      .filter((entry) => entry.month !== -1);
+
+    if (divisionColumn !== -1 && monthColumns.length >= 2) {
+      sawHeader = true;
+      // Years from the row above, carried rightward from wherever each one sits
+      // (a year labels the block of months that starts under it).
+      const above = values[index - 1] ?? [];
+      const months: Array<{ index: number; month: string }> = [];
+      for (const { column, month } of monthColumns) {
+        let year: number | null = null;
+        for (let left = column; left >= 0; left--) {
+          const candidate = text(above[left]);
+          if (/^20\d{2}$/.test(candidate)) {
+            year = Number(candidate);
+            break;
+          }
+        }
+        year ??= titleYear;
+        if (!year) continue;
+        months.push({ index: column, month: `${year}-${String(month + 1).padStart(2, '0')}-01` });
+      }
+      grid = line && months.length ? { divisionColumn, months } : null;
+      continue;
+    }
+
+    if (!grid || !line) continue;
+    const label = text(row[grid.divisionColumn]);
+    if (!label) continue;
+
+    for (const month of grid.months) {
+      const raw = text(row[month.index]).replace(/[$,\s]/g, '');
+      if (!raw || !/^-?\d+(\.\d+)?(e-?\d+)?$/i.test(raw)) continue;
+      cells.push({ periodMonth: month.month, divisionLabel: label, lineItem: line, amount: raw });
+    }
+  }
+
+  return sawHeader ? { cells, sections } : null;
 }
 
 function normaliseLineItem(value: string): 'revenue' | 'cogs' | 'opex' | null {
@@ -1969,12 +2198,32 @@ async function conformBudget(
   }
 
   const table = longTable ? null : findSheetTable(values);
-  if (!longTable && !table) {
+  const sectioned = longTable || table ? null : readSectionedGrid(values);
+  if (!longTable && !table && !sectioned) {
     throw new UnmappedSourceDataError(
-      'That sheet has no header row this can read. Nothing was written. Two shapes are ' +
-        'understood: one row per month per division with Revenue/COGS/OpEx columns, or a grid ' +
-        'with Division and Line Item columns and one column per month.',
+      'That sheet has no header row this can read. Nothing was written. Three shapes are ' +
+        'understood: one row per month per division with Revenue/COGS/OpEx columns; a grid ' +
+        'with Division and Line Item columns and one column per month; or titled sections ' +
+        '("Monthly Rev $", "COGS Budget") each holding a Divisions × JAN…DEC grid.',
     );
+  }
+
+  if (sectioned) {
+    for (const cell of sectioned.cells) {
+      const divisionCode = lookup.byKey.get(cell.divisionLabel.toLowerCase());
+      if (!divisionCode) {
+        if (!/^(arg[\s_-]*total|total|consolidated)$/i.test(cell.divisionLabel)) {
+          unmappedDivisions.add(cell.divisionLabel);
+        }
+        continue;
+      }
+      rows.push({
+        periodMonth: cell.periodMonth,
+        divisionCode,
+        lineItem: cell.lineItem,
+        amount: new Decimal(cell.amount),
+      });
+    }
   }
 
   if (table) {
@@ -2522,29 +2771,39 @@ async function conformInTransaction(
             notes,
           );
           break;
-        case 'accounts':
-          rowsWritten += await conformAccounts(db, record.payload as QboQueryResponse);
-          break;
-        case 'classes': {
-          const unmapped = await checkClasses(db, record.payload as QboQueryResponse);
+        case 'accounts': {
+          const sync = await conformAccounts(db, record.payload as QboQueryResponse);
+          rowsWritten += sync.synced;
           notes.push(
-            unmapped.length
-              ? `${unmapped.length} QuickBooks class${unmapped.length === 1 ? '' : 'es'} map to no ` +
-                  `division: ${unmapped.join(', ')}. Any figure carried on them is currently ` +
-                  `excluded from ARG Total.`
-              : 'Every active QuickBooks class maps to a division.',
+            `${sync.synced} accounts in QuickBooks' chart of accounts (${sync.synced - sync.inactive} ` +
+              `active, ${sync.inactive} inactive or deleted, kept because they carry past balances): ` +
+              `${sync.added} new, ${sync.updated} updated, the rest unchanged.`,
           );
           break;
         }
-        default:
-          // The trial balance is landed and kept but not conformed: QuickBooks
-          // gives it no class dimension at all, so it produces no divisional
-          // rows. It is the company-level tie-out against the classed P&L and
-          // balance sheet, which is what the audit pack uses it for.
+        case 'classes': {
+          const { unmapped, recorded, active } = await checkClasses(db, record.payload as QboQueryResponse);
+          rowsWritten += recorded;
           notes.push(
-            `${batch.entity.replace(/_/g, ' ')} was landed in full and is available in the audit ` +
-              `pack, but it is not yet conformed into a fact table.`,
+            `${recorded} QuickBooks class${recorded === 1 ? '' : 'es'} (${active} active). ` +
+              (unmapped.length
+                ? `${unmapped.length} map to no division: ${unmapped.join(', ')}. Any figure carried ` +
+                  `on them is currently excluded from ARG Total.`
+                : 'Every active class maps to a division.'),
           );
+          break;
+        }
+        case 'trial_balance':
+          rowsWritten += await conformTrialBalance(
+            db,
+            loadRunId,
+            record.key,
+            record.payload as QboReport,
+            notes,
+          );
+          break;
+        default:
+          notes.push(`${batch.entity.replace(/_/g, ' ')} was landed but is not conformed into a fact table.`);
           return { rowsWritten, notes };
       }
     }
@@ -2630,8 +2889,9 @@ async function conformInTransaction(
     if (payload?.absent) {
       notes.push(
         `No ${batch.entity.replace(/_/g, ' ')} tab in the connected spreadsheet, so none was loaded. ` +
-          `Tabs it has: ${(payload.tabs ?? []).join(', ') || '(none listed)'}. A tab with "Forecast" ` +
-          `in its name is picked up on the next pull.`,
+          `Tabs it has: ${(payload.tabs ?? []).join(', ') || '(none listed)'}. A tab with ` +
+          `"${batch.entity === 'headcount' ? 'Headcount' : 'Forecast'}" in its name is picked up ` +
+          `on the next pull.`,
       );
       return { rowsWritten, notes };
     }

@@ -180,6 +180,10 @@ export const CHECK_NAMES: Record<string, { name: string; means: string }> = {
     name: 'Balance sheet balances',
     means: 'Total assets equal total liabilities plus equity, with equity loaded from QuickBooks.',
   },
+  TRIAL_BALANCE_BALANCES: {
+    name: 'Trial balance balances',
+    means: 'QuickBooks’ trial balance for the month has equal debits and credits.',
+  },
   AGING_TIES_TO_BALANCE_SHEET: {
     name: 'Aging ties to the balance sheet',
     means: 'Open invoices and bills add up to A/R and A/P on the balance sheet.',

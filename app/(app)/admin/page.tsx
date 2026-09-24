@@ -4,6 +4,7 @@ import { redirect } from 'next/navigation';
 import { CircleAlert, CircleCheck, CircleHelp, Download } from 'lucide-react';
 import { ConnectorCard } from '@/components/admin/connector-card';
 import { DataControls } from '@/components/admin/data-controls';
+import { PullIndicator } from '@/components/admin/pull-indicator';
 import { UserManager } from '@/components/admin/user-manager';
 import { ClassMapping } from '@/components/admin/class-mapping';
 import { DataHealthPanel } from '@/components/admin/data-health';
@@ -266,6 +267,7 @@ export default async function AdminPage({
       </header>
 
       <AdminTabBar tabs={tabs} active={tab} />
+      <PullIndicator onDataTab={tab === 'data'} />
 
       {connectError ? (
         <Banner tone="critical">{connectError}</Banner>

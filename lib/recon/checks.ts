@@ -593,6 +593,49 @@ export async function checkCompanyBalanceSheetBalances(
   });
 }
 
+/** QuickBooks' trial balance for the month: total debits equal total credits. */
+export async function checkTrialBalanceBalances(
+  db: Database,
+  options: ReconOptions = {},
+): Promise<ReconFinding[]> {
+  const rows = await db
+    .select()
+    .from(t.factCompanyTotal)
+    .where(
+      and(
+        eq(t.factCompanyTotal.statement, 'TB'),
+        sql`${t.factCompanyTotal.line} in ('total_debits', 'total_credits')`,
+        windowFilter(t.factCompanyTotal.periodMonth, options),
+      ),
+    );
+
+  const byMonth = new Map<string, { debits?: Decimal; credits?: Decimal }>();
+  for (const row of rows) {
+    const entry = byMonth.get(row.periodMonth) ?? {};
+    if (row.line === 'total_debits') entry.debits = d(row.amount);
+    else entry.credits = d(row.amount);
+    byMonth.set(row.periodMonth, entry);
+  }
+
+  return [...byMonth].map(([periodMonth, { debits = new Decimal(0), credits = new Decimal(0) }]) =>
+    verdict(
+      {
+        checkId: 'TRIAL_BALANCE_BALANCES',
+        checkName: 'Trial balance balances',
+        periodMonth,
+        divisionCode: null,
+        expected: debits,
+        actual: credits,
+        detail: '',
+      },
+      debits,
+      credits,
+      'Total debits equal total credits on the QuickBooks trial balance.',
+      (v) => `Debits minus credits is ${v.toFixed(2)} on the QuickBooks trial balance.`,
+    ),
+  );
+}
+
 export interface ReconSummary {
   findings: ReconFinding[];
   passed: number;
@@ -612,6 +655,7 @@ export async function runAllChecks(
     ...(await checkBalanceSheetBalances(db, options)),
     ...(await checkPlTiesToQuickBooks(db, options)),
     ...(await checkCompanyBalanceSheetBalances(db, options)),
+    ...(await checkTrialBalanceBalances(db, options)),
     ...(await checkAgingTiesToBalanceSheet(db, options)),
     ...(await checkNoUnmappedRecords(db)),
   ];

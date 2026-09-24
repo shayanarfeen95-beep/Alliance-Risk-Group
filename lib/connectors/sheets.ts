@@ -39,10 +39,10 @@ const ENTITIES: EntityDescriptor[] = [
   },
   {
     entity: 'forecast',
-    label: 'Forecast (rest of year)',
+    label: 'Forecast (monthly log)',
     cadence: 'MONTHLY',
     description:
-      'The latest reforecast by division and month, in the same shape as the budget. Optional: a spreadsheet with no forecast tab is not an error. Feeds the full-year outlook on the Finance page.',
+      'Forecast revenue, COGS and OpEx by division and month — in ARG’s workbook, the "Running Forecast Log" of locked forecasts (the FC columns; the actuals beside them come from QuickBooks). Optional. Feeds the full-year outlook on the Finance page wherever a month has a forecast.',
   },
   {
     entity: 'headcount',
@@ -115,7 +115,9 @@ const EXPLICIT_RANGES: Record<string, string | undefined> = {
 };
 
 /** Entities a spreadsheet may simply not have. Their absence is reported, not failed. */
-const OPTIONAL_ENTITIES = new Set(['forecast']);
+// Headcount too: ARG's workbook has no headcount tab today, and that is a gap
+// to report, not a reason to fail the whole Sheets pull.
+const OPTIONAL_ENTITIES = new Set(['forecast', 'headcount']);
 
 const RANGE_VARIABLE: Record<string, string> = {
   monthly_budget: 'SHEETS_RANGE_MONTHLY_BUDGET',
@@ -135,7 +137,11 @@ const RANGE_VARIABLE: Record<string, string> = {
  */
 const TAB_PATTERNS: Record<string, RegExp[]> = {
   tenx_budget: [/\b10\s*x\b/i, /\bten\s*x\b/i, /growth\s*plan/i],
-  forecast: [/re-?forecast/i, /forecast/i, /\bfcst\b/i, /outlook/i],
+  // A forecast LOG — one row per month per division — before an input sheet
+  // that forecasts a single month. ARG's workbook has both: "Monthly
+  // Forecasting" is the calculator for one month, "Running Forecast Log" is the
+  // record of every forecast locked, and only the log is a table of months.
+  forecast: [/forecast\s*log/i, /re-?forecast/i, /\bfcst\b/i, /outlook/i, /forecast/i],
   monthly_budget: [/monthly\s*budget/i, /\bbudget\b/i, /\bplan\b/i],
   headcount: [/head\s*count/i, /\bfte\b/i, /employees?/i, /staff/i],
 };
@@ -186,7 +192,7 @@ export async function listTabs(spreadsheetId: string): Promise<string[]> {
     try {
       const json = await proxy<{ sheets?: Array<{ properties?: { title?: string } }> }>({
         connectedAccountId,
-        endpoint: path,
+        endpoint: `https://sheets.googleapis.com${path}`,
         method: 'GET',
         query,
         headers: { accept: 'application/json' },
@@ -312,14 +318,55 @@ export async function readRange(spreadsheetId: string, range: string): Promise<s
     const connectedAccountId = credential.data.connectedAccountId;
     if (!connectedAccountId) throw new ConnectorNotConfiguredError('SHEETS');
 
-    const json = await proxy<{ values?: string[][] }>({
-      connectedAccountId,
-      endpoint: path,
-      method: 'GET',
-      query: { valueRenderOption: 'UNFORMATTED_VALUE' },
-      headers: { accept: 'application/json' },
-    });
-    return rangeValues(json, range, 'the Composio proxy');
+    /**
+     * The packaged tools first, the proxy last — the same order tab discovery
+     * uses, and for the same reason.
+     *
+     * Reading values went straight to the proxy, and the proxy handed back the
+     * body as a string that was not a Sheets response at all ("…came back from
+     * the Composio proxy as string"), so no budget ever loaded. Composio's own
+     * Sheets tools return a parsed `valueRanges` it maintains the shape of. The
+     * proxy stays as a last resort, addressed by absolute URL so it cannot be
+     * joined onto a base URL that already ends in /v4.
+     */
+    const attempts: string[] = [];
+    const tools: Array<[string, Record<string, unknown>]> = [
+      [
+        'GOOGLESHEETS_BATCH_GET',
+        { spreadsheet_id: spreadsheetId, ranges: [range], valueRenderOption: 'UNFORMATTED_VALUE' },
+      ],
+      [
+        'GOOGLESHEETS_VALUES_GET',
+        { spreadsheet_id: spreadsheetId, range, value_render_option: 'UNFORMATTED_VALUE' },
+      ],
+    ];
+
+    for (const [slug, args] of tools) {
+      try {
+        const result = await executeTool<Record<string, unknown>>(slug, {
+          connectedAccountId,
+          arguments: args,
+        });
+        return rangeValues(result, range, `Composio's ${slug}`);
+      } catch (error) {
+        attempts.push(`${slug}: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+
+    try {
+      const json = await proxy<{ values?: string[][] }>({
+        connectedAccountId,
+        endpoint: `https://sheets.googleapis.com${path}`,
+        method: 'GET',
+        query: { valueRenderOption: 'UNFORMATTED_VALUE' },
+        headers: { accept: 'application/json' },
+      });
+      return rangeValues(json, range, 'the Composio proxy');
+    } catch (error) {
+      attempts.push(`proxy: ${error instanceof Error ? error.message : String(error)}`);
+    }
+
+    throw new Error(`Could not read ${range}. Tried — ${attempts.join(' | ')}`);
   }
 
   const url = new URL(`https://sheets.googleapis.com${path}`);
@@ -342,11 +389,29 @@ export async function readRange(spreadsheetId: string, range: string): Promise<s
  * that is not shaped like a Sheets reply at all is a transport failure, and
  * saying so is what stops it being read as an empty budget.
  */
-function rangeValues(payload: unknown, range: string, via: string): string[][] {
-  const json = payload as { values?: unknown; range?: unknown; majorDimension?: unknown } | null;
+export function rangeValues(payload: unknown, range: string, via: string): string[][] {
+  let json = payload as {
+    values?: unknown;
+    range?: unknown;
+    majorDimension?: unknown;
+    valueRanges?: unknown;
+  } | null;
 
   if (!json || typeof json !== 'object') {
-    throw new Error(`${range} came back from ${via} as ${typeof json}, not as a Sheets response.`);
+    // Say what it WAS. "as string" alone sent everybody to check the link.
+    const excerpt =
+      typeof json === 'string'
+        ? `: "${String(json).replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 160)}"`
+        : '';
+    throw new Error(`${range} came back from ${via} as ${typeof json}, not as a Sheets response${excerpt}`);
+  }
+
+  // A batch read (the packaged tool, or values:batchGet) nests the one range
+  // asked for inside valueRanges.
+  if (Array.isArray(json.valueRanges)) {
+    const first = json.valueRanges[0] as typeof json | undefined;
+    if (!first || typeof first !== 'object') return [];
+    json = first;
   }
 
   if (Array.isArray(json.values)) return json.values as string[][];

@@ -707,7 +707,9 @@ export function loadFinance(
     budget: {
       scenario: budgetLoaded ? scenario : null,
       source: budgetLoaded
-        ? (scenarioInfo?.description ?? scenarioInfo?.name ?? scenario)
+        ? scenario === 'QBO_BUDGET' && !isConsolidated
+          ? `${scenarioInfo?.description ?? 'QuickBooks budget'} — kept at company level, so this division’s share is read from the Monthly Budget sheet (${bundle.scenarios.get('MONTHLY_BUDGET')?.description ?? 'Google Sheets'})`
+          : (scenarioInfo?.description ?? scenarioInfo?.name ?? scenario)
         : null,
       loaded: budgetLoaded,
       outlookSource,

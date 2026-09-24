@@ -93,7 +93,7 @@ export async function loadShellData(
     chooseDefaultMonth(
       monthRows.map((row) => row.periodMonth),
       config.get('DEFAULT_REPORTING_MONTH')?.value ?? null,
-    ) ?? '2026-03-01';
+    ) ?? `${new Date(Date.UTC(new Date().getUTCFullYear(), new Date().getUTCMonth() - 1, 1)).toISOString().slice(0, 7)}-01`;
 
   return {
     months: monthRows,

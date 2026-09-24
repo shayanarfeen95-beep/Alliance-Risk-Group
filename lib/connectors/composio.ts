@@ -439,6 +439,24 @@ function unwrap<T>(response: Record<string, unknown>, what: string): T {
     throw new Error(`Composio could not complete ${what}: ${error}`);
   }
 
+  // The proxy's envelope carries the provider's HTTP status. A 4xx or 5xx is a
+  // refusal whatever the body looks like — Google answers a bad range or a
+  // missing permission with a body that, unwrapped, reads as "not a Sheets
+  // response" and sends the reader to check a link that was fine.
+  const status = response.status ?? response.status_code ?? response.statusCode;
+  if (typeof status === 'number' && status >= 400) {
+    const raw = response.data ?? response.response_data;
+    const parsed = parseJsonText(raw) as { error?: { message?: string } | string; message?: string } | null;
+    const reason =
+      (parsed && typeof parsed === 'object'
+        ? typeof parsed.error === 'object'
+          ? parsed.error?.message
+          : (parsed.error ?? parsed.message)
+        : null) ??
+      String(raw ?? '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 200);
+    throw new Error(`${what} was refused by the provider with HTTP ${status}${reason ? `: ${reason}` : ''}`);
+  }
+
   const data = (response.data ?? response.response_data ?? response) as Record<string, unknown>;
 
   // The proxy nests the provider's own body one level deeper, inside an

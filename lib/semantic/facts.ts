@@ -382,6 +382,8 @@ export async function loadFactBundle(
               // Aging is a snapshot filed under the month it was taken, which can
               // be later than the month being viewed — so it is not windowed.
               sql`(${t.factCompanyTotal.statement} in ('AR_AGING', 'AP_AGING') or (${t.factCompanyTotal.periodMonth} >= ${from} and ${t.factCompanyTotal.periodMonth} <= ${to}))`,
+              // The trial balance is account-level audit detail; no KPI reads it.
+              sql`${t.factCompanyTotal.statement} <> 'TB'`,
               excludeSeed(t.factCompanyTotal.loadRunId as never),
             ),
           )
@@ -830,6 +832,13 @@ export function budgetFor(
   const budgeted = months.some((month) =>
     divisions.some((division) => bundle.budget.has(`${scenario}|${month}|${division}|${lineItem}`)),
   );
+  // ARG keeps its QuickBooks budget at company level — not split by class — and
+  // the same budget by division in the Monthly Budget sheet (the two agree to
+  // the cent on COGS and OpEx). So a division, or a total whose QuickBooks months
+  // are incomplete, reads the sheet rather than showing no budget at all.
+  if (!budgeted && scenario === 'QBO_BUDGET') {
+    return budgetFor(bundle, 'MONTHLY_BUDGET', months, divisions, lineItem, false);
+  }
   if (!budgeted) return null;
   return sumBudget(bundle, scenario, months, divisions, lineItem);
 }
