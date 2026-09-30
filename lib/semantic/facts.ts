@@ -11,9 +11,10 @@
  * the caller was not entitled to, because it was never loaded.
  */
 import Decimal from 'decimal.js';
-import { and, gte, inArray, lte, eq, notInArray, sql } from 'drizzle-orm';
+import { and, gte, inArray, isNull, lt, lte, eq, notInArray, or, sql } from 'drizzle-orm';
 import { getDataMode, seedLoadRunIds } from '@/lib/data-mode';
 import { d } from '@/lib/money';
+import type { AnyPgColumn } from 'drizzle-orm/pg-core';
 import * as t from '@/lib/db/schema';
 import type { Database } from '@/lib/db/client';
 import {
@@ -407,9 +408,42 @@ export async function loadFactBundle(
   const hubspotFrom = monthBounds(addMonths(period.month, -23)).start;
   const hubspotTo = monthBounds(period.month).endExclusive;
 
+  // HubSpot tables are large (ARG has tens of thousands of contacts and
+  // companies) and every dashboard view opens a bundle, so what is read here is
+  // what the database sends on every page. Scope, window and columns are all
+  // applied in SQL: reading the tables whole ran the free Neon plan out of data
+  // transfer and took the site down. A row with no division stays in, as the
+  // in-memory scope below has always kept it.
+  const dealInScope = or(isNull(t.factDeal.divisionCode), inArray(t.factDeal.divisionCode, scopedCodes));
+  const contactInScope = or(isNull(t.factContact.divisionCode), inArray(t.factContact.divisionCode, scopedCodes));
+  const inHubspotWindow = (column: AnyPgColumn) =>
+    and(gte(column, hubspotFrom), lt(column, hubspotTo));
+
   const [dealRows, proposalRows, stageRows, contactRows, meetingRows, companyRows, dealStageRows] =
     await Promise.all([
-    db.select().from(t.factDeal).where(excludeSeed(t.factDeal.loadRunId as never)),
+    // Deals are not windowed: pipeline as of month end includes deals opened
+    // long before it.
+    db
+      .select({
+        dealId: t.factDeal.dealId,
+        divisionCode: t.factDeal.divisionCode,
+        dealName: t.factDeal.dealName,
+        amount: t.factDeal.amount,
+        dealstage: t.factDeal.dealstage,
+        pipeline: t.factDeal.pipeline,
+        isClosedWon: t.factDeal.isClosedWon,
+        isClosed: t.factDeal.isClosed,
+        createdate: t.factDeal.createdate,
+        closedate: t.factDeal.closedate,
+        enteredProposalAt: t.factDeal.enteredProposalAt,
+        ownerId: t.factDeal.ownerId,
+        ownerName: t.factDeal.ownerName,
+        sourceLabel: t.factDeal.sourceLabel,
+        dealType: t.factDeal.dealType,
+        companyId: t.factDeal.companyId,
+      })
+      .from(t.factDeal)
+      .where(and(dealInScope, excludeSeed(t.factDeal.loadRunId as never))),
     db
       .select({
         dealId: t.factDealStageHistory.dealId,
@@ -443,7 +477,33 @@ export async function loadFactBundle(
           excludeSeed(t.factDealStageHistory.loadRunId as never),
         ),
       ),
-    db.select().from(t.factContact).where(excludeSeed(t.factContact.loadRunId as never)),
+    // Every contact reading counts a lifecycle date inside a window the
+    // dashboards can reach, so a contact with none of them there cannot change
+    // any figure.
+    db
+      .select({
+        contactId: t.factContact.contactId,
+        divisionCode: t.factContact.divisionCode,
+        lifecycleStage: t.factContact.lifecycleStage,
+        originalSource: t.factContact.originalSource,
+        becameLeadDate: t.factContact.becameLeadDate,
+        becameCustomerDate: t.factContact.becameCustomerDate,
+        becameMqlDate: t.factContact.becameMqlDate,
+        becameSqlDate: t.factContact.becameSqlDate,
+      })
+      .from(t.factContact)
+      .where(
+        and(
+          contactInScope,
+          or(
+            inHubspotWindow(t.factContact.becameLeadDate),
+            inHubspotWindow(t.factContact.becameCustomerDate),
+            inHubspotWindow(t.factContact.becameMqlDate),
+            inHubspotWindow(t.factContact.becameSqlDate),
+          ),
+          excludeSeed(t.factContact.loadRunId as never),
+        ),
+      ),
     db
       .select()
       .from(t.factMeeting)
@@ -454,7 +514,23 @@ export async function loadFactBundle(
           excludeSeed(t.factMeeting.loadRunId as never),
         ),
       ),
-    db.select().from(t.factCompany).where(excludeSeed(t.factCompany.loadRunId as never)),
+    // A company is read for its ICP tier, which only matters for a deal that
+    // names it.
+    db
+      .select({ companyId: t.factCompany.companyId, name: t.factCompany.name, icpTier: t.factCompany.icpTier })
+      .from(t.factCompany)
+      .where(
+        and(
+          inArray(
+            t.factCompany.companyId,
+            db
+              .select({ companyId: t.factDeal.companyId })
+              .from(t.factDeal)
+              .where(and(dealInScope, sql`${t.factDeal.companyId} is not null`)),
+          ),
+          excludeSeed(t.factCompany.loadRunId as never),
+        ),
+      ),
     // Reference data, not a fact: stages describe the pipeline itself and carry
     // no period, so they are read whole rather than windowed.
     db.select().from(t.dimDealStage),
