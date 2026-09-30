@@ -6,9 +6,12 @@ import * as t from '@/lib/db/schema';
 import { can } from '@/lib/auth/scope';
 import type { SessionUser } from '@/lib/auth/session';
 import { formatMonth, monthRange, addMonths, type MonthKey } from '@/lib/semantic/periods';
-import { KPI_REGISTRY, getKpiDefinition, isSpecKpi } from '@/lib/semantic/registry';
-import { resolveKpi, CONSOLIDATED_CODE, type SemanticSession } from '@/lib/semantic/resolve';
-import { sumPl, key } from '@/lib/semantic/facts';
+import { KPI_REGISTRY, getKpiDefinition, isSpecKpi, preferredBudgetScenario } from '@/lib/semantic/registry';
+import { openSemanticSession, resolveKpi, CONSOLIDATED_CODE, type SemanticSession } from '@/lib/semantic/resolve';
+import { loadFinance, type Figure } from '@/lib/dashboards/finance';
+import { buildDivisionColorMap } from '@/lib/charts/colors';
+import { formatNumber } from '@/lib/format';
+import { companyPl, hasPl, sumPl, key } from '@/lib/semantic/facts';
 import { connectorStatuses, getConnector, type SourceSystemCode } from '@/lib/connectors';
 import { executeViewSpec, viewSpecJsonSchema, ViewSpecError } from './viewspec';
 import { executeSavedView, pipelineViewJsonSchema } from '@/lib/views/spec';
@@ -179,7 +182,7 @@ const getKpi: ToolDefinition = {
       options: {
         type: 'object',
         description:
-          'Per-metric options. cash_runway accepts {"variant":"trailing_3m"}; budget_attainment accepts {"scenario":"MONTHLY_BUDGET"|"TENX","lineItem":"revenue"|"cogs"|"opex","scope":"month"|"ytd"}.',
+          'Per-metric options. cash_runway accepts {"variant":"trailing_3m"}; budget_attainment accepts {"scenario":"QBO_BUDGET"|"MONTHLY_BUDGET"|"TENX"|"FORECAST" (omit for the default budget, QuickBooks first),"lineItem":"revenue"|"cogs"|"opex","scope":"month"|"ytd"}.',
         additionalProperties: true,
       },
     },
@@ -233,7 +236,8 @@ const comparePeriods: ToolDefinition = {
     }
 
     if (against === 'budget' || against === 'tenx') {
-      const scenario = against === 'tenx' ? 'TENX' : 'MONTHLY_BUDGET';
+      // The budget ARG measures against: QuickBooks' own when one is loaded.
+      const scenario = against === 'tenx' ? 'TENX' : preferredBudgetScenario(session.bundle);
 
       /**
        * Which budget lines this metric is made of.
@@ -515,6 +519,388 @@ const getVarianceDrivers: ToolDefinition = {
   },
 };
 
+/**
+ * "Where did you get the $321,078 revenue number?"
+ *
+ * The question ARG's controller actually asked, and the one the assistant
+ * answered with a report on seeded data, an ISO date and a "raw value". A
+ * finance reader wants what a controller would say: which QuickBooks report,
+ * which accounts, how it splits by division, and whether it agrees with
+ * QuickBooks' own total. This returns exactly that, already formatted.
+ */
+const explainFigure: ToolDefinition = {
+  name: 'explain_figure',
+  description:
+    'Explain where a profit-and-loss figure comes from: the QuickBooks report and basis, the accounts that make it up, the split by division, and whether it ties to QuickBooks\' own company total. Call this whenever the user asks where a number came from, how it was calculated, or why it differs from their own figures.',
+  input_schema: {
+    type: 'object',
+    required: ['line'],
+    properties: {
+      line: {
+        type: 'string',
+        enum: ['revenue', 'cogs', 'gross_profit', 'opex', 'net_profit'],
+        description: 'The P&L line being asked about.',
+      },
+      division: DIVISION_ARG,
+      month: MONTH_ARG,
+    },
+  },
+  async run(input, context) {
+    const { session } = context;
+    const month = normaliseMonth(input.month, session.period.month);
+    const division = divisionOf(input.division, context);
+    const line = String(input.line) as 'revenue' | 'cogs' | 'gross_profit' | 'opex' | 'net_profit';
+    const divisions = division === CONSOLIDATED_CODE ? session.visibleDivisions : [division];
+    const { bundle } = session;
+    const usd = (value: number) =>
+      value.toLocaleString('en-US', { style: 'currency', currency: 'USD', minimumFractionDigits: 2 });
+
+    if (!hasPl(bundle, month, divisions)) {
+      return {
+        result: {
+          available: false,
+          explanation: `No QuickBooks profit and loss is loaded for ${formatMonth(month)}.`,
+        },
+      };
+    }
+
+    const pick = (pl: ReturnType<typeof sumPl>) =>
+      line === 'revenue'
+        ? pl.revenue
+        : line === 'cogs'
+          ? pl.cogs
+          : line === 'opex'
+            ? pl.opex
+            : line === 'gross_profit'
+              ? pl.revenue.minus(pl.cogs)
+              : pl.revenue.minus(pl.cogs).minus(pl.opex);
+
+    const total = pick(sumPl(bundle, month, divisions));
+    const byDivision = divisions.map((code) => ({
+      division: bundle.divisions.find((d) => d.divisionCode === code)?.divisionName ?? code,
+      amount: usd(pick(sumPl(bundle, month, [code])).toNumber()),
+    }));
+
+    const accountLines =
+      line === 'revenue' ? ['revenue'] : line === 'cogs' ? ['cogs', 'payroll_direct'] : line === 'opex' ? ['opex', 'payroll_expense'] : [];
+    const accounts = new Map<string, Decimal>();
+    for (const code of divisions) {
+      for (const detail of bundle.gl.get(key(month, code)) ?? []) {
+        if (!accountLines.includes(detail.reportingLine ?? '')) continue;
+        accounts.set(detail.accountName, (accounts.get(detail.accountName) ?? new Decimal(0)).plus(detail.amount));
+      }
+    }
+
+    const company = division === CONSOLIDATED_CODE ? companyPl(bundle, month) : null;
+    const quickbooksTotal = company ? pick(company) : null;
+    const difference = quickbooksTotal ? total.minus(quickbooksTotal) : null;
+
+    const lineName = {
+      revenue: 'Revenue',
+      cogs: 'Cost of goods sold',
+      gross_profit: 'Gross profit',
+      opex: 'Operating expenses',
+      net_profit: 'Net profit',
+    }[line];
+
+    return {
+      result: {
+        figure: `${lineName}, ${division === CONSOLIDATED_CODE ? 'ARG Total' : byDivision[0]!.division}, ${formatMonth(month)}: ${usd(total.toNumber())}`,
+        source: `QuickBooks Online Profit and Loss report for ${formatMonth(month)}, ${session.accountingBasis} basis, summarised by class. Each QuickBooks class maps to a division; ARG Total is the four divisions added together.`,
+        calculation:
+          line === 'gross_profit'
+            ? 'Revenue minus cost of goods sold.'
+            : line === 'net_profit'
+              ? 'Gross profit minus operating expenses.'
+              : `The sum of every ${lineName.toLowerCase()} account on the QuickBooks P&L, including sub-accounts and amounts posted directly to parent accounts.`,
+        byDivision,
+        accounts: [...accounts.entries()]
+          .sort((a, b) => b[1].abs().comparedTo(a[1].abs()))
+          .slice(0, 12)
+          .map(([name, amount]) => ({ account: name, amount: usd(amount.toNumber()) })),
+        tiesToQuickBooks: quickbooksTotal
+          ? {
+              quickbooksCompanyTotal: usd(quickbooksTotal.toNumber()),
+              difference: usd(difference!.toNumber()),
+              ties: difference!.abs().lessThanOrEqualTo(Decimal.max(1, quickbooksTotal.abs().times(0.001))),
+              note: 'Any difference sits on QuickBooks classes that are not a division (Not Specified, Z Alloc).',
+            }
+          : 'Division-level figure; QuickBooks has no company total to compare a single division against.',
+        booksClosed: bundle.periodState.get(month)?.isClosed ?? false,
+        instruction:
+          'Answer like a controller: the figure, the QuickBooks report it comes from, the division split and the largest accounts, and whether it ties to QuickBooks. Use the formatted amounts exactly as given and write months as "August 2026". If the books are not closed, say the figure can still change. Do not mention internal tables, raw values, load windows or seeded data.',
+      },
+      activity: `Explained ${lineName.toLowerCase()} · ${division} · ${formatMonth(month)}`,
+    };
+  },
+};
+
+/**
+ * A session anchored on another month, when a question is about one.
+ *
+ * The conversation's session is loaded for the month on screen, and its facts
+ * reach fifteen months back. A question about a different month gets a session
+ * of its own rather than a quiet "no data" for months that were simply never
+ * loaded into this one.
+ */
+async function sessionFor(context: ToolContext, month: MonthKey): Promise<SemanticSession> {
+  return month === context.session.period.month
+    ? context.session
+    : openSemanticSession(context.db, context.user, month);
+}
+
+const money = (value: number | null) => formatNumber(value, 'currency');
+const pct = (value: number | null) => formatNumber(value, 'percent');
+
+/** A figure block, formatted, with the budget named where there is one. */
+function figureText(f: Figure, kind: 'money' | 'percent') {
+  const value = kind === 'percent' ? pct : money;
+  return {
+    actual: value(f.actual),
+    budget: value(f.budget),
+    variance:
+      f.variance === null
+        ? '—'
+        : kind === 'percent'
+          ? `${f.variance >= 0 ? '+' : '−'}${Math.abs(f.variance * 100).toFixed(1)} pts`
+          : `${f.variance >= 0 ? '+' : '−'}${money(Math.abs(f.variance))}`,
+    percentOfBudget: f.attainment === null ? '—' : formatNumber(f.attainment, 'ratio'),
+  };
+}
+
+/**
+ * Everything on the Finance page, as data.
+ *
+ * The one call that answers "how did we do", "are we on budget", "where will
+ * the year land", "what is working capital" and "how old is our A/R" — from the
+ * same model the Finance page renders, so the answer and the screen are the same
+ * numbers by construction.
+ */
+const getFinanceOverview: ToolDefinition = {
+  name: 'get_finance_overview',
+  description:
+    'The full Finance picture for a division and month, exactly as the Finance page shows it: the P&L for the month, year to date and full year (actual, budget, variance, % of budget, outlook), margins, change vs prior month / same month last year / last year YTD, the tie-out to QuickBooks, working capital and liquidity ratios, the balance sheet check, A/R and A/P aging, and progress against the 10X plan. Use it for any broad performance, budget, outlook, liquidity or collections question.',
+  input_schema: {
+    type: 'object',
+    properties: { division: DIVISION_ARG, month: MONTH_ARG },
+  },
+  async run(input, context) {
+    const month = normaliseMonth(input.month, context.session.period.month);
+    const division = divisionOf(input.division, context);
+    const session = await sessionFor(context, month);
+    const model = loadFinance(session, division, buildDivisionColorMap(session.bundle.divisions));
+
+    return {
+      result: {
+        scope: `${model.divisionLabel}, ${model.monthLabel}`,
+        booksClosed: session.periodIsClosed,
+        budget: model.budget.loaded ? model.budget.source : 'No budget loaded for this period.',
+        outlookMethod: model.budget.outlookSource,
+        profitAndLoss: model.lines.map((line) => ({
+          line: line.label,
+          month: figureText(line.month, line.kind),
+          yearToDate: { period: model.ytdLabel, ...figureText(line.ytd, line.kind) },
+          fullYear: {
+            budget: line.kind === 'percent' ? pct(line.fullYear.budget) : money(line.fullYear.budget),
+            outlook: line.kind === 'percent' ? pct(line.fullYear.outlook) : money(line.fullYear.outlook),
+          },
+          ...(line.isMemo ? { note: 'Memo line — already inside the total above; never subtract it again.' } : {}),
+        })),
+        change: model.changes.map((row) => ({
+          line: row.label,
+          vsPriorMonth: { period: model.priorMonthLabel, was: money(row.vsPriorMonth.base), change: money(row.vsPriorMonth.dollars), changePercent: pct(row.vsPriorMonth.percent) },
+          vsSameMonthLastYear: { period: model.priorYearLabel, was: money(row.vsPriorYear.base), change: money(row.vsPriorYear.dollars), changePercent: pct(row.vsPriorYear.percent) },
+          ytdVsLastYearYtd: { period: `${model.ytdLabel} vs ${model.priorYtdLabel}`, now: money(row.ytdVsPriorYtd.current), was: money(row.ytdVsPriorYtd.base), change: money(row.ytdVsPriorYtd.dollars), changePercent: pct(row.ytdVsPriorYtd.percent) },
+          favourableWhen: row.higherIsBetter ? 'higher' : 'lower',
+        })),
+        tiesToQuickBooks: model.tieOut
+          ? {
+              ties: model.tieOut.allTie,
+              lines: model.tieOut.rows.map((row) => ({
+                line: row.label,
+                quickbooksTotal: formatNumber(row.quickbooks, 'currency_precise'),
+                fourDivisions: formatNumber(row.divisions, 'currency_precise'),
+                notInADivision: formatNumber(-row.difference, 'currency_precise'),
+                ...(row.unassignedDetail ? { onClassesThatAreNotDivisions: row.unassignedDetail } : {}),
+                explainedByThoseClasses: row.ties,
+              })),
+            }
+          : 'Only checked at ARG Total.',
+        workingCapital: model.workingCapital.unavailable
+          ? model.workingCapital.unavailable
+          : {
+              workingCapital: money(model.workingCapital.workingCapital),
+              currentAssets: money(model.workingCapital.currentAssets),
+              currentLiabilities: money(model.workingCapital.currentLiabilities),
+              currentRatio: formatNumber(model.workingCapital.currentRatio, 'multiple'),
+              cash: money(model.workingCapital.cash),
+              daysSalesOutstanding: formatNumber(model.workingCapital.dso, 'days'),
+              daysPayableOutstanding: formatNumber(model.workingCapital.dpo, 'days'),
+              cashConversionCycle: formatNumber(model.workingCapital.ccc, 'days'),
+              cashRunwayMonths: formatNumber(model.workingCapital.runwaySingleMonth, 'months'),
+              cashRunwayTrailing3mMonths: formatNumber(model.workingCapital.runwayTrailing, 'months'),
+            },
+        balanceSheetBalances: model.balanceCheck
+          ? model.balanceCheck.passes
+            ? 'Yes'
+            : `No — out by ${money(model.balanceCheck.difference)}`
+          : model.balanceSheetUnavailable ?? 'No balance sheet loaded.',
+        receivables: model.aging.ar
+          ? {
+              total: money(model.aging.ar.total),
+              asOf: model.aging.ar.asOf,
+              over60Days: `${money(model.aging.ar.over60)} (${pct(model.aging.ar.total ? model.aging.ar.over60 / model.aging.ar.total : null)})`,
+              buckets: model.aging.ar.buckets.map((b) => ({ bucket: b.label, amount: money(b.amount), share: pct(b.share) })),
+            }
+          : 'No open invoices loaded.',
+        payables: model.aging.ap
+          ? { total: money(model.aging.ap.total), asOf: model.aging.ap.asOf, buckets: model.aging.ap.buckets.map((b) => ({ bucket: b.label, amount: money(b.amount), share: pct(b.share) })) }
+          : 'No open bills loaded.',
+        tenX: model.tenX
+          ? model.tenX.rows.map((row) => ({
+              line: row.label,
+              annualTarget: money(row.annualTarget),
+              ytdTarget: money(row.ytdTarget),
+              ytdActual: money(row.ytdActual),
+              varianceToGoal: money(row.ytdVariance),
+              percentOfGoal: formatNumber(row.ytdAttainment, 'ratio'),
+              fullYearAtCurrentPace: money(row.projectedFullYear),
+              paceGap: money(row.paceGap),
+            }))
+          : 'The 10X plan covers 2026–2029 only.',
+        byDivision: model.divisionBreakdown?.map((row) => ({
+          division: row.label,
+          revenue: money(row.revenue),
+          shareOfRevenue: pct(row.revenueShare),
+          grossMargin: pct(row.grossMargin),
+          netProfit: money(row.netProfit),
+          netMargin: pct(row.netMargin),
+          ytdRevenue: money(row.ytdRevenue),
+          ytdNetProfit: money(row.ytdNetProfit),
+        })),
+        verifyAt: `/finance?month=${month.slice(0, 7)}&division=${division}`,
+        instruction:
+          'Quote these figures exactly as formatted. Lead with what the reader asked; name the period and the budget for any comparison. If the books are not closed, say the figures can still change.',
+      },
+      activity: `Read the Finance overview · ${model.divisionLabel} · ${model.monthLabel}`,
+    };
+  },
+};
+
+/** One metric across consecutive months — trends, seasonality, run of results. */
+const getTrend: ToolDefinition = {
+  name: 'get_trend',
+  description:
+    'One metric for one division across consecutive months (up to 15, ending at a chosen month), with the highest, lowest and average months and the change from first to last. Use it for "how has X moved", seasonality and run-of-results questions. To SHOW the trend, follow with make_chart.',
+  input_schema: {
+    type: 'object',
+    required: ['metric'],
+    properties: {
+      metric: { type: 'string', description: 'Metric id from list_kpis.' },
+      division: DIVISION_ARG,
+      toMonth: { type: 'string', description: 'Last month, as YYYY-MM. Defaults to the month on screen.' },
+      months: { type: 'number', description: 'How many months, 2–15. Defaults to 12.' },
+    },
+  },
+  async run(input, context) {
+    const definition = getKpiDefinition(String(input.metric));
+    if (!definition) return { result: { error: `Unknown metric "${String(input.metric)}". Call list_kpis first.` } };
+    const to = normaliseMonth(input.toMonth, context.session.period.month);
+    const count = Math.min(Math.max(Math.round(Number(input.months ?? 12)) || 12, 2), 15);
+    const division = divisionOf(input.division, context);
+    const session = await sessionFor(context, to);
+    const months = monthRange(addMonths(to, -(count - 1)), to);
+
+    const points = months.map((month) => {
+      const result = resolveKpi(session, definition.id, division, { month });
+      return {
+        month,
+        label: formatMonth(month),
+        value: result.value?.toNumber() ?? null,
+        formatted: result.unavailable ? null : result.formatted,
+        preliminary: result.periodState === 'OPEN',
+      };
+    });
+    const present = points.filter((p) => p.value !== null) as Array<(typeof points)[number] & { value: number }>;
+    const fmt = (v: number) => formatNumber(v, definition.format as Parameters<typeof formatNumber>[1]);
+    const best = present.length ? present.reduce((a, b) => ((definition.higherIsBetter ? b.value > a.value : b.value < a.value) ? b : a)) : null;
+    const worst = present.length ? present.reduce((a, b) => ((definition.higherIsBetter ? b.value < a.value : b.value > a.value) ? b : a)) : null;
+    const first = present[0];
+    const last = present[present.length - 1];
+
+    return {
+      result: {
+        metric: definition.name,
+        division,
+        months: points.map((p) => ({ month: p.label, value: p.formatted ?? 'not available', ...(p.preliminary ? { preliminary: true } : {}) })),
+        summary: present.length
+          ? {
+              bestMonth: `${best!.label}: ${fmt(best!.value)}`,
+              worstMonth: `${worst!.label}: ${fmt(worst!.value)}`,
+              average: fmt(present.reduce((sum, p) => sum + p.value, 0) / present.length),
+              firstToLast: first && last && first !== last ? `${first.label} ${fmt(first.value)} → ${last.label} ${fmt(last.value)}` : null,
+              monthsWithData: `${present.length} of ${points.length}`,
+            }
+          : 'No month in this range has data for this metric and division.',
+        favourableWhen: definition.higherIsBetter ? 'higher' : 'lower',
+        instruction: 'Quote the formatted values. "Best" and "worst" already account for whether higher is better.',
+      },
+      activity: `Read ${definition.name} over ${count} months · ${division}`,
+    };
+  },
+};
+
+/** Every division on one metric, ranked. */
+const compareDivisions: ToolDefinition = {
+  name: 'compare_divisions',
+  description:
+    'One metric for every division you can see, plus ARG Total, for a month — ranked best to worst (direction already accounted for), with each division\'s share of the total for dollar metrics. Use it for "which division", "who is driving", "rank" and "mix" questions.',
+  input_schema: {
+    type: 'object',
+    required: ['metric'],
+    properties: { metric: { type: 'string', description: 'Metric id from list_kpis.' }, month: MONTH_ARG },
+  },
+  async run(input, context) {
+    const definition = getKpiDefinition(String(input.metric));
+    if (!definition) return { result: { error: `Unknown metric "${String(input.metric)}". Call list_kpis first.` } };
+    const month = normaliseMonth(input.month, context.session.period.month);
+    const session = await sessionFor(context, month);
+
+    const rows = session.visibleDivisions.map((code) => {
+      const result = resolveKpi(session, definition.id, code, { month });
+      return {
+        division: session.bundle.divisions.find((d) => d.divisionCode === code)?.divisionName ?? code,
+        value: result.value?.toNumber() ?? null,
+        formatted: result.unavailable ? `not available — ${result.unavailable.detail}` : result.formatted,
+      };
+    });
+    const total = session.consolidatedAvailable ? resolveKpi(session, definition.id, CONSOLIDATED_CODE, { month }) : null;
+    const totalValue = total?.value?.toNumber() ?? null;
+    const additive = definition.format === 'currency' && definition.category === 'base';
+
+    const ranked = [...rows]
+      .filter((row) => row.value !== null)
+      .sort((a, b) => (definition.higherIsBetter ? b.value! - a.value! : a.value! - b.value!));
+
+    return {
+      result: {
+        metric: definition.name,
+        period: formatMonth(month),
+        ranking: ranked.map((row, index) => ({
+          rank: index + 1,
+          division: row.division,
+          value: row.formatted,
+          ...(additive && totalValue ? { shareOfTotal: pct(row.value! / totalValue) } : {}),
+        })),
+        notAvailable: rows.filter((row) => row.value === null).map((row) => ({ division: row.division, why: row.formatted })),
+        argTotal: total ? (total.unavailable ? total.unavailable.detail : total.formatted) : 'Not visible to this user.',
+        favourableWhen: definition.higherIsBetter ? 'higher' : 'lower',
+      },
+      activity: `Compared ${definition.name} across divisions · ${formatMonth(month)}`,
+    };
+  },
+};
+
 const getPeriodState: ToolDefinition = {
   name: 'get_period_state',
   description:
@@ -670,8 +1056,12 @@ const planExtraction: ToolDefinition = {
 
     const fallbackFrom = addMonths(context.session.period.month, -2);
     const windowStart = normaliseMonth(input.fromMonth, fallbackFrom);
-    const windowEnd = normaliseMonth(input.toMonth, context.session.period.month);
-    const months = monthRange(windowStart, windowEnd);
+    // Never past the month we are in: QuickBooks answers a future month with
+    // whatever is already dated into it, which lands as a real-looking P&L.
+    const thisMonth = `${new Date().toISOString().slice(0, 7)}-01`;
+    const requestedEnd = normaliseMonth(input.toMonth, context.session.period.month);
+    const windowEnd = requestedEnd > thisMonth ? thisMonth : requestedEnd;
+    const months = monthRange(windowStart > windowEnd ? windowEnd : windowStart, windowEnd);
 
     // Closed months are frozen. Saying so up front is better than proposing a
     // pull that the database would reject.
@@ -763,7 +1153,7 @@ const getLoadHistory: ToolDefinition = {
 const getDataProvenance: ToolDefinition = {
   name: 'get_data_provenance',
   description:
-    'Report where the figures currently in the warehouse came from: which source system wrote each fact table, when, and whether any of it is still seeded demonstration data rather than the live books. Call this whenever the user asks whether the numbers are real, live, seeded or up to date.',
+    'Report which source systems loaded the warehouse and when. Use this ONLY when the user asks whether the data is live, real or up to date — never to explain where a particular figure comes from (use explain_figure for that).',
   input_schema: { type: 'object', properties: {} },
   async run(_input, context) {
     const [plSources, dealCount, budgetSources, lastLoads, connectors] = await Promise.all([
@@ -1034,6 +1424,10 @@ export const AGENT_TOOLS: ToolDefinition[] = [
   getKpi,
   comparePeriods,
   getPlStatement,
+  getFinanceOverview,
+  getTrend,
+  compareDivisions,
+  explainFigure,
   getVarianceDrivers,
   getPeriodState,
   getReconStatus,

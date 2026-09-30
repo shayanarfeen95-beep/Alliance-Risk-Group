@@ -6,6 +6,15 @@ import type { SessionUser } from '@/lib/auth/session';
 import { can } from '@/lib/auth/scope';
 import { getConnector, CONNECTORS, type SourceSystemCode } from '@/lib/connectors';
 import { conformBatch } from './conform';
+import {
+  compareBatch,
+  isFingerprinted,
+  isMonthly,
+  planReportMonths,
+  saveFingerprints,
+  touchFingerprints,
+} from './fingerprint';
+import { monthsInWindow } from '@/lib/connectors/types';
 
 /**
  * Running a load.
@@ -66,6 +75,12 @@ interface RunPlan {
   slices?: number;
   /** Newest source-side change seen so far in this run, across all its slices. */
   watermark?: string | null;
+  /** For a monthly report: the months this run fetches (decided on its first slice). */
+  months?: string[] | null;
+  /** What the first slice decided about which months to fetch, for the log. */
+  planNotes?: string[];
+  /** Every note the run has produced, across slices, for the pull log. */
+  notes?: string[];
 }
 
 /** The later of what the run has already seen and what this slice just saw. */
@@ -210,14 +225,50 @@ export async function executeLoadRun(
   };
 
   try {
+    const window = { start: run.windowStart!, end: run.windowEnd! };
+    const incremental = !options.fullRefresh && isFingerprinted(run.sourceSystem, run.entity);
+
+    // Which months could have changed — decided once, on the first slice, and
+    // carried on the run so later slices fetch the same set.
+    let months = priorPlan.months ?? null;
+    let planNotes = priorPlan.planNotes ?? [];
+    if (incremental && isMonthly(run.sourceSystem, run.entity) && slices === 1 && !priorPlan.cursor) {
+      const plan = await planReportMonths(db, connector, run.sourceSystem, run.entity, window);
+      months = plan.months;
+      planNotes = plan.notes;
+      const skipped = monthsInWindow(window).filter((month) => !plan.months.includes(month));
+      if (skipped.length) await touchFingerprints(db, run.sourceSystem, run.entity, skipped);
+    }
+
+    // Nothing could have changed: the run is complete without a single request.
+    if (months && months.length === 0) {
+      await db
+        .update(t.loadRun)
+        .set({
+          status: 'SUCCEEDED',
+          finishedAt: new Date(),
+          plan: { ...priorPlan, cursor: null, slices, months, planNotes, notes: planNotes },
+        })
+        .where(eq(t.loadRun.id, run.id));
+      await db.insert(t.auditEvent).values({
+        userId: user.id,
+        action: auditAction,
+        entity: 'load_run',
+        entityId: run.id,
+        detail: { source: run.sourceSystem, entity: run.entity, records: 0, rowsWritten: 0, slices, notes: planNotes },
+      });
+      return { ...base, ok: true, done: true, notes: planNotes };
+    }
+
     const batch = await connector.fetch(
       run.entity,
-      { start: run.windowStart!, end: run.windowEnd! },
+      window,
       {
         cursor: priorPlan.cursor ?? null,
         deadline: options.deadline ?? Date.now() + SLICE_FETCH_BUDGET_MS,
         maxRecords: options.maxRecords ?? SLICE_MAX_RECORDS,
         since,
+        months,
       },
     );
 
@@ -248,12 +299,25 @@ export async function executeLoadRun(
     // Then conform, in the same run. Landing data and stopping was the gap that
     // let a connected source and a seeded dashboard coexist with nothing
     // anywhere saying the two were unrelated.
-    const conformed = await conformBatch(db, run.id, batch);
+    // Only what is new or different goes on to be imported. Fingerprints are
+    // computed on "Re-import everything" too, so the next ordinary pull can
+    // compare against what it wrote.
+    const comparison = isFingerprinted(run.sourceSystem, run.entity)
+      ? await compareBatch(db, batch, incremental)
+      : null;
+    const toConform = comparison?.batch ?? batch;
+    const conformed = toConform.records.length
+      ? await conformBatch(db, run.id, toConform)
+      : { rowsWritten: 0, notes: [] as string[] };
+    if (comparison) await saveFingerprints(db, run.sourceSystem, run.entity, comparison, run.id);
 
     // Say so when a pull is continuing rather than starting over. Without this
     // a resumed pull and a restarted one look identical from the outside, which
     // is exactly the doubt this whole mechanism exists to remove.
-    const notes = [...conformed.notes];
+    const notes = [...(slices === 1 ? planNotes : []), ...(comparison?.notes ?? []), ...conformed.notes];
+    if (options.fullRefresh && isFingerprinted(run.sourceSystem, run.entity) && slices === 1) {
+      notes.unshift('Re-import everything: every month and list was fetched and imported again, changed or not.');
+    }
     if (options.continuation) {
       notes.unshift('Continued from where the last pull stopped, rather than starting again.');
     }
@@ -297,6 +361,9 @@ export async function executeLoadRun(
           ...priorPlan,
           cursor: batch.nextCursor ?? null,
           slices,
+          months,
+          planNotes,
+          notes: [...(priorPlan.notes ?? []), ...notes].slice(-60),
           // Carried across slices so the finishing one can commit the newest
           // timestamp the whole run saw, not just the newest in its own page.
           watermark: highWatermark(priorPlan, batch.watermark ?? null)?.toISOString() ?? null,

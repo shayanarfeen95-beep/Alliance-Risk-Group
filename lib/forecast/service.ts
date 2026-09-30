@@ -1,6 +1,6 @@
 import 'server-only';
 import Decimal from 'decimal.js';
-import { and, asc, desc, eq, sql } from 'drizzle-orm';
+import { and, inArray, asc, desc, eq, sql } from 'drizzle-orm';
 import { getDb } from '@/lib/db/client';
 import * as t from '@/lib/db/schema';
 import { d } from '@/lib/money';
@@ -354,27 +354,41 @@ export async function officialForecast(
   };
 }
 
-/** Budgeted revenue per division for a month — the base the forecast scales. */
+/**
+ * Budgeted revenue per division for a month — the base the forecast scales.
+ *
+ * The QuickBooks budget first, because it is the one ARG keeps in its books and
+ * asked to be measured against; the Google Sheets operating budget otherwise.
+ * One scenario for the whole month, never a mix per division, so the base is a
+ * single named budget.
+ */
 export async function budgetedRevenue(
   month: MonthKey,
   divisions: string[],
 ): Promise<Record<string, string>> {
   const db = await getDb();
   const rows = await db
-    .select({ divisionCode: t.factBudget.divisionCode, amount: t.factBudget.amount })
+    .select({
+      scenarioCode: t.factBudget.scenarioCode,
+      divisionCode: t.factBudget.divisionCode,
+      amount: t.factBudget.amount,
+    })
     .from(t.factBudget)
     .where(
       and(
-        eq(t.factBudget.scenarioCode, 'MONTHLY_BUDGET'),
+        inArray(t.factBudget.scenarioCode, ['QBO_BUDGET', 'MONTHLY_BUDGET']),
         eq(t.factBudget.periodMonth, month),
         eq(t.factBudget.lineItem, 'revenue'),
       ),
     );
 
+  const scenario = rows.some((row) => row.scenarioCode === 'QBO_BUDGET') ? 'QBO_BUDGET' : 'MONTHLY_BUDGET';
   const result: Record<string, string> = {};
   for (const division of divisions) result[division] = '0';
   for (const row of rows) {
-    if (divisions.includes(row.divisionCode)) result[row.divisionCode] = row.amount;
+    if (row.scenarioCode === scenario && divisions.includes(row.divisionCode)) {
+      result[row.divisionCode] = row.amount;
+    }
   }
   return result;
 }

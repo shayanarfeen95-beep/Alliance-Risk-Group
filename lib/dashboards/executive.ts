@@ -5,8 +5,11 @@ import * as t from '@/lib/db/schema';
 import { resolveKpi, CONSOLIDATED_CODE, type SemanticSession } from '@/lib/semantic/resolve';
 import { formatMonthShort, type MonthKey } from '@/lib/semantic/periods';
 import { safeDiv } from '@/lib/money';
+import { formatNumber } from '@/lib/format';
 import type { KpiTileProps } from '@/components/dashboard/kpi-tile';
+import { buildTiles } from './tiles';
 import { openFindings } from '@/lib/ai/goals';
+import { preferredBudgetScenario } from '@/lib/semantic/registry';
 
 /** §9.1 — the eight headline tiles. */
 const EXECUTIVE_TILES: Array<{ id: string; hint: string }> = [
@@ -71,30 +74,13 @@ export async function loadExecutive(
   const { period } = session;
 
   // --- Tiles -------------------------------------------------------------
-  const tiles: KpiTileProps[] = EXECUTIVE_TILES.map(({ id, hint }) => {
-    const current = resolveKpi(session, id, divisionCode);
-    const priorMonth = resolveKpi(session, id, divisionCode, { month: period.priorMonth });
-    const priorYear = resolveKpi(session, id, divisionCode, { month: period.priorYearMonth });
-
-    const currentValue = numberOrNull(current);
-    const pmValue = numberOrNull(priorMonth);
-    const pyValue = numberOrNull(priorYear);
-
-    return {
-      name: current.name,
-      formatted: current.formatted,
-      unavailable: current.unavailable,
-      higherIsBetter: current.higherIsBetter,
-      format: current.format,
-      deltaPriorMonth: currentValue !== null && pmValue !== null ? currentValue - pmValue : null,
-      deltaPriorYear: currentValue !== null && pyValue !== null ? currentValue - pyValue : null,
-      sparkline: period.trailingTwelveMonths.map((month) =>
-        numberOrNull(resolveKpi(session, id, divisionCode, { month })),
-      ),
-      href: current.verifyHref,
-      hint,
-    };
-  });
+  // The shared builder: comparisons you can switch (prior month, prior year,
+  // budget), the division breakdown and the trend, behind every tile.
+  const tiles: KpiTileProps[] = buildTiles(
+    session,
+    EXECUTIVE_TILES.map(({ id, hint }) => ({ id, hint, href: resolveKpi(session, id, divisionCode).verifyHref })),
+    divisionCode,
+  );
 
   // --- Division contribution --------------------------------------------
   // §7: "Division contribution % = division revenue ÷ ARG Total revenue. Net
@@ -141,9 +127,11 @@ export async function loadExecutive(
   // §9.1: shown as attainment ratios WITH dollar variance, in two distinctly
   // labelled columns. §7 warns that a reader seeing "−36,773" beside "84%"
   // reasonably assumes both are variances.
+  // The budget ARG measures against: QuickBooks' own when one is loaded.
+  const budgetScenario = preferredBudgetScenario(session.bundle);
   const baselines: BaselineRow[] = (
     [
-      ['Monthly Budget', 'MONTHLY_BUDGET'],
+      [budgetScenario === 'QBO_BUDGET' ? 'Budget (QuickBooks)' : 'Budget', budgetScenario],
       ['10X Plan', 'TENX'],
     ] as const
   ).map(([label, scenario]) => {
@@ -190,11 +178,7 @@ export async function loadExecutive(
       exceptions.push({
         severity: 'warning',
         headline: `${contribution.divisionName} is running a net loss`,
-        detail: `Net profit of ${contribution.netProfit.toLocaleString('en-US', {
-          style: 'currency',
-          currency: 'USD',
-          maximumFractionDigits: 0,
-        })} for the month.`,
+        detail: `Net profit of ${formatNumber(contribution.netProfit, 'currency')} for the month.`,
       });
     }
   }

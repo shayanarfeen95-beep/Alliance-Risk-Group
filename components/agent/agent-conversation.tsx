@@ -74,19 +74,26 @@ export interface AgentMessage {
  */
 const SUGGESTION_GROUPS: Array<{ label: string; items: string[] }> = [
   {
-    label: 'Read the numbers',
+    label: 'Analyse',
     items: [
-      'What was LITS gross margin last month, and how does it compare to budget?',
-      'Show revenue by division for the last 12 months',
-      'Why did Claims lose money in the most recent closed month?',
+      'How did we do this month against budget, and where will the year land?',
+      'Which division is driving the change in net profit versus last month?',
+      'Where does the revenue figure on the Finance page come from — does it tie to QuickBooks?',
+      'How old is our receivables book, and what is working capital?',
     ],
   },
   {
-    label: 'Check the plumbing',
+    label: 'Build a view',
+    items: [
+      'Chart revenue by division for the last 12 months and save it to my views',
+      'Show gross margin % trend for LITS over the last year',
+    ],
+  },
+  {
+    label: 'Get the data',
     items: [
       'Which months have been loaded from QuickBooks, and which are still missing?',
-      'What still needs doing before QuickBooks can supply data?',
-      'Pull the latest month from QuickBooks',
+      'Pull the QuickBooks budget and the latest balance sheet',
     ],
   },
 ];

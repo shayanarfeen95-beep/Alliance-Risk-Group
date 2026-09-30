@@ -14,6 +14,8 @@ import {
   Wallet,
   Filter,
   LayoutGrid,
+  Menu,
+  X,
 } from 'lucide-react';
 import { useEffect, useState } from 'react';
 
@@ -64,11 +66,13 @@ export function Sidebar({ userName, userRole }: { userName: string; userRole: st
   if (division) carried.set('division', division);
   const suffix = carried.toString() ? `?${carried.toString()}` : '';
 
-  return (
-    <nav
-      className="sticky top-0 flex h-dvh w-[208px] shrink-0 flex-col border-r"
-      style={{ background: 'var(--surface-1)', borderColor: 'var(--border)' }}
-    >
+  const [open, setOpen] = useState(false);
+  // Close the drawer whenever the page changes, so a tap on a link lands on the
+  // page rather than on a menu still covering it.
+  useEffect(() => setOpen(false), [pathname, month, division]);
+
+  const content = (
+    <>
       <div className="flex items-center gap-2.5 px-5 py-4">
         <div
           aria-hidden
@@ -138,7 +142,64 @@ export function Sidebar({ userName, userRole }: { userName: string; userRole: st
           </form>
         </div>
       </div>
-    </nav>
+    </>
+  );
+
+  return (
+    <>
+      {/* Phones and small tablets: a bar with a menu button, and a drawer. */}
+      <div
+        className="flex items-center justify-between border-b px-4 py-2.5 md:hidden"
+        style={{ background: 'var(--surface-1)', borderColor: 'var(--border)' }}
+      >
+        <div className="flex items-center gap-2">
+          <div aria-hidden className="h-5 w-5 rounded-md" style={{ background: 'linear-gradient(135deg, var(--series-1), var(--series-3))' }} />
+          <span className="text-[13px] font-semibold tracking-tight">Alliance Risk</span>
+        </div>
+        <button
+          type="button"
+          onClick={() => setOpen(true)}
+          aria-label="Open navigation"
+          aria-expanded={open}
+          className="flex h-8 w-8 items-center justify-center rounded-[var(--radius)] border"
+          style={{ borderColor: 'var(--border-strong)' }}
+        >
+          <Menu size={16} aria-hidden />
+        </button>
+      </div>
+      {open ? (
+        <div className="fixed inset-0 z-50 md:hidden" role="dialog" aria-modal="true" aria-label="Navigation">
+          <button
+            type="button"
+            aria-label="Close navigation"
+            className="absolute inset-0 bg-black/30"
+            onClick={() => setOpen(false)}
+          />
+          <nav
+            className="absolute inset-y-0 left-0 flex w-[260px] max-w-[85vw] flex-col border-r shadow-xl"
+            style={{ background: 'var(--surface-1)', borderColor: 'var(--border)' }}
+          >
+            <button
+              type="button"
+              onClick={() => setOpen(false)}
+              aria-label="Close navigation"
+              className="absolute right-3 top-3.5 flex h-7 w-7 items-center justify-center rounded-[var(--radius-sm)] text-[var(--text-secondary)]"
+            >
+              <X size={15} aria-hidden />
+            </button>
+            {content}
+          </nav>
+        </div>
+      ) : null}
+
+      {/* Desktop: the fixed sidebar. */}
+      <nav
+        className="sticky top-0 hidden h-dvh w-[208px] shrink-0 flex-col border-r md:flex"
+        style={{ background: 'var(--surface-1)', borderColor: 'var(--border)' }}
+      >
+        {content}
+      </nav>
+    </>
   );
 }
 

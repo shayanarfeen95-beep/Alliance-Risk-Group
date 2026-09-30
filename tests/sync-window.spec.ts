@@ -104,3 +104,105 @@ describe('what the window constrains', () => {
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// An explicit range, for everything the trailing window cannot express
+// ---------------------------------------------------------------------------
+
+/** The resolution the plan step performs when a range is supplied. */
+function resolveRange(options: {
+  today: string;
+  months?: number;
+  windowStart?: string;
+  windowEnd?: string;
+}): { windowStart: string; windowEnd: string } | { error: string } {
+  const asMonth = (value: string | undefined): string | null => {
+    if (!value) return null;
+    const match = /^(\d{4})-(\d{2})/.exec(value.trim());
+    if (!match) return null;
+    const month = Number(match[2]);
+    if (month < 1 || month > 12) return null;
+    return `${match[1]}-${match[2]}-01`;
+  };
+
+  const span = (start: string, end: string) => {
+    const [sy, sm] = start.split('-').map(Number) as [number, number];
+    const [ey, em] = end.split('-').map(Number) as [number, number];
+    return (ey - sy) * 12 + (em - sm) + 1;
+  };
+
+  const windowEnd = options.today;
+  const months = Math.min(Math.max(options.months ?? 12, 1), 36);
+  let start = shiftMonths(windowEnd, -(months - 1));
+  let end = windowEnd;
+
+  const explicitStart = asMonth(options.windowStart);
+  const explicitEnd = asMonth(options.windowEnd);
+
+  if (explicitStart || explicitEnd) {
+    start = explicitStart ?? explicitEnd!;
+    end = explicitEnd ?? explicitStart!;
+    if (start > end) [start, end] = [end, start];
+    if (span(start, end) > 36) return { error: `${span(start, end)} months` };
+  }
+
+  return { windowStart: start, windowEnd: end };
+}
+
+describe('an explicit import range', () => {
+  it('pulls a named calendar year end to end', () => {
+    // Loading 2024 to compare against 2025 is a normal request and the trailing
+    // window has no way to express it.
+    expect(resolveRange({ today: '2026-09-01', windowStart: '2024-01', windowEnd: '2024-12' })).toEqual({
+      windowStart: '2024-01-01',
+      windowEnd: '2024-12-01',
+    });
+  });
+
+  it('pulls a single month, for a restatement', () => {
+    expect(resolveRange({ today: '2026-09-01', windowStart: '2026-03', windowEnd: '2026-03' })).toEqual({
+      windowStart: '2026-03-01',
+      windowEnd: '2026-03-01',
+    });
+  });
+
+  it('orders a reversed range rather than fetching nothing', () => {
+    // Reversed, the month enumeration yields an empty list and the run reports
+    // success having fetched nothing — the exact failure this screen exists to
+    // make impossible.
+    expect(resolveRange({ today: '2026-09-01', windowStart: '2026-06', windowEnd: '2026-02' })).toEqual({
+      windowStart: '2026-02-01',
+      windowEnd: '2026-06-01',
+    });
+  });
+
+  it('refuses a range too long to finish, instead of dying part way', () => {
+    const outcome = resolveRange({ today: '2026-09-01', windowStart: '2015-01', windowEnd: '2026-09' });
+    expect(outcome).toHaveProperty('error');
+  });
+
+  it('treats one supplied end as a single month', () => {
+    expect(resolveRange({ today: '2026-09-01', windowEnd: '2025-07' })).toEqual({
+      windowStart: '2025-07-01',
+      windowEnd: '2025-07-01',
+    });
+  });
+
+  it('falls back to the trailing window when no range is given', () => {
+    expect(resolveRange({ today: '2026-09-01', months: 12 })).toEqual({
+      windowStart: '2025-10-01',
+      windowEnd: '2026-09-01',
+    });
+  });
+
+  it('ignores a malformed month rather than building a nonsense range', () => {
+    expect(resolveRange({ today: '2026-09-01', windowStart: 'last year', months: 3 })).toEqual({
+      windowStart: '2026-07-01',
+      windowEnd: '2026-09-01',
+    });
+    expect(resolveRange({ today: '2026-09-01', windowStart: '2026-13', months: 3 })).toEqual({
+      windowStart: '2026-07-01',
+      windowEnd: '2026-09-01',
+    });
+  });
+});

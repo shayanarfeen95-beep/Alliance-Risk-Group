@@ -4,7 +4,7 @@ import { can } from '@/lib/auth/scope';
 import { getDb } from '@/lib/db/client';
 import * as t from '@/lib/db/schema';
 import { loadCredential, saveCredential } from '@/lib/connectors/credentials';
-import { readRange } from '@/lib/connectors/sheets';
+import { listTabs, matchTab, readRange } from '@/lib/connectors/sheets';
 import { fetchHubspotAccount } from '@/lib/connectors/oauth';
 import { hasCredentialKey } from '@/lib/crypto/secrets';
 import type { SourceSystemCode } from '@/lib/connectors/types';
@@ -143,16 +143,38 @@ export async function POST(request: Request, context: { params: Promise<{ source
       });
     }
 
-    const range = process.env.SHEETS_RANGE_MONTHLY_BUDGET ?? 'Monthly Budget!A1:Z200';
+    // Checked by listing the spreadsheet's real tabs, not by reading a range
+    // whose tab name is guessed. The guess was 'Monthly Budget', and ARG's tab
+    // is 'Monthly Budget ' — with a trailing space — so a sheet that was fine
+    // was refused. Listing the tabs proves the account can open the file and
+    // shows, before anything is pulled, which tab each import will read.
+    let tabs: string[];
     try {
-      await readRange(spreadsheetId, range);
+      tabs = await listTabs(spreadsheetId);
+      const explicit = process.env.SHEETS_RANGE_MONTHLY_BUDGET;
+      if (explicit) await readRange(spreadsheetId, explicit);
     } catch (error) {
       return NextResponse.json({
         ok: false,
         error:
-          `That spreadsheet could not be read as ${existing.accountLabel ?? 'the signed-in account'}: ` +
+          `That spreadsheet could not be opened as ${existing.accountLabel ?? 'the signed-in account'}: ` +
           `${error instanceof Error ? error.message : 'unknown error'}. Check the link, and that ` +
           `the signed-in Google account can open it. Nothing was saved.`,
+      });
+    }
+
+    const found = {
+      monthly_budget: matchTab('monthly_budget', tabs),
+      tenx_budget: matchTab('tenx_budget', tabs),
+      forecast: matchTab('forecast', tabs),
+      headcount: matchTab('headcount', tabs),
+    };
+    if (!found.monthly_budget && !found.tenx_budget && !process.env.SHEETS_RANGE_MONTHLY_BUDGET) {
+      return NextResponse.json({
+        ok: false,
+        error:
+          `That spreadsheet opened, but none of its ${tabs.length} tabs looks like a budget: ` +
+          `${tabs.join(', ')}. Nothing was saved. Link the workbook that holds the monthly budget.`,
       });
     }
 
@@ -175,10 +197,10 @@ export async function POST(request: Request, context: { params: Promise<{ source
       action: 'SOURCE_CONNECTED',
       entity: 'connector_credential',
       entityId: sourceSystem,
-      detail: { authMethod: 'COMPOSIO', spreadsheetId },
+      detail: { authMethod: 'COMPOSIO', spreadsheetId, tabs: found },
     });
 
-    return NextResponse.json({ ok: true });
+    return NextResponse.json({ ok: true, tabs: found });
   }
 
   if (!hasCredentialKey()) {

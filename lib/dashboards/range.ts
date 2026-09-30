@@ -155,3 +155,28 @@ export function withinRange(date: Date | null, range: DateRange): boolean {
   const key = `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, '0')}-01`;
   return key >= range.from && key <= range.to;
 }
+
+/**
+ * The month a dashboard opens on when the URL names none.
+ *
+ * The last COMPLETED month that holds figures — in September, August. The
+ * configured DEFAULT_REPORTING_MONTH only wins when it is later than that (a
+ * deployment deliberately pinned ahead); it was seeded at 2026-03 and never
+ * moved, so honouring it first opened every dashboard on March, six months
+ * stale, with nothing saying why.
+ *
+ * `monthsDescending` must be newest first. Months after `today` are ignored.
+ */
+export function chooseDefaultMonth(
+  monthsDescending: MonthKey[],
+  configured: MonthKey | null,
+  today: Date = new Date(),
+): MonthKey | null {
+  const thisMonth = `${today.toISOString().slice(0, 7)}-01`;
+  const happened = monthsDescending.filter((month) => month <= thisMonth);
+  const lastComplete = happened.find((month) => month < thisMonth) ?? happened[0] ?? null;
+  if (configured && lastComplete && configured > lastComplete && monthsDescending.includes(configured)) {
+    return configured;
+  }
+  return lastComplete ?? configured;
+}

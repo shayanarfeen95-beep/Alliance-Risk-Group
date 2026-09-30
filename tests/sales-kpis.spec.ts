@@ -107,3 +107,34 @@ describe('a warehouse with data in it', () => {
     expect(resolveKpi(session, 'dollars_booked', 'ARG_TOTAL').unavailable).toBeUndefined();
   });
 });
+
+describe('pipeline value is as of the reporting month end', () => {
+  let harness: TestDb;
+  let user: SessionUser;
+
+  beforeAll(async () => {
+    harness = await createTestDb();
+    await seedDatabase(harness.db, { quiet: true });
+    user = await loadSeededUser(harness.db, 'cfo@westportfinancial.com');
+  }, 180_000);
+
+  afterAll(async () => {
+    await harness?.close();
+  });
+
+  it('counts deals created by month end and not yet closed then — so past months differ', async () => {
+    const session = await openSemanticSession(harness.db, user, '2026-03-01');
+    const end = new Date(Date.UTC(2026, 3, 1));
+    const expected = session.bundle.deals
+      .filter((deal) => (!deal.createdate || deal.createdate < end) && (!deal.isClosed || (deal.closedate !== null && deal.closedate >= end)))
+      .reduce((sum, deal) => sum + deal.amount.toNumber(), 0);
+
+    const march = resolveKpi(session, 'pipeline_value', 'ARG_TOTAL');
+    expect(march.value!.toNumber()).toBeCloseTo(expected, 2);
+
+    // A deal closed in March was open at the end of February, so the two months
+    // are not the same figure — which is what "vs prior month" relies on.
+    const february = resolveKpi(session, 'pipeline_value', 'ARG_TOTAL', { month: '2026-02-01' });
+    expect(february.value!.toNumber()).not.toBe(march.value!.toNumber());
+  });
+});
