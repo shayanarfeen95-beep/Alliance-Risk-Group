@@ -464,6 +464,32 @@ async function conformProfitAndLoss(
   );
 
   const balances: Array<{ divisionCode: string; accountId: string; amount: Decimal }> = [];
+  /**
+   * One balance per division and account, however many class columns feed it.
+   *
+   * Several QuickBooks classes map to one division — PS-APS, PS-Other and
+   * PS-TP to LITS, CA and INV to Claims, BGI to SHRC — and an account can also
+   * appear on more than one row of a column. Writing a row per column per row
+   * put the same (month, division, account) into fact_gl_balance twice, and the
+   * primary key refused the whole month: September 2026's P&L failed to
+   * re-import from 26 October, after its month-end allocation was posted, and
+   * the dashboard kept showing September as it stood before close. Mapping a
+   * class to a division means its amounts are that division's, so they are
+   * added together. The P&L tie-out to QuickBooks' Total column, which is exact,
+   * fails loudly if this ever counts anything twice.
+   */
+  const balanceIndex = new Map<string, { divisionCode: string; accountId: string; amount: Decimal }>();
+  const addBalance = (divisionCode: string, accountId: string, value: Decimal) => {
+    const k = `${divisionCode}|${accountId}`;
+    const existing = balanceIndex.get(k);
+    if (existing) {
+      existing.amount = existing.amount.plus(value);
+      return;
+    }
+    const entry = { divisionCode, accountId, amount: value };
+    balanceIndex.set(k, entry);
+    balances.push(entry);
+  };
   const seenAccounts = new Map<string, { name: string; line: ReportingLine }>();
   const unmappedAccounts: string[] = [];
   const companyRows: GlRowForTotal[] = [];
@@ -497,7 +523,7 @@ async function conformProfitAndLoss(
     for (const column of columns) {
       const value = amount(cells[column.index]);
       if (value.isZero()) continue;
-      balances.push({ divisionCode: column.divisionCode, accountId, amount: value });
+      addBalance(column.divisionCode, accountId, value);
     }
 
     if (totalIndex !== null) {

@@ -407,7 +407,7 @@ export async function executeLoadRun(
       notes,
     };
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
+    const message = describeLoadError(error);
 
     await db
       .update(t.loadRun)
@@ -416,6 +416,43 @@ export async function executeLoadRun(
 
     return { ...base, ok: false, done: true, error: message };
   }
+}
+
+/**
+ * What a failed load says about itself, reason first.
+ *
+ * A database error arrives wrapped: the outer message is the whole statement —
+ * "Failed query: insert into fact_gl_balance … values ($1, $2, …" followed by
+ * every parameter — and the reason (a duplicate key, a constraint, a trigger's
+ * own words) is on its `cause`. Storing only the outer message cut the reason
+ * off: October's failed P&L refreshes said which table they were writing and
+ * never why, so nobody could tell a duplicate row from a full database.
+ */
+export function describeLoadError(error: unknown): string {
+  if (!(error instanceof Error)) return String(error);
+
+  const cause = (error as { cause?: unknown }).cause as
+    | { message?: string; detail?: string; constraint_name?: string; constraint?: string; code?: string }
+    | undefined;
+  if (!cause || typeof cause !== 'object' || !cause.message) return error.message;
+
+  const constraint = cause.constraint_name ?? cause.constraint;
+  const reason = [
+    cause.message,
+    cause.detail,
+    constraint ? `constraint ${constraint}` : null,
+    cause.code ? `code ${cause.code}` : null,
+  ]
+    .filter(Boolean)
+    .join(' — ');
+
+  // Which statement, without its parameter list: the table is what helps.
+  const statement = error.message
+    .replace(/^Failed query:\s*/i, '')
+    .replace(/\s+values[\s\S]*$/i, '')
+    .replace(/\s+/g, ' ')
+    .slice(0, 160);
+  return statement ? `${reason} (while running: ${statement})` : reason;
 }
 
 /**
