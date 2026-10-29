@@ -7,11 +7,11 @@ import { can } from '@/lib/auth/scope';
 import type { SessionUser } from '@/lib/auth/session';
 import { formatMonth, monthRange, addMonths, type MonthKey } from '@/lib/semantic/periods';
 import { KPI_REGISTRY, getKpiDefinition, isSpecKpi, preferredBudgetScenario } from '@/lib/semantic/registry';
-import { openSemanticSession, resolveKpi, CONSOLIDATED_CODE, type SemanticSession } from '@/lib/semantic/resolve';
+import { openSemanticSession, resolveKpi, scopeFor, scopeLabel, CONSOLIDATED_CODE, type SemanticSession } from '@/lib/semantic/resolve';
 import { loadFinance, type Figure } from '@/lib/dashboards/finance';
 import { buildDivisionColorMap } from '@/lib/charts/colors';
 import { formatNumber } from '@/lib/format';
-import { companyPl, hasPl, sumPl, key } from '@/lib/semantic/facts';
+import { companyPl, hasPl, isOtherClassCode, sumPl, key } from '@/lib/semantic/facts';
 import { connectorStatuses, getConnector, type SourceSystemCode } from '@/lib/connectors';
 import { executeViewSpec, viewSpecJsonSchema, ViewSpecError } from './viewspec';
 import { executeSavedView, pipelineViewJsonSchema } from '@/lib/views/spec';
@@ -455,7 +455,7 @@ const getVarianceDrivers: ToolDefinition = {
     const division = divisionOf(input.division, context);
     const line = String(input.line);
 
-    const divisions = division === CONSOLIDATED_CODE ? session.visibleDivisions : [division];
+    const divisions = scopeFor(session, division);
     const priorMonth = addMonths(month, -1);
 
     const totals = new Map<string, { name: string; current: Decimal; prior: Decimal }>();
@@ -550,7 +550,7 @@ const explainFigure: ToolDefinition = {
     const month = normaliseMonth(input.month, session.period.month);
     const division = divisionOf(input.division, context);
     const line = String(input.line) as 'revenue' | 'cogs' | 'gross_profit' | 'opex' | 'net_profit';
-    const divisions = division === CONSOLIDATED_CODE ? session.visibleDivisions : [division];
+    const divisions = scopeFor(session, division);
     const { bundle } = session;
     const usd = (value: number) =>
       value.toLocaleString('en-US', { style: 'currency', currency: 'USD', minimumFractionDigits: 2 });
@@ -576,10 +576,15 @@ const explainFigure: ToolDefinition = {
               : pl.revenue.minus(pl.cogs).minus(pl.opex);
 
     const total = pick(sumPl(bundle, month, divisions));
-    const byDivision = divisions.map((code) => ({
-      division: bundle.divisions.find((d) => d.divisionCode === code)?.divisionName ?? code,
-      amount: usd(pick(sumPl(bundle, month, [code])).toNumber()),
-    }));
+    // Classes outside the divisions are listed only when they hold something.
+    const byDivision = divisions
+      .filter((code) => !isOtherClassCode(code) || bundle.pl.has(key(month, code)))
+      .map((code) => ({
+        division: isOtherClassCode(code)
+          ? `${scopeLabel(session, code)} (QuickBooks class, not a division)`
+          : scopeLabel(session, code),
+        amount: usd(pick(sumPl(bundle, month, [code])).toNumber()),
+      }));
 
     const accountLines =
       line === 'revenue' ? ['revenue'] : line === 'cogs' ? ['cogs', 'payroll_direct'] : line === 'opex' ? ['opex', 'payroll_expense'] : [];
@@ -606,7 +611,7 @@ const explainFigure: ToolDefinition = {
     return {
       result: {
         figure: `${lineName}, ${division === CONSOLIDATED_CODE ? 'ARG Total' : byDivision[0]!.division}, ${formatMonth(month)}: ${usd(total.toNumber())}`,
-        source: `QuickBooks Online Profit and Loss report for ${formatMonth(month)}, ${session.accountingBasis} basis, summarised by class. Each QuickBooks class maps to a division; ARG Total is the four divisions added together.`,
+        source: `QuickBooks Online Profit and Loss report for ${formatMonth(month)}, ${session.accountingBasis} basis, summarised by class. Each QuickBooks class maps to a division, except classes that belong to none (Z Alloc, Not Specified); ARG Total is the four divisions plus those classes, the same columns as QuickBooks' Total.`,
         calculation:
           line === 'gross_profit'
             ? 'Revenue minus cost of goods sold.'
@@ -622,8 +627,8 @@ const explainFigure: ToolDefinition = {
           ? {
               quickbooksCompanyTotal: usd(quickbooksTotal.toNumber()),
               difference: usd(difference!.toNumber()),
-              ties: difference!.abs().lessThanOrEqualTo(Decimal.max(1, quickbooksTotal.abs().times(0.001))),
-              note: 'Any difference sits on QuickBooks classes that are not a division (Not Specified, Z Alloc).',
+              ties: difference!.abs().lessThanOrEqualTo(1),
+              note: 'ARG Total includes the QuickBooks classes that are not a division (Z Alloc, Not Specified), so it should equal QuickBooks’ total; a difference means a month needs pulling again.',
             }
           : 'Division-level figure; QuickBooks has no company total to compare a single division against.',
         booksClosed: bundle.periodState.get(month)?.isClosed ?? false,
@@ -718,12 +723,15 @@ const getFinanceOverview: ToolDefinition = {
               ties: model.tieOut.allTie,
               lines: model.tieOut.rows.map((row) => ({
                 line: row.label,
-                quickbooksTotal: formatNumber(row.quickbooks, 'currency_precise'),
                 fourDivisions: formatNumber(row.divisions, 'currency_precise'),
-                notInADivision: formatNumber(-row.difference, 'currency_precise'),
-                ...(row.unassignedDetail ? { onClassesThatAreNotDivisions: row.unassignedDetail } : {}),
-                explainedByThoseClasses: row.ties,
+                classesThatAreNotDivisions: formatNumber(row.otherClasses, 'currency_precise'),
+                ...(row.otherClassesDetail ? { byClass: row.otherClassesDetail } : {}),
+                argTotal: formatNumber(row.argTotal, 'currency_precise'),
+                quickbooksTotal: formatNumber(row.quickbooks, 'currency_precise'),
+                difference: formatNumber(row.difference, 'currency_precise'),
+                ties: row.ties,
               })),
+              note: 'ARG Total is the four divisions plus the QuickBooks classes that belong to no division (Z Alloc, Not Specified), the same columns as QuickBooks’ Total.',
             }
           : 'Only checked at ARG Total.',
         workingCapital: model.workingCapital.unavailable
@@ -769,7 +777,7 @@ const getFinanceOverview: ToolDefinition = {
             }))
           : 'The 10X plan covers 2026–2029 only.',
         byDivision: model.divisionBreakdown?.map((row) => ({
-          division: row.label,
+          division: row.isOtherClass ? `${row.label} (QuickBooks class, not a division; part of ARG Total)` : row.label,
           revenue: money(row.revenue),
           shareOfRevenue: pct(row.revenueShare),
           grossMargin: pct(row.grossMargin),
@@ -893,6 +901,17 @@ const compareDivisions: ToolDefinition = {
           ...(additive && totalValue ? { shareOfTotal: pct(row.value! / totalValue) } : {}),
         })),
         notAvailable: rows.filter((row) => row.value === null).map((row) => ({ division: row.division, why: row.formatted })),
+        // ARG Total also includes QuickBooks classes that belong to no division;
+        // naming them is what lets the shares above be reconciled to the total.
+        ...(additive && session.consolidatedAvailable
+          ? (() => {
+              const outside = session.bundle.otherClasses
+                .map((other) => ({ other, result: resolveKpi(session, definition.id, other.code, { month }) }))
+                .filter(({ result }) => result.value !== null && !result.value.isZero())
+                .map(({ other, result }) => ({ class: other.name, value: result.formatted }));
+              return outside.length ? { inArgTotalButNotADivision: outside } : {};
+            })()
+          : {}),
         argTotal: total ? (total.unavailable ? total.unavailable.detail : total.formatted) : 'Not visible to this user.',
         favourableWhen: definition.higherIsBetter ? 'higher' : 'lower',
       },

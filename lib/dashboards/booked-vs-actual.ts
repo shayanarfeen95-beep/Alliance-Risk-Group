@@ -1,6 +1,6 @@
 import 'server-only';
 import Decimal from 'decimal.js';
-import { CONSOLIDATED_CODE, type SemanticSession } from '@/lib/semantic/resolve';
+import { scopeFor, CONSOLIDATED_CODE, type SemanticSession } from '@/lib/semantic/resolve';
 import { formatMonthShort, monthRange, type MonthKey } from '@/lib/semantic/periods';
 import { key as plKey } from '@/lib/semantic/facts';
 
@@ -93,9 +93,8 @@ export function loadBookedVsActual(
 
   const year = period.month.slice(0, 4);
   const months = monthRange(`${year}-01-01` as MonthKey, period.month);
-  const divisions = isConsolidated
-    ? session.visibleDivisions
-    : [divisionCode];
+  // Billed revenue at ARG Total is QuickBooks' Total: every class, not only the divisions.
+  const divisions = scopeFor(session, divisionCode);
 
   // --- Booked, from HubSpot ------------------------------------------------
   const deals = bundle.deals.filter((deal) => {

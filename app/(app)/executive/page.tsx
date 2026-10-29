@@ -105,7 +105,7 @@ export default async function ExecutivePage({
         <Card>
           <CardHeader
             title="Revenue and net profit by division"
-            subtitle="Contribution % is division revenue ÷ ARG Total revenue. Net profit contribution divides by the absolute value of the total, so the sign stays readable in a loss month."
+            subtitle="Contribution % is division revenue ÷ ARG Total revenue. Net profit contribution divides by the absolute value of the total, so the sign stays readable in a loss month. ARG Total includes QuickBooks classes that are not a division, such as Z Alloc, listed beneath the divisions."
           />
           <DataTable dense>
             <thead>
@@ -124,12 +124,28 @@ export default async function ExecutivePage({
                 <tr key={row.divisionCode}>
                   <Td align="left" numeric={false}>
                     <span className="flex items-center gap-2">
-                      <span
-                        aria-hidden
-                        className="h-2.5 w-2.5 shrink-0 rounded-[2px]"
-                        style={{ background: colors[row.divisionCode] }}
-                      />
+                      {row.isOtherClass ? (
+                        <span
+                          aria-hidden
+                          className="h-2.5 w-2.5 shrink-0 rounded-[2px] border border-dashed"
+                          style={{ borderColor: 'var(--text-muted)' }}
+                        />
+                      ) : (
+                        <span
+                          aria-hidden
+                          className="h-2.5 w-2.5 shrink-0 rounded-[2px]"
+                          style={{ background: colors[row.divisionCode] }}
+                        />
+                      )}
                       {row.divisionName}
+                      {row.isOtherClass ? (
+                        <span
+                          className="text-[10.5px] text-[var(--text-muted)]"
+                          title="A QuickBooks class that belongs to no division. Part of ARG Total, as it is of QuickBooks' Total."
+                        >
+                          not a division
+                        </span>
+                      ) : null}
                     </span>
                   </Td>
                   <Td>{formatNumber(row.revenue, 'currency')}</Td>

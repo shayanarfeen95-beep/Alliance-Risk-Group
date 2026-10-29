@@ -474,8 +474,9 @@ export default async function AdminPage({
         <div className="space-y-3">
           <p className="max-w-3xl text-[12px] leading-relaxed text-[var(--text-secondary)]">
             QuickBooks separates divisions with classes. Each class must be assigned to a division, or marked as not a
-            division (an allocation bucket such as Z Alloc, or Not Specified). A month containing an unassigned class is
-            refused rather than loaded against the wrong division.
+            division (an allocation bucket such as Z Alloc, or Not Specified). A class that is not a division is still
+            counted in ARG Total, on its own line, so ARG Total matches QuickBooks&apos; Total. A month containing an
+            unassigned class is refused rather than loaded against the wrong division.
           </p>
           <ClassMapping
             rows={classMap}

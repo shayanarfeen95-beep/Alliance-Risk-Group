@@ -279,9 +279,9 @@ function divisionColumns(
     const classRef = meta.ClassRef ?? meta.ClassId ?? meta.ColKey;
     const divisionCode = resolveDivision(lookup, classRef, title);
     if (divisionCode) columns.push({ index, divisionCode });
-    // Deliberately excluded: left out of every divisional figure and out of ARG
-    // Total, which is what an allocation or unclassified bucket should do. The
-    // caller reports it so under-reporting is stated rather than discovered.
+    // Not a division: left out of every divisional figure, and recorded per class
+    // so ARG Total still includes it — QuickBooks' own Total does, and an ARG
+    // Total without Z Alloc's shared costs overstates profit until month end.
     else if (isExcluded(lookup, classRef, title)) {
       excluded.push(title);
       excludedColumns.push({ index, title });
@@ -626,24 +626,53 @@ async function conformProfitAndLoss(
 
   // What QuickBooks holds on classes that belong to no division — "Not
   // Specified" (posted with no class) and allocation classes such as Z Alloc.
-  // ARG Total is the four divisions, so these amounts are in QuickBooks' total
-  // and not in ours. Recording them is what lets the tie-out say "the $94,267
-  // difference is September OpEx not yet on any division" instead of only
-  // "does not tie".
+  // They are in no division, but they are in ARG Total: Z Alloc holds the
+  // shared costs that are spread over the business lines only at month end, so
+  // a total without it overstates profit until the books close, and ARG's
+  // controller reconciles ARG Total to QuickBooks' own Total column to the
+  // cent. Recorded per class and per line — the payroll memo lines too — so
+  // ARG Total can include each class and the dashboards can show it on its own
+  // row.
   const unassigned: Record<string, Decimal> = {
     revenue: new Decimal(0),
     cogs: new Decimal(0),
     opex: new Decimal(0),
   };
-  for (const [title, rows] of unassignedRows) {
+  const UNASSIGNED_LINES = {
+    revenue: 'revenue',
+    cogs: 'cogs',
+    opex: 'opex',
+    payrollDirect: 'payroll_direct',
+    payrollExpense: 'payroll_expense',
+  } as const;
+  // Account-level detail behind those lines, so a drill-down, the marketing
+  // spend accounts and payroll at ARG Total add up to the same figure.
+  const unassignedAccounts: Record<string, Decimal> = {};
+
+  for (const [rawTitle, rows] of unassignedRows) {
+    // `|` separates the parts of a line key; a class name must not carry one.
+    const title = rawTitle.replace(/\|/g, '/');
     const lines = rollUpGl(rows);
-    for (const line of ['revenue', 'cogs', 'opex'] as const) {
-      if (lines[line].isZero()) continue;
-      unassigned[line] = unassigned[line]!.plus(lines[line]);
-      unassigned[`${line}|${title}`] = lines[line];
+    for (const [field, line] of Object.entries(UNASSIGNED_LINES) as Array<
+      [keyof typeof UNASSIGNED_LINES, string]
+    >) {
+      if (lines[field].isZero()) continue;
+      unassigned[line] = (unassigned[line] ?? new Decimal(0)).plus(lines[field]);
+      unassigned[`${line}|${title}`] = lines[field];
+    }
+    for (const row of rows) {
+      const k = `${title}|${row.accountId}`;
+      unassignedAccounts[k] = (unassignedAccounts[k] ?? new Decimal(0)).plus(row.amount);
     }
   }
+  for (const [k, value] of Object.entries(unassignedAccounts)) {
+    if (value.isZero()) delete unassignedAccounts[k];
+  }
+
   written += await writeCompanyTotals(db, loadRunId, month, 'PL_UNASSIGNED', unassigned);
+  // Written even when empty, so a class that emptied since the last pull goes
+  // to zero instead of leaving its old accounts standing.
+  written += await writeCompanyTotals(db, loadRunId, month, 'GL_UNASSIGNED', unassignedAccounts);
 
   return written;
 }
@@ -2859,8 +2888,9 @@ async function conformInTransaction(
           notes.push(
             `${recorded} QuickBooks class${recorded === 1 ? '' : 'es'} (${active} active). ` +
               (unmapped.length
-                ? `${unmapped.length} map to no division: ${unmapped.join(', ')}. Any figure carried ` +
-                  `on them is currently excluded from ARG Total.`
+                ? `${unmapped.length} not yet decided: ${unmapped.join(', ')}. Assign each to a division, or ` +
+                  `mark it as not a division (it is then counted in ARG Total on its own line), in Admin → ` +
+                  `Class mapping; a profit and loss that uses one is refused until then.`
                 : 'Every active class maps to a division.'),
           );
           break;

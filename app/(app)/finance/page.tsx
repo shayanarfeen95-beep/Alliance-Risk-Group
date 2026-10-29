@@ -358,7 +358,7 @@ function DivisionBreakdown({ model }: { model: FinanceViewModel }) {
     <Card>
       <CardHeader
         title="By division"
-        subtitle={`Each division for ${model.monthLabel} beside ARG Total, with its share of revenue and its year to date.`}
+        subtitle={`Each division for ${model.monthLabel} beside ARG Total, with its share of revenue and its year to date. QuickBooks classes that are not a division are part of ARG Total and listed under the divisions, so the rows add up to it.`}
       />
       <DataTable dense>
         <thead>
@@ -391,14 +391,24 @@ function DivisionBreakdown({ model }: { model: FinanceViewModel }) {
                   <span className="inline-flex items-center gap-2">
                     {row.color ? (
                       <span aria-hidden className="h-2.5 w-2.5 rounded-[2px]" style={{ background: row.color }} />
+                    ) : row.isOtherClass ? (
+                      <span aria-hidden className="h-2.5 w-2.5 rounded-[2px] border border-dashed" style={{ borderColor: 'var(--text-muted)' }} />
                     ) : null}
                     {row.label}
+                    {row.isOtherClass ? (
+                      <span
+                        className="text-[10.5px] font-normal text-[var(--text-muted)]"
+                        title="A QuickBooks class that belongs to no division. Z Alloc holds shared costs until they are allocated to the business lines at month end; Not Specified is anything posted with no class. Both are part of ARG Total, as they are of QuickBooks' Total."
+                      >
+                        not a division
+                      </span>
+                    ) : null}
                   </span>
                 </Td>
                 <Td style={{ fontWeight: weight }}>{money(row.revenue)}</Td>
                 <Td muted>
                   <span className="inline-flex items-center justify-end gap-2">
-                    {!row.isTotal && row.revenueShare !== null ? (
+                    {!row.isTotal && !row.isOtherClass && row.revenueShare !== null ? (
                       <span aria-hidden className="h-1.5 w-12 overflow-hidden rounded-full" style={{ background: 'var(--surface-2)' }}>
                         <span className="block h-full rounded-full" style={{ width: `${Math.max(0, Math.min(1, row.revenueShare)) * 100}%`, background: row.color ?? 'var(--series-1)' }} />
                       </span>
@@ -557,7 +567,7 @@ function TieOut({ model }: { model: FinanceViewModel }) {
     <Card>
       <CardHeader
         title="Ties to QuickBooks"
-        subtitle={`ARG Total — the four divisions added up — against QuickBooks' own company total for ${model.monthLabel}.`}
+        subtitle={`ARG Total — the four divisions plus the classes outside them — against QuickBooks' own Total column for ${model.monthLabel}.`}
         action={
           <Chip
             tone={tie.allTie ? 'good' : 'critical'}
@@ -571,11 +581,13 @@ function TieOut({ model }: { model: FinanceViewModel }) {
         <thead>
           <tr>
             <Th align="left">Line</Th>
-            <Th>QuickBooks total</Th>
             <Th>Four divisions</Th>
-            <Th title="Four divisions − QuickBooks. Anything here sits on a class that is not a division (Not Specified, Z Alloc).">
-              Not in a division
+            <Th title="QuickBooks classes that belong to no division — Z Alloc (shared costs allocated at month end) and Not Specified (posted with no class). They are part of ARG Total.">
+              Other classes
             </Th>
+            <Th>ARG Total</Th>
+            <Th>QuickBooks total</Th>
+            <Th title="ARG Total − QuickBooks. Zero when the dashboard and QuickBooks agree.">Difference</Th>
           </tr>
         </thead>
         <tbody>
@@ -584,24 +596,28 @@ function TieOut({ model }: { model: FinanceViewModel }) {
               <Td align="left" numeric={false}>
                 {row.label}
               </Td>
-              <Td>{formatNumber(row.quickbooks, 'currency_precise')}</Td>
               <Td>{formatNumber(row.divisions, 'currency_precise')}</Td>
-              <Td style={{ color: row.ties ? 'var(--text-muted)' : 'var(--status-critical)' }}>
-                {formatNumber(-row.difference, 'currency_precise')}
-                {row.unassignedDetail ? (
-                  <span className="block text-[10.5px] font-normal text-[var(--text-muted)]">{row.unassignedDetail}</span>
+              <Td muted>
+                {formatNumber(row.otherClasses, 'currency_precise')}
+                {row.otherClassesDetail ? (
+                  <span className="block text-[10.5px] font-normal text-[var(--text-muted)]">{row.otherClassesDetail}</span>
                 ) : null}
+              </Td>
+              <Td>{formatNumber(row.argTotal, 'currency_precise')}</Td>
+              <Td>{formatNumber(row.quickbooks, 'currency_precise')}</Td>
+              <Td style={{ color: row.ties ? 'var(--text-muted)' : 'var(--status-critical)' }}>
+                {formatNumber(row.difference, 'currency_precise')}
               </Td>
             </tr>
           ))}
         </tbody>
       </DataTable>
       <p className="mt-3 text-[11px] leading-relaxed text-[var(--text-muted)]">
-        QuickBooks&apos; total includes every class. Amounts on classes that are not a division — Not
-        Specified (posted with no class) and allocation classes such as Z Alloc — are in QuickBooks&apos;
-        total but in no division, and are shown here by class rather than hidden. It ties when the four
-        divisions plus those amounts equal QuickBooks to the dollar; in an open month, a large amount on
-        Not Specified usually means entries not yet allocated to a division.
+        ARG Total includes every QuickBooks class, as QuickBooks&apos; own Total column does. Classes that
+        are not a division — allocation classes such as Z Alloc, which hold shared costs until they are
+        allocated to the business lines at month end, and Not Specified (posted with no class) — are part of
+        ARG Total and shown here by class. It ties when ARG Total equals QuickBooks to the dollar. Before a
+        month closes, Z Alloc usually holds expenses not yet allocated; afterwards it should be close to zero.
       </p>
     </Card>
   );

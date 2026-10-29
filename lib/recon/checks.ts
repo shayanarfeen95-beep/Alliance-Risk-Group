@@ -473,15 +473,21 @@ function windowFilter(column: any, options: ReconOptions) {
 // ---------------------------------------------------------------------------
 
 /**
- * ARG Total (the four divisions) against QuickBooks' TOTAL column, per line.
+ * ARG Total against QuickBooks' TOTAL column, per line.
  *
  * This is the check Mario ran by hand: "revenue in August was $482,405" against
  * a dashboard showing $321,078. Had it existed, the parent-account parsing bug
  * would have failed it on the first pull instead of reaching the CFO.
  *
- * A difference within $1 — or within 0.1% of the line, which is what an amount
- * left on an allocation class like Z Alloc typically is — passes, and the detail
- * always states the exact amount that sits outside the divisions.
+ * ARG Total is the four divisions plus the classes that belong to no division —
+ * Z Alloc, Not Specified — which the P&L import records per class. Those are the
+ * same columns QuickBooks adds up, so the two must agree to the dollar. Scott's
+ * September check is the reason it is exact: QuickBooks said $533,672.38 of
+ * income, the dashboard said $533,674, and the $1.76 on Not Specified had been
+ * waved through by a 0.1% tolerance.
+ *
+ * A month imported before classes were recorded per class has no figure for
+ * them; it keeps the old tolerance and says the month needs pulling again.
  */
 export async function checkPlTiesToQuickBooks(
   db: Database,
@@ -533,58 +539,53 @@ export async function checkPlTiesToQuickBooks(
     if (!(row.line in labels)) continue;
     const line = row.line as keyof typeof labels;
     const quickbooks = d(row.amount);
-    const ours = divisionTotals.get(row.periodMonth)?.[line] ?? new Decimal(0);
-    const variance = ours.minus(quickbooks);
-    const tolerance = Decimal.max(TOL, quickbooks.abs().times(0.001));
+    const divisions = divisionTotals.get(row.periodMonth)?.[line] ?? new Decimal(0);
     const month = row.periodMonth.slice(0, 7);
-
-    // Explained: the divisions plus what sits on no-division classes equal
-    // QuickBooks. The importer then accounted for every dollar, and the gap is
-    // a bookkeeping fact (unclassed or unallocated entries), not a load error.
     const outside = unassigned.get(row.periodMonth);
-    const onNoDivision = outside?.get(line) ?? null;
-    if (onNoDivision && !variance.abs().lessThanOrEqualTo(tolerance)) {
-      const unexplained = ours.plus(onNoDivision).minus(quickbooks);
-      if (unexplained.abs().lessThanOrEqualTo(TOL)) {
-        const classes = [...outside!.entries()]
-          .filter(([key]) => key.startsWith(`${line}|`))
-          .map(([key, amount]) => `${key.split('|')[1]} ${amount.toFixed(2)}`)
-          .join(', ');
-        findings.push({
-          checkId: 'PL_TIES_TO_QUICKBOOKS',
-          checkName: `${labels[line]} ties to QuickBooks`,
-          periodMonth: row.periodMonth,
-          divisionCode: null,
-          status: 'PASS',
-          expected: quickbooks,
-          actual: ours.plus(onNoDivision),
-          variance: unexplained,
-          detail:
-            `${labels[line]} for ${month}: QuickBooks ${quickbooks.toFixed(2)} = the four divisions ` +
-            `${ours.toFixed(2)} + ${onNoDivision.toFixed(2)} on classes that are not a division (${classes}). ` +
-            `Every dollar is accounted for; that amount is in QuickBooks' total and in no division until it is classed or allocated.`,
-        });
-        continue;
-      }
+    const base = { checkId: 'PL_TIES_TO_QUICKBOOKS', checkName: `${labels[line]} ties to QuickBooks`, periodMonth: row.periodMonth, divisionCode: null, expected: quickbooks };
+
+    if (outside) {
+      const onNoDivision = outside.get(line) ?? new Decimal(0);
+      const argTotal = divisions.plus(onNoDivision);
+      const variance = argTotal.minus(quickbooks);
+      const pass = variance.abs().lessThanOrEqualTo(TOL);
+      const classes = [...outside.entries()]
+        .filter(([key]) => key.startsWith(`${line}|`))
+        .map(([key, amount]) => `${key.slice(line.length + 1)} ${amount.toFixed(2)}`)
+        .join(', ');
+      const parts = onNoDivision.isZero()
+        ? `the four divisions ${divisions.toFixed(2)}`
+        : `the four divisions ${divisions.toFixed(2)} + ${onNoDivision.toFixed(2)} on classes that are not a division (${classes})`;
+      findings.push({
+        ...base,
+        status: pass ? 'PASS' : 'FAIL',
+        actual: argTotal,
+        variance,
+        detail: pass
+          ? `${labels[line]} for ${month}: ARG Total ${argTotal.toFixed(2)} = ${parts}, equal to QuickBooks ${quickbooks.toFixed(2)}.`
+          : `${labels[line]} for ${month} does NOT tie: ARG Total ${argTotal.toFixed(2)} (${parts}) against QuickBooks ` +
+            `${quickbooks.toFixed(2)}, out by ${variance.toFixed(2)}. Check the class mapping, then pull again.`,
+      });
+      continue;
     }
 
+    // Imported before classes outside the divisions were recorded.
+    const variance = divisions.minus(quickbooks);
+    const tolerance = Decimal.max(TOL, quickbooks.abs().times(0.001));
     const pass = variance.abs().lessThanOrEqualTo(tolerance);
     findings.push({
-      checkId: 'PL_TIES_TO_QUICKBOOKS',
-      checkName: `${labels[line]} ties to QuickBooks`,
-      periodMonth: row.periodMonth,
-      divisionCode: null,
+      ...base,
       status: pass ? 'PASS' : 'FAIL',
-      expected: quickbooks,
-      actual: ours,
+      actual: divisions,
       variance,
       detail: variance.abs().lessThanOrEqualTo(TOL)
-        ? `${labels[line]} for ${month} is ${quickbooks.toFixed(2)} in QuickBooks and in the four divisions.`
+        ? `${labels[line]} for ${month} is ${quickbooks.toFixed(2)} in QuickBooks and in ARG Total.`
         : pass
-          ? `${labels[line]} for ${month}: QuickBooks ${quickbooks.toFixed(2)}, the four divisions ${ours.toFixed(2)}. ` +
-            `The ${variance.negated().toFixed(2)} difference is on classes that belong to no division (Not Specified, Z Alloc).`
+          ? `${labels[line]} for ${month}: QuickBooks ${quickbooks.toFixed(2)}, the four divisions ${divisions.toFixed(2)}. ` +
+            `The ${variance.negated().toFixed(2)} difference is on classes that belong to no division (Not Specified, Z Alloc), ` +
+            `which this month was imported without. Pull again to bring them into ARG Total.`
           : `${labels[line]} for ${month} does NOT tie: QuickBooks ${quickbooks.toFixed(2)}, the four divisions ` +
-            `${ours.toFixed(2)}, out by ${variance.toFixed(2)}. Check the class mapping, then pull again.`,
+            `${divisions.toFixed(2)}, out by ${variance.toFixed(2)}. Check the class mapping, then pull again.`,
     });
   }
 

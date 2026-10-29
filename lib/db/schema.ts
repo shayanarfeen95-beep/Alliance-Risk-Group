@@ -370,14 +370,17 @@ export const factGlBalance = pgTable(
  *      liabilities and equity, $849k of assets on "Not Specified" and −$2.16M on
  *      "Z Alloc". Only the TOTAL column balances, so the balance sheet, working
  *      capital, DSO, DPO and Cash Runway at ARG Total are read from here.
- *   2. **The P&L tie-out.** ARG Total is the sum of the four divisions (§3), and
- *      anything on an excluded class — Not Specified, Z Alloc — is in QuickBooks'
- *      total but in no division. Holding QuickBooks' total beside ours is what
- *      lets the Finance page say "ties to QuickBooks" or name the difference.
+ *   2. **The P&L tie-out.** ARG Total is the four divisions plus the classes
+ *      that belong to no division — Not Specified, Z Alloc — exactly as
+ *      QuickBooks' own Total column is. Holding QuickBooks' total beside ours is
+ *      what lets the Finance page say "ties to QuickBooks" or name the difference.
  *
  * `statement` is 'PL', 'BS', 'AR_AGING' or 'AP_AGING'; `line` is a P&L reporting
- * line, a fact_bs_actual field, or an aging bucket. Company-level rows carry no
- * division, so this table is read only by users entitled to every division.
+ * line, a fact_bs_actual field, or an aging bucket. 'PL_UNASSIGNED' holds what
+ * sits on each class outside the divisions (`line|class`), and 'GL_UNASSIGNED'
+ * the accounts behind it (`class|accountId`) — both part of ARG Total.
+ * Company-level rows carry no division, so this table is read only by users
+ * entitled to every division.
  */
 export const factCompanyTotal = pgTable(
   'fact_company_total',

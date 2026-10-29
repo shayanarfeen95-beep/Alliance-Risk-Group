@@ -1,10 +1,11 @@
 import 'server-only';
 import Decimal from 'decimal.js';
-import { resolveKpi, CONSOLIDATED_CODE, type SemanticSession } from '@/lib/semantic/resolve';
+import { resolveKpi, scopeLabel, CONSOLIDATED_CODE, type SemanticSession } from '@/lib/semantic/resolve';
 import { formatMonthShort, type MonthKey } from '@/lib/semantic/periods';
 import { getKpiDefinition, preferredBudgetScenario } from '@/lib/semantic/registry';
 import { formatNumber } from '@/lib/format';
 import type { KpiTileProps } from '@/components/dashboard/kpi-tile';
+import { isOtherClassCode } from '@/lib/semantic/facts';
 
 /**
  * One tile, assembled once for every dashboard.
@@ -104,16 +105,6 @@ export function buildTile(
   let breakdown: KpiTileProps['breakdown'];
 
   if (isConsolidated && session.visibleDivisions.length > 1) {
-    const rows = session.visibleDivisions.map((code) => {
-      const result = resolveKpi(session, spec.id, code);
-      return {
-        label: bundle.divisions.find((d) => d.divisionCode === code)?.divisionName ?? code,
-        code,
-        formatted: result.unavailable ? null : result.formatted,
-        value: num(result),
-      };
-    });
-
     // A share only means something for a metric that adds up. A margin, a DSO
     // or a win rate does not: SHRC's 40% margin is not "31% of ARG's margin",
     // and a bar chart of those shares would be actively misleading.
@@ -122,6 +113,30 @@ export function buildTile(
       definition?.format === 'currency' ||
       definition?.format === 'currency_precise' ||
       definition?.format === 'count';
+
+    const rowFor = (code: string) => {
+      const result = resolveKpi(session, spec.id, code);
+      return {
+        label: scopeLabel(session, code),
+        code,
+        formatted: result.unavailable ? null : result.formatted,
+        value: num(result),
+      };
+    };
+    const rows = [
+      ...session.visibleDivisions.map(rowFor),
+      // QuickBooks classes outside the divisions are part of ARG Total; for a
+      // figure that adds up, each one holding something gets its own row so the
+      // rows reconcile to the total. A ratio of an allocation bucket means
+      // nothing, so it is never shown for one.
+      ...(additive
+        ? session.consolidatedScope
+            .filter((code) => isOtherClassCode(code))
+            .map(rowFor)
+            .filter((row) => row.value !== null && row.value !== 0)
+            .map((row) => ({ ...row, label: `${row.label} (not a division)` }))
+        : []),
+    ];
 
     const total = rows.reduce((sum, row) => sum + (row.value ?? 0), 0);
 

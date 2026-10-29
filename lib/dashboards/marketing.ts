@@ -1,7 +1,7 @@
 import 'server-only';
 import Decimal from 'decimal.js';
 import { safeDiv } from '@/lib/money';
-import { resolveKpi, CONSOLIDATED_CODE, type SemanticSession } from '@/lib/semantic/resolve';
+import { resolveKpi, scopeFor, CONSOLIDATED_CODE, type SemanticSession } from '@/lib/semantic/resolve';
 import { monthBounds, formatMonthShort } from '@/lib/semantic/periods';
 import { sumSpend } from '@/lib/semantic/facts';
 import type { KpiTileProps } from '@/components/dashboard/kpi-tile';
@@ -66,7 +66,8 @@ export function loadMarketing(
 ): MarketingViewModel {
   const { period, bundle } = session;
   const isConsolidated = divisionCode === CONSOLIDATED_CODE;
-  const divisions = isConsolidated ? session.visibleDivisions : [divisionCode];
+  // At ARG Total, marketing spend posted to Z Alloc or Not Specified counts too.
+  const divisions = scopeFor(session, divisionCode);
 
   // The shared builder: comparisons you can switch (prior month, prior year,
   // budget), the division breakdown and the trend, behind every tile.

@@ -1,12 +1,11 @@
 import 'server-only';
 import Decimal from 'decimal.js';
 import { safeDiv } from '@/lib/money';
-import { resolveKpi, CONSOLIDATED_CODE, type SemanticSession } from '@/lib/semantic/resolve';
+import { resolveKpi, scopeFor, CONSOLIDATED_CODE, type SemanticSession } from '@/lib/semantic/resolve';
 import {
   balanceSheetFor,
   budgetFor,
   companyPl,
-  companyUnassigned,
   hasPl,
   sumPl,
   sumPlOverMonths,
@@ -85,14 +84,18 @@ export interface ChangeRow {
 export interface TieOutRow {
   label: string;
   quickbooks: number;
+  /** The four divisions added up. */
   divisions: number;
+  /** What sits on classes that belong to no division (Z Alloc, Not Specified). */
+  otherClasses: number;
+  /** "Z Alloc $165,200.47 · Not Specified −$1.76" — which classes hold it. */
+  otherClassesDetail: string | null;
+  /** The four divisions plus those classes: the ARG Total every page shows. */
+  argTotal: number;
+  /** ARG Total − QuickBooks. */
   difference: number;
-  /** Divisions plus what sits on no-division classes equals QuickBooks. */
+  /** ARG Total equals QuickBooks' Total column to the dollar. */
   ties: boolean;
-  /** QuickBooks' amount on classes that belong to no division, when recorded. */
-  unassigned: number | null;
-  /** "Not Specified $94,267 · Z Alloc $200" — which classes hold it. */
-  unassignedDetail: string | null;
 }
 
 export interface BalanceSheetRow {
@@ -157,6 +160,11 @@ export interface DivisionBreakdownRow {
   label: string;
   color: string | null;
   isTotal: boolean;
+  /**
+   * A QuickBooks class that belongs to no division (Z Alloc, Not Specified):
+   * part of ARG Total, shown on its own row so the rows add up to it.
+   */
+  isOtherClass: boolean;
   revenue: number | null;
   grossProfit: number | null;
   grossMargin: number | null;
@@ -260,6 +268,11 @@ function ratioFigure(actual: number | null, budget: number | null): Figure {
   };
 }
 
+/** A class's few dollars are "-0%" of ARG Total; that reads as nothing, so say nothing. */
+function meaningfulShare(share: number | null): number | null {
+  return share === null || Math.abs(share) < 0.0005 ? null : share;
+}
+
 const ratio = (numerator: number | null, denominator: number | null): number | null =>
   numerator !== null && denominator !== null && denominator !== 0 ? numerator / denominator : null;
 
@@ -301,7 +314,8 @@ export function loadFinance(
 ): FinanceViewModel {
   const { period, bundle } = session;
   const isConsolidated = divisionCode === CONSOLIDATED_CODE;
-  const divisions = isConsolidated ? session.visibleDivisions : [divisionCode];
+  // At ARG Total: the divisions and the classes outside them, as QuickBooks' Total.
+  const divisions = scopeFor(session, divisionCode);
 
   const divisionLabel = isConsolidated
     ? 'ARG Total'
@@ -477,26 +491,27 @@ export function loadFinance(
   let tieOut: FinanceViewModel['tieOut'] = null;
   const company = isConsolidated ? companyPl(bundle, period.month) : null;
   if (company && monthPl) {
-    const outside = companyUnassigned(bundle, period.month);
+    const fourDivisions = sumPl(bundle, period.month, session.visibleDivisions);
     const rows = (['revenue', 'cogs', 'opex'] as const).map((line) => {
       const quickbooks = company[line].toNumber();
-      const inDivisions = monthPl[line].toNumber();
-      const difference = inDivisions - quickbooks;
-      const unassigned = outside ? outside.totals[line].toNumber() : null;
-      const explained = inDivisions + (unassigned ?? 0) - quickbooks;
+      const argTotal = monthPl[line].toNumber();
+      const inDivisions = fourDivisions[line].toNumber();
+      const byClass = bundle.otherClasses
+        .map((other) => ({ name: other.name, amount: bundle.pl.get(key(period.month, other.code))?.[line] }))
+        .filter((entry): entry is { name: string; amount: Decimal } => Boolean(entry.amount && !entry.amount.isZero()));
+      const difference = argTotal - quickbooks;
       return {
         label: line === 'revenue' ? 'Revenue' : line === 'cogs' ? 'Cost of goods sold' : 'Operating expenses',
         quickbooks,
         divisions: inDivisions,
+        otherClasses: argTotal - inDivisions,
+        otherClassesDetail:
+          byClass.map((entry) => `${entry.name} ${formatNumber(entry.amount.toNumber(), 'currency_precise')}`).join(' · ') ||
+          null,
+        argTotal,
         difference,
-        ties: Math.abs(explained) <= Math.max(1, Math.abs(quickbooks) * 0.001),
-        unassigned,
-        unassignedDetail: outside
-          ? outside.byClass
-              .filter((entry) => entry.line === line)
-              .map((entry) => `${entry.className} ${formatNumber(entry.amount.toNumber(), 'currency')}`)
-              .join(' · ') || null
-          : null,
+        // To the dollar: ARG Total is the same columns QuickBooks adds up.
+        ties: Math.abs(difference) <= 1,
       };
     });
     tieOut = { rows, allTie: rows.every((row) => row.ties) };
@@ -669,7 +684,14 @@ export function loadFinance(
   let divisionBreakdown: DivisionBreakdownRow[] | null = null;
   if (isConsolidated && bundle.divisions.length > 1) {
     const totalRevenue = monthPl ? monthPl.revenue.toNumber() : null;
-    const rowFor = (codes: string[], label: string, code: string, color: string | null, isTotal: boolean): DivisionBreakdownRow => {
+    const rowFor = (
+      codes: string[],
+      label: string,
+      code: string,
+      color: string | null,
+      isTotal: boolean,
+      isOtherClass = false,
+    ): DivisionBreakdownRow => {
       const month = hasPl(bundle, period.month, codes) ? sumPl(bundle, period.month, codes) : null;
       const ytd = period.ytdMonths.some((m) => hasPl(bundle, m, codes))
         ? sumPlOverMonths(bundle, period.ytdMonths, codes)
@@ -679,29 +701,42 @@ export function loadFinance(
       const np = month ? month.revenue.minus(month.cogs).minus(month.opex).toNumber() : null;
       const ytdRevenue = ytd ? ytd.revenue.toNumber() : null;
       const ytdNp = ytd ? ytd.revenue.minus(ytd.cogs).minus(ytd.opex).toNumber() : null;
-      const budget = num(budgetFor(bundle, scenario, [period.month], codes, 'revenue', isTotal));
+      // A class outside the divisions has no budget of its own.
+      const budget = isOtherClass ? null : num(budgetFor(bundle, scenario, [period.month], codes, 'revenue', isTotal));
       return {
         divisionCode: code,
         label,
         color,
         isTotal,
+        isOtherClass,
         revenue,
         grossProfit: gp,
-        grossMargin: ratio(gp, revenue),
+        // A margin on an allocation bucket's few dollars of revenue is noise, not
+        // a measure of anything; its dollars are what matter.
+        grossMargin: isOtherClass ? null : ratio(gp, revenue),
         opex: month ? month.opex.toNumber() : null,
         netProfit: np,
-        netMargin: ratio(np, revenue),
-        revenueShare: ratio(revenue, totalRevenue),
+        netMargin: isOtherClass ? null : ratio(np, revenue),
+        revenueShare: isOtherClass ? meaningfulShare(ratio(revenue, totalRevenue)) : ratio(revenue, totalRevenue),
         ytdRevenue,
         ytdNetProfit: ytdNp,
-        ytdNetMargin: ratio(ytdNp, ytdRevenue),
+        ytdNetMargin: isOtherClass ? null : ratio(ytdNp, ytdRevenue),
         budgetAttainment: ratio(revenue, budget),
       };
     };
+    // Each class outside the divisions that holds anything this year gets a row
+    // between the divisions and ARG Total, so the rows add up to ARG Total — and
+    // ARG Total to QuickBooks — instead of leaving a gap nobody can see.
+    const otherClassRows = bundle.otherClasses
+      .filter((other) =>
+        [period.month, ...period.ytdMonths].some((month) => bundle.pl.has(key(month, other.code))),
+      )
+      .map((other) => rowFor([other.code], other.name, other.code, null, false, true));
     divisionBreakdown = [
       ...bundle.divisions.map((d) =>
         rowFor([d.divisionCode], d.divisionName, d.divisionCode, divisionColors[d.divisionCode] ?? null, false),
       ),
+      ...otherClassRows,
       rowFor(divisions, 'ARG Total', CONSOLIDATED_CODE, null, true),
     ];
   }

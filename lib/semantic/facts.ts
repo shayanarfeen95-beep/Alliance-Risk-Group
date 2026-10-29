@@ -32,6 +32,37 @@ export interface DivisionRow {
   sortOrder: number;
 }
 
+/**
+ * A QuickBooks class that belongs to no division — Z Alloc, Not Specified.
+ *
+ * Not a division: it has no budget, no headcount, no HubSpot records and no
+ * place in the division selector. But it is part of ARG Total. Z Alloc holds
+ * the shared costs that are allocated over the business lines only when the
+ * month closes, and "Not Specified" is whatever was posted with no class; both
+ * are in QuickBooks' own Total column, so an ARG Total without them disagrees
+ * with the books — by $165,200 of September expenses before close, and by
+ * $1.76 of revenue.
+ *
+ * Each one sits in the bundle under a code of its own (`CLASS:<name>`), so it is
+ * summed into ARG Total by the same functions as the divisions and can be shown
+ * on its own row, and it is never mistaken for a division.
+ */
+export interface OtherClassRow {
+  code: string;
+  /** The class's name as QuickBooks prints it. */
+  name: string;
+}
+
+export const OTHER_CLASS_PREFIX = 'CLASS:';
+
+export function isOtherClassCode(code: string): boolean {
+  return code.startsWith(OTHER_CLASS_PREFIX);
+}
+
+export function otherClassCode(name: string): string {
+  return `${OTHER_CLASS_PREFIX}${name}`;
+}
+
 export interface PlMeasures {
   revenue: Decimal;
   /** MEMO — already inside cogs. */
@@ -129,6 +160,11 @@ export interface ConfigValue {
 
 export interface FactBundle {
   divisions: DivisionRow[];
+  /**
+   * Classes outside the divisions that held amounts in the window, under their
+   * `CLASS:` codes in `pl` and `gl`. Only for a caller entitled to ARG Total.
+   */
+  otherClasses: OtherClassRow[];
   /** Division codes the caller is entitled to. */
   allowedDivisions: string[];
   periodState: Map<MonthKey, { isClosed: boolean; daysInMonth: number }>;
@@ -180,6 +216,12 @@ export interface FactBundle {
 }
 
 export const key = (month: MonthKey, division: string) => `${month}|${division}`;
+
+/** "opex|Z Alloc" → ["opex", "Z Alloc"]. Only the first `|` separates. */
+function splitOnce(value: string): [string, string] {
+  const at = value.indexOf('|');
+  return at === -1 ? [value, ''] : [value.slice(0, at), value.slice(at + 1)];
+}
 
 const ZERO_PL: PlMeasures = {
   revenue: new Decimal(0),
@@ -236,6 +278,7 @@ export async function loadFactBundle(
   if (scopedCodes.length === 0) {
     return {
       divisions: [],
+      otherClasses: [],
       allowedDivisions: [],
       periodState: new Map(),
       pl: new Map(),
@@ -614,6 +657,74 @@ export async function loadFactBundle(
     if (!seen || row.loadedAt > seen) companyLoadedAt.set(k, row.loadedAt);
   }
 
+  // --- Classes outside the divisions ---------------------------------------
+  //
+  // Read from what the P&L import recorded per class (PL_UNASSIGNED, and the
+  // accounts behind it in GL_UNASSIGNED). Only present for a caller entitled to
+  // ARG Total, because company rows are only loaded for one.
+  const otherClassNames = new Set<string>();
+  const otherAccountIds = new Set<string>();
+  const PL_FIELDS: Record<string, keyof PlMeasures> = {
+    revenue: 'revenue',
+    cogs: 'cogs',
+    opex: 'opex',
+    payroll_direct: 'payrollDirect',
+    payroll_expense: 'payrollExpense',
+  };
+  for (const row of companyTotalRows) {
+    if (row.statement === 'PL_UNASSIGNED') {
+      const [line, className] = splitOnce(row.line);
+      const field = PL_FIELDS[line];
+      if (!className || !field) continue;
+      otherClassNames.add(className);
+      const k = key(row.periodMonth, otherClassCode(className));
+      const measures = pl.get(k) ?? emptyPl();
+      measures[field] = measures[field].plus(d(row.amount));
+      pl.set(k, measures);
+    } else if (row.statement === 'GL_UNASSIGNED') {
+      const [className, accountId] = splitOnce(row.line);
+      if (!className || !accountId) continue;
+      otherClassNames.add(className);
+      otherAccountIds.add(accountId);
+    }
+  }
+  if (otherAccountIds.size) {
+    const accounts = new Map(
+      (
+        await db
+          .select({
+            accountId: t.dimAccount.accountId,
+            accountName: t.dimAccount.accountName,
+            reportingLine: t.dimAccount.reportingLine,
+          })
+          .from(t.dimAccount)
+          .where(inArray(t.dimAccount.accountId, [...otherAccountIds]))
+      ).map((row) => [row.accountId, row]),
+    );
+    for (const row of companyTotalRows) {
+      if (row.statement !== 'GL_UNASSIGNED') continue;
+      const [className, accountId] = splitOnce(row.line);
+      if (!className || !accountId) continue;
+      const account = accounts.get(accountId);
+      const k = key(row.periodMonth, otherClassCode(className));
+      const list = gl.get(k) ?? [];
+      list.push({
+        accountId,
+        accountName: account?.accountName ?? accountId,
+        reportingLine: account?.reportingLine ?? null,
+        amount: d(row.amount),
+      });
+      gl.set(k, list);
+    }
+  }
+  // QuickBooks' column order: named classes alphabetically, "Not Specified" last.
+  const otherClasses: OtherClassRow[] = [...otherClassNames]
+    .sort((a, b) => {
+      const unclassed = (name: string) => (/^not\s*specified$/i.test(name) ? 1 : 0);
+      return unclassed(a) - unclassed(b) || a.localeCompare(b);
+    })
+    .map((name) => ({ code: otherClassCode(name), name }));
+
   const config = new Map<string, ConfigValue>();
   for (const row of configRows) {
     config.set(row.key, {
@@ -650,6 +761,7 @@ export async function loadFactBundle(
 
   return {
     divisions: scoped,
+    otherClasses,
     allowedDivisions: scopedCodes,
     periodState,
     pl,
@@ -861,32 +973,6 @@ export function companyPl(bundle: FactBundle, month: MonthKey): PlMeasures | nul
     cogs: lines.get('cogs') ?? zero,
     payrollExpense: lines.get('payroll_expense') ?? zero,
     opex: lines.get('opex') ?? zero,
-  };
-}
-
-/**
- * What QuickBooks holds for a month on classes that belong to no division, per
- * line and per class. Null when the month was loaded before this was recorded.
- */
-export function companyUnassigned(
-  bundle: FactBundle,
-  month: MonthKey,
-): { totals: Record<'revenue' | 'cogs' | 'opex', Decimal>; byClass: Array<{ line: string; className: string; amount: Decimal }> } | null {
-  const lines = bundle.company.get(`PL_UNASSIGNED|${month}`);
-  if (!lines) return null;
-  const zero = new Decimal(0);
-  const byClass: Array<{ line: string; className: string; amount: Decimal }> = [];
-  for (const [key, amount] of lines) {
-    const [line, className] = key.split('|');
-    if (className) byClass.push({ line: line!, className, amount });
-  }
-  return {
-    totals: {
-      revenue: lines.get('revenue') ?? zero,
-      cogs: lines.get('cogs') ?? zero,
-      opex: lines.get('opex') ?? zero,
-    },
-    byClass,
   };
 }
 

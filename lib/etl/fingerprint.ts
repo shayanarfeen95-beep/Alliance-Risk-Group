@@ -35,7 +35,9 @@ import { addMonths, type MonthKey } from '@/lib/semantic/periods';
  * it affects on the next pull without anybody having to know to press
  * "Re-import everything" — which is what the parent-account fix needed.
  */
-export const CONFORM_VERSION = '2026-09-24.2';
+// 2026-10-29.1: the P&L also records payroll and account detail for classes
+// outside the divisions (Z Alloc, Not Specified), which ARG Total now includes.
+export const CONFORM_VERSION = '2026-10-29.1';
 
 /** Reports fetched one month at a time, fingerprinted per month. */
 const MONTHLY: Record<string, { cumulative: boolean }> = {
