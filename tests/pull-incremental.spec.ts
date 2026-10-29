@@ -103,7 +103,10 @@ describe('which QuickBooks months a pull fetches', () => {
     expect(plan.months).toEqual(ALL);
     expect(plan.notes.join(' ')).toMatch(/could not be read/);
 
-    const later = new Date('2026-11-24T12:00:00Z');
+    // saveFingerprints stamps the check with the real clock, so "later" has to be
+    // measured from the real clock too. A fixed date stopped being 29 days after
+    // the check once the calendar caught up with it.
+    const later = new Date(Date.now() + 60 * 86_400_000);
     const stale = await planReportMonths(harness.db, quiet, 'QBO', 'profit_and_loss', { start: '2026-01-01', end: '2026-11-01' }, later);
     expect(stale.months).toHaveLength(11);
     expect(stale.notes.join(' ')).toMatch(/further back than QuickBooks keeps its change log/);
