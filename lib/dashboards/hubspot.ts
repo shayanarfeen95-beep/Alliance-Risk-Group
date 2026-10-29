@@ -152,6 +152,8 @@ export function loadHubspotDashboard(
     bundle.dealStages.filter((stage) => stage.isClosed && !stage.isWon).map((stage) => stage.stageId),
   );
   lostStages.add('closedlost');
+  const wonRanks = scope.stages.filter((stage) => stage.isWon).map((stage) => stageRank(stage.stageId));
+  const firstWonRank = wonRanks.length ? Math.min(...wonRanks) : null;
   const isConsolidated = divisionCode === CONSOLIDATED_CODE;
   const cardsPerColumn = options.cardsPerColumn ?? 6;
 
@@ -239,6 +241,10 @@ export function loadHubspotDashboard(
     // A stage of another pipeline (a deal moved between pipelines) is not a
     // step in this one.
     .filter(([stage]) => order.size === 0 || order.has(stage))
+    // The funnel ends where a deal is won. ARG's pipeline lists stages after
+    // it — Live and Billing, Removed From Pipeline, Prospecting — that are not
+    // steps towards a sale, and drawing them as one gave conversions of 1000%.
+    .filter(([stage]) => firstWonRank === null || stageRank(stage) <= firstWonRank)
     .sort(([a], [b]) => stageRank(a) - stageRank(b) || a.localeCompare(b));
 
   const entryCount = funnelStages[0]?.[1].size ?? 0;

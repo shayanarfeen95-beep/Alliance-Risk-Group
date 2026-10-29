@@ -219,6 +219,31 @@ export function loadLeadership2026(
   );
   sqlsByMonth.drill = {};
 
+  // When no contact matches, say what the contacts that did enter MQL carry —
+  // the four sources are Westport's words, and HubSpot's options may word them
+  // differently ("Trade Show" for "Trade Show/Conference").
+  const trailingStart = new Date(`${trailing[0]}T00:00:00Z`);
+  const enteredMql = bundle.contacts.filter(
+    (contact) => contact.mqlEnteredAt !== null && contact.mqlEnteredAt >= trailingStart,
+  );
+  if (contactsKnown && sqlsByMonth.dealCount === 0 && enteredMql.length > 0) {
+    const sources = new Map<string, number>();
+    for (const contact of enteredMql) {
+      const source = contact.leadSource ?? UNRECORDED;
+      sources.set(source, (sources.get(source) ?? 0) + 1);
+    }
+    const listed = [...sources.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .map(([source, count]) => `${source} (${count})`)
+      .join(', ');
+    gaps.push(
+      `${enteredMql.length} contact${enteredMql.length === 1 ? '' : 's'} entered Marketing Qualified Lead in ` +
+        `${formatMonthShort(trailing[0]!)} – ${formatMonthShort(trailing[trailing.length - 1]!)}, but none has a Lead ` +
+        `Source of ${LEADERSHIP_SCOPE.sqlLeadSources.join(', ')}, so SQLs read zero. The lead sources they carry: ` +
+        `${listed}. Say which of these count as SQL sources and the chart will use them.`,
+    );
+  }
+
   // Deals created: "Line of Business is any of Background Checks, and Created
   // by is none of Sarah Roy."
   const dealsCreatedByMonth = monthly(

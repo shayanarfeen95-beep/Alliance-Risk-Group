@@ -225,7 +225,9 @@ export default async function HubspotPage({
                   </div>
                   {stage.fromPreviousPct !== null && (
                     <p className="mt-0.5 text-[10.5px] text-[var(--text-muted)]">
-                      {stage.fromPreviousPct.toFixed(0)}% of the stage above
+                      {stage.fromPreviousPct <= 100
+                        ? `${stage.fromPreviousPct.toFixed(0)}% of the stage above`
+                        : 'More than the stage above — some deals skip it'}
                     </p>
                   )}
                 </li>
