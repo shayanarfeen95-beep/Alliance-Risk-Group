@@ -1458,10 +1458,13 @@ async function ownerNameMap(db: Database): Promise<Map<string, string>> {
 
   // Owners land in raw_payload: they are reference data about people, not a
   // fact, and the leaderboard needs only the name against the id.
+  // Oldest first, so where an owner appears in more than one stored pull the
+  // most recent name is the one kept.
   const rows = await db
     .select({ payload: t.rawPayload.payload })
     .from(t.rawPayload)
-    .where(eq(t.rawPayload.entity, '/crm/v3/owners'));
+    .where(eq(t.rawPayload.entity, '/crm/v3/owners'))
+    .orderBy(t.rawPayload.fetchedAt);
 
   for (const row of rows) {
     const owner = row.payload as {

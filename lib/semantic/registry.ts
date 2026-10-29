@@ -856,11 +856,12 @@ const salesDefinitions: KpiDefinition[] = [
           (input.isConsolidated ||
             (entry.divisionCode !== null && input.divisions.includes(entry.divisionCode))),
       );
+      // Deals, not entries: a deal moved back into Proposal, or through two
+      // stages both named as a proposal, is one proposal sent.
+      const deals = new Set(entries.map((entry) => entry.dealId)).size;
       return {
-        value: new Decimal(entries.length),
-        citations: [
-          { label: 'Deals entering Proposal', value: String(entries.length), source: 'HubSpot' },
-        ],
+        value: new Decimal(deals),
+        citations: [{ label: 'Deals entering Proposal', value: String(deals), source: 'HubSpot' }],
       };
     },
   },
@@ -878,11 +879,19 @@ const salesDefinitions: KpiDefinition[] = [
     compute: (input) => {
       const scope = hubspotScope(input);
       if (scope) return { value: null, unavailable: scope, citations: [] };
-      const won = dealsClosedIn(input.bundle, input.period.month, input.divisions, input.isConsolidated).filter(
-        (deal) => deal.isClosedWon && deal.createdate && deal.closedate,
+      const allWon = dealsClosedIn(input.bundle, input.period.month, input.divisions, input.isConsolidated).filter(
+        (deal) => deal.isClosedWon,
       );
+      const won = allWon.filter((deal) => deal.createdate && deal.closedate);
       if (won.length === 0) {
-        return unavailable('NO_DATA', 'No deals were won in this period, so there is no close time to average.');
+        // Two different situations, said differently: nothing was won, or deals
+        // were won but HubSpot holds no create date for any of them.
+        return unavailable(
+          'NO_DATA',
+          allWon.length === 0
+            ? 'No deals were won in this period, so there is no close time to average.'
+            : `${allWon.length} deal${allWon.length === 1 ? ' was' : 's were'} won in this period, but none has a create date in HubSpot, so a close time cannot be measured.`,
+        );
       }
       const totalDays = won.reduce((sum, deal) => {
         const days = (deal.closedate!.getTime() - deal.createdate!.getTime()) / 86_400_000;
@@ -890,7 +899,14 @@ const salesDefinitions: KpiDefinition[] = [
       }, ZERO);
       return {
         value: safeDiv(totalDays, won.length),
-        citations: [{ label: 'Deals won', value: String(won.length), source: 'HubSpot' }],
+        citations: [
+          { label: 'Deals won', value: String(won.length), source: 'HubSpot' as const },
+          // Excluded, never counted as zero days — and said, so the average is
+          // not read as covering every win.
+          ...(allWon.length > won.length
+            ? [{ label: 'Won deals with no create date (excluded)', value: String(allWon.length - won.length), source: 'HubSpot' as const }]
+            : []),
+        ],
       };
     },
   },

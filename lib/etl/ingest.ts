@@ -592,22 +592,43 @@ async function unfinishedRun(
 /**
  * Deletes landed payloads that nothing will read again.
  *
- * Two rules: anything from an entity that is no longer landed at all, and
- * anything older than the retention window. Both are safe because the single
- * reader — the owner-name lookup — wants the current owners, and a pull that
- * needs owners has just landed them.
+ * Anything older than the retention window goes — except the most recent
+ * owners pull, whatever its age. The owner-name lookup is the one reader, and
+ * it reads only what is landed: deleting the last owner list because it was
+ * more than 30 days old left every deal imported afterwards with no owner name,
+ * shown as "Unassigned", until somebody happened to pull owners again. Owners
+ * change rarely, so an old list is still the right list.
  *
  * Failures are swallowed. Reclaiming space is housekeeping; a pull that
  * succeeded must not be reported as failed because the sweep could not run.
  */
-async function sweepRawPayloads(db: Database): Promise<void> {
+export async function sweepRawPayloads(db: Database): Promise<void> {
   const cutoff = new Date(Date.now() - RAW_RETENTION_DAYS * 86_400_000);
   try {
-    await db.delete(t.rawPayload).where(lt(t.rawPayload.fetchedAt, cutoff));
+    const [latestOwners] = await db
+      .select({ loadRunId: t.rawPayload.loadRunId })
+      .from(t.rawPayload)
+      .where(eq(t.rawPayload.entity, OWNERS_ENTITY))
+      .orderBy(desc(t.rawPayload.fetchedAt))
+      .limit(1);
+
+    await db
+      .delete(t.rawPayload)
+      .where(
+        latestOwners
+          ? and(
+              lt(t.rawPayload.fetchedAt, cutoff),
+              sql`not (${t.rawPayload.entity} = ${OWNERS_ENTITY} and ${t.rawPayload.loadRunId} = ${latestOwners.loadRunId})`,
+            )
+          : lt(t.rawPayload.fetchedAt, cutoff),
+      );
   } catch {
     // Housekeeping only.
   }
 }
+
+/** How owners are stored in raw_payload: the connector's own path. */
+const OWNERS_ENTITY = '/crm/v3/owners';
 
 /**
  * Removes every landed payload that no code path reads.

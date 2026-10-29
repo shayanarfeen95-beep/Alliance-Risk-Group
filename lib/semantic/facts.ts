@@ -182,9 +182,8 @@ export interface FactBundle {
    * Every stage a deal has entered, not only the proposal one.
    *
    * The HubSpot Leadership view draws a funnel and a board, both of which need
-   * the whole history; `proposalEntries` stays because New Proposals Sent is
-   * defined on that single stage and reads better against a list that contains
-   * only it.
+   * the whole history; `proposalEntries` is the part of it New Proposals Sent
+   * counts — entries into any stage named as a proposal.
    */
   stageEntries: Array<{ dealId: string; stage: string; divisionCode: string | null; enteredAt: Date }>;
   contacts: ContactRecord[];
@@ -216,6 +215,33 @@ export interface FactBundle {
 }
 
 export const key = (month: MonthKey, division: string) => `${month}|${division}`;
+
+/**
+ * A stage is the Proposal stage when its NAME says so.
+ *
+ * New Proposals Sent read zero for every live month because it counted only
+ * the stage id `proposalsent` — HubSpot's default id, and the one the seeded
+ * data uses. ARG's pipelines carry their own ids (numeric, or a default id
+ * renamed in HubSpot), so no live deal ever matched. The deal import and the
+ * Leadership view already identify the stage by its name; this is the same
+ * rule, so the metric and the dashboards count the same deals.
+ */
+export const PROPOSAL_STAGE_NAME = /proposal|quote/i;
+
+/** Entries into a Proposal stage, from the full stage history. */
+function proposalEntriesFrom(
+  stageRows: Array<{ dealId: string; stage: string; divisionCode: string | null; enteredAt: Date }>,
+  dealStageRows: Array<{ stageId: string; label: string }>,
+): Array<{ dealId: string; divisionCode: string | null; enteredAt: Date }> {
+  const proposalStageIds = new Set(
+    dealStageRows.filter((stage) => PROPOSAL_STAGE_NAME.test(stage.label)).map((stage) => stage.stageId),
+  );
+  // HubSpot's own default id, for a portal (or the seeded data) that kept it.
+  proposalStageIds.add('proposalsent');
+  return stageRows
+    .filter((row) => proposalStageIds.has(row.stage))
+    .map((row) => ({ dealId: row.dealId, divisionCode: row.divisionCode, enteredAt: row.enteredAt }));
+}
 
 /** "opex|Z Alloc" → ["opex", "Z Alloc"]. Only the first `|` separates. */
 function splitOnce(value: string): [string, string] {
@@ -462,7 +488,7 @@ export async function loadFactBundle(
   const inHubspotWindow = (column: AnyPgColumn) =>
     and(gte(column, hubspotFrom), lt(column, hubspotTo));
 
-  const [dealRows, proposalRows, stageRows, contactRows, meetingRows, companyRows, dealStageRows] =
+  const [dealRows, stageRows, contactRows, meetingRows, companyRows, dealStageRows] =
     await Promise.all([
     // Deals are not windowed: pipeline as of month end includes deals opened
     // long before it.
@@ -487,23 +513,6 @@ export async function loadFactBundle(
       })
       .from(t.factDeal)
       .where(and(dealInScope, excludeSeed(t.factDeal.loadRunId as never))),
-    db
-      .select({
-        dealId: t.factDealStageHistory.dealId,
-        enteredAt: t.factDealStageHistory.enteredAt,
-        divisionCode: t.factDeal.divisionCode,
-      })
-      .from(t.factDealStageHistory)
-      .innerJoin(t.factDeal, eq(t.factDeal.dealId, t.factDealStageHistory.dealId))
-      .where(
-        and(
-          // §6: New Proposals Sent counts deals ENTERING the Proposal stage.
-          eq(t.factDealStageHistory.stage, 'proposalsent'),
-          gte(t.factDealStageHistory.enteredAt, hubspotFrom),
-          lte(t.factDealStageHistory.enteredAt, hubspotTo),
-          excludeSeed(t.factDealStageHistory.loadRunId as never),
-        ),
-      ),
     db
       .select({
         dealId: t.factDealStageHistory.dealId,
@@ -790,7 +799,7 @@ export async function loadFactBundle(
       dealType: row.dealType,
       companyId: row.companyId,
     })),
-    proposalEntries: proposalRows.filter((row) => inScope(row.divisionCode)),
+    proposalEntries: proposalEntriesFrom(stageRows, dealStageRows).filter((row) => inScope(row.divisionCode)),
     stageEntries: stageRows.filter((row) => inScope(row.divisionCode)),
     contacts: contactRows.filter((row) => inScope(row.divisionCode)).map((row) => ({
       contactId: row.contactId,

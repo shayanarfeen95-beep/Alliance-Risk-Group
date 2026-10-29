@@ -657,12 +657,25 @@ export const hubspotConnector: SourceConnector = {
         };
         break;
       }
-      case 'owners':
+      case 'owners': {
         // The owners endpoint is not a CRM object route: it returns whole
         // records rather than a `properties` bag, and takes no properties
         // parameter. Asking it for one is a 400.
-        page = await fetchPaged('/crm/v3/owners', [], {}, options);
+        const active = await fetchPaged('/crm/v3/owners', [], {}, options);
+        if (active.nextCursor) {
+          // Still walking the active list; the archived pass follows once it ends.
+          page = active;
+          break;
+        }
+        // And the people who have left. HubSpot returns only active users
+        // unless asked otherwise, so every deal still owned by a former
+        // employee had an owner id with no name behind it and was shown as
+        // "Unassigned" — which reads as nobody owning it. The list is short,
+        // so it is read whole rather than sliced.
+        const archived = await fetchPaged('/crm/v3/owners', [], { archived: 'true' });
+        page = { records: [...active.records, ...archived.records], nextCursor: null };
         break;
+      }
       default:
         throw new Error(`Unknown HubSpot entity "${entity}".`);
     }
