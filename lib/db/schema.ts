@@ -596,6 +596,17 @@ export const factDeal = pgTable(
      * questions for a new logo and for an existing account.
      */
     dealType: text('deal_type'),
+    /**
+     * HubSpot's Line of Business, as the option LABEL people see ("Background
+     * Checks"), several joined by "; ". The Leadership dashboard is scoped on it.
+     */
+    lineOfBusiness: text('line_of_business'),
+    /** HubSpot's "Date Compliance Review Completed" — a deal property, not a meeting. */
+    complianceReviewCompletedAt: timestamp('compliance_review_completed_at', { withTimezone: true }),
+    /** HubSpot's "Created by": a user id, which is not an owner id. */
+    createdByUserId: text('created_by_user_id'),
+    /** That user's name, resolved from the owners list at load. */
+    createdByName: text('created_by_name'),
     /** The company the deal is against, for ICP tiering and revenue matching. */
     companyId: text('company_id'),
     contactId: text('contact_id'),
@@ -648,6 +659,15 @@ export const factContact = pgTable(
     becameMqlDate: timestamp('became_mql_date', { withTimezone: true }),
     becameSqlDate: timestamp('became_sql_date', { withTimezone: true }),
     becameCustomerDate: timestamp('became_customer_date', { withTimezone: true }),
+    /** The contact's Lead Source, as its option label. */
+    leadSource: text('lead_source'),
+    /**
+     * HubSpot's "Date entered Marketing Qualified Lead (Lifecycle Stage
+     * Pipeline)" — hs_v2_date_entered_marketingqualifiedlead, the field ARG's
+     * own SQL report reads. Kept beside the history-derived became_mql_date
+     * because the two can differ, and the review is defined on this one.
+     */
+    mqlEnteredAt: timestamp('mql_entered_at', { withTimezone: true }),
     loadRunId: uuid('load_run_id').references(() => loadRun.id),
   },
   (t) => [index('fact_contact_lead_date_idx').on(t.becameLeadDate)],
@@ -1024,6 +1044,29 @@ export const dimDealStage = pgTable('dim_deal_stage', {
 });
 
 /**
+ * HubSpot's field definitions, so a field is found by the label people use.
+ *
+ * Custom properties carry internal names nobody types — Westport's definitions
+ * say "Line of Business" and "Date Compliance Review Completed", and HubSpot
+ * stores them under whatever name was generated when they were created. The
+ * options are kept so a stored value can be shown as the label HubSpot shows.
+ */
+export const dimHubspotProperty = pgTable(
+  'dim_hubspot_property',
+  {
+    objectType: text('object_type').notNull(),
+    name: text('name').notNull(),
+    label: text('label').notNull(),
+    type: text('type'),
+    fieldType: text('field_type'),
+    groupName: text('group_name'),
+    options: jsonb('options'),
+    loadRunId: uuid('load_run_id').references(() => loadRun.id),
+  },
+  (t) => [primaryKey({ name: 'dim_hubspot_property_pk', columns: [t.objectType, t.name] })],
+);
+
+/**
  * Companies, for the two questions that cannot be answered from a deal alone:
  * which tier of customer this is, and whether the revenue QuickBooks recorded
  * belongs to the same customer HubSpot booked.
@@ -1064,6 +1107,12 @@ export const syncState = pgTable(
     lastSyncedAt: timestamp('last_synced_at', { withTimezone: true }),
     /** Records read on the last completed pass, for the "nothing changed" message. */
     lastRecordCount: integer('last_record_count').notNull().default(0),
+    /**
+     * The set of fields the last completed pass asked for. A different set
+     * means records not modified since were read without the new fields, so
+     * the watermark no longer covers them and the next pass starts over.
+     */
+    fieldsVersion: text('fields_version'),
   },
   (t) => [primaryKey({ columns: [t.sourceSystem, t.entity] })],
 );

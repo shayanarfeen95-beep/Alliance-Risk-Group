@@ -91,17 +91,41 @@ function highWatermark(plan: RunPlan, fromBatch: Date | null): Date | null {
   return fromBatch > carried ? fromBatch : carried;
 }
 
-async function readWatermark(
+/**
+ * Where the last completed pass got to — or null when it no longer covers
+ * every record, because the entity is now read with fields that pass did not
+ * ask for.
+ */
+export async function readWatermark(
   db: Database,
   source: SourceSystemCode,
   entity: string,
 ): Promise<Date | null> {
   const [row] = await db
-    .select({ watermark: t.syncState.watermark })
+    .select({ watermark: t.syncState.watermark, fieldsVersion: t.syncState.fieldsVersion })
     .from(t.syncState)
     .where(and(eq(t.syncState.sourceSystem, source), eq(t.syncState.entity, entity)))
     .limit(1);
-  return row?.watermark ?? null;
+  if (!row) return null;
+  const wanted = getConnector(source).fieldsVersion?.(entity) ?? null;
+  if (wanted && row.fieldsVersion !== wanted) return null;
+  return row.watermark ?? null;
+}
+
+/** True when the last completed pass read this entity with a different set of fields. */
+async function fieldsChanged(
+  db: Database,
+  source: SourceSystemCode,
+  entity: string,
+): Promise<boolean> {
+  const wanted = getConnector(source).fieldsVersion?.(entity) ?? null;
+  if (!wanted) return false;
+  const [row] = await db
+    .select({ fieldsVersion: t.syncState.fieldsVersion, watermark: t.syncState.watermark })
+    .from(t.syncState)
+    .where(and(eq(t.syncState.sourceSystem, source), eq(t.syncState.entity, entity)))
+    .limit(1);
+  return Boolean(row?.watermark) && row?.fieldsVersion !== wanted;
 }
 
 async function advanceWatermark(
@@ -117,6 +141,7 @@ async function advanceWatermark(
     watermark,
     lastSyncedAt: new Date(),
     lastRecordCount: recordCount,
+    fieldsVersion: getConnector(source).fieldsVersion?.(entity) ?? null,
   };
 
   await db
@@ -324,6 +349,15 @@ export async function executeLoadRun(
     if (slices === 1 && !priorPlan.cursor && since) {
       notes.unshift(
         `Only what changed since ${since.toISOString().slice(0, 16).replace('T', ' ')} was fetched.`,
+      );
+    } else if (
+      slices === 1 &&
+      !options.fullRefresh &&
+      (await fieldsChanged(db, run.sourceSystem as SourceSystemCode, run.entity))
+    ) {
+      notes.unshift(
+        'Read from the beginning this once: it is now read with fields the last pass did not ask ' +
+          'for, and records nobody has edited since would otherwise never receive them.',
       );
     }
 

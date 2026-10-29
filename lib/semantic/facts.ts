@@ -110,6 +110,12 @@ export interface DealRecord {
   sourceLabel: string | null;
   /** HubSpot's newbusiness / existingbusiness. */
   dealType: string | null;
+  /** HubSpot's Line of Business, as its option label(s), "; "-joined. */
+  lineOfBusiness: string | null;
+  /** HubSpot's Date Compliance Review Completed. */
+  complianceReviewCompletedAt: Date | null;
+  /** Who created the deal in HubSpot (a user, not necessarily the owner). */
+  createdByName: string | null;
   companyId: string | null;
 }
 
@@ -122,6 +128,10 @@ export interface ContactRecord {
   becameCustomerDate: Date | null;
   becameMqlDate: Date | null;
   becameSqlDate: Date | null;
+  /** The contact's Lead Source, as its option label. */
+  leadSource: string | null;
+  /** HubSpot's Date entered Marketing Qualified Lead (Lifecycle Stage Pipeline). */
+  mqlEnteredAt: Date | null;
 }
 
 export interface CompanyRecord {
@@ -509,6 +519,9 @@ export async function loadFactBundle(
         ownerName: t.factDeal.ownerName,
         sourceLabel: t.factDeal.sourceLabel,
         dealType: t.factDeal.dealType,
+        lineOfBusiness: t.factDeal.lineOfBusiness,
+        complianceReviewCompletedAt: t.factDeal.complianceReviewCompletedAt,
+        createdByName: t.factDeal.createdByName,
         companyId: t.factDeal.companyId,
       })
       .from(t.factDeal)
@@ -542,6 +555,8 @@ export async function loadFactBundle(
         becameCustomerDate: t.factContact.becameCustomerDate,
         becameMqlDate: t.factContact.becameMqlDate,
         becameSqlDate: t.factContact.becameSqlDate,
+        leadSource: t.factContact.leadSource,
+        mqlEnteredAt: t.factContact.mqlEnteredAt,
       })
       .from(t.factContact)
       .where(
@@ -552,6 +567,7 @@ export async function loadFactBundle(
             inHubspotWindow(t.factContact.becameCustomerDate),
             inHubspotWindow(t.factContact.becameMqlDate),
             inHubspotWindow(t.factContact.becameSqlDate),
+            inHubspotWindow(t.factContact.mqlEnteredAt),
           ),
           excludeSeed(t.factContact.loadRunId as never),
         ),
@@ -797,6 +813,9 @@ export async function loadFactBundle(
       ownerName: row.ownerName,
       sourceLabel: row.sourceLabel,
       dealType: row.dealType,
+      lineOfBusiness: row.lineOfBusiness,
+      complianceReviewCompletedAt: row.complianceReviewCompletedAt,
+      createdByName: row.createdByName,
       companyId: row.companyId,
     })),
     proposalEntries: proposalEntriesFrom(stageRows, dealStageRows).filter((row) => inScope(row.divisionCode)),
@@ -810,6 +829,8 @@ export async function loadFactBundle(
       becameCustomerDate: row.becameCustomerDate,
       becameMqlDate: row.becameMqlDate,
       becameSqlDate: row.becameSqlDate,
+      leadSource: row.leadSource,
+      mqlEnteredAt: row.mqlEnteredAt,
     })),
     meetings: meetingRows.filter((row) => inScope(row.divisionCode)).map((row) => ({
       meetingId: row.meetingId,

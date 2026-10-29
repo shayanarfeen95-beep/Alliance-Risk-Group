@@ -70,7 +70,13 @@ export interface BookedVsActual {
     pacedFullYear: number;
     priorYearFull: number;
     monthsElapsed: number;
+    /** HubSpot: won in the same months last year, so booked can be compared with booked. */
+    priorYearBooked: number;
   };
+  /** What the booked side counts, e.g. "Background Checks deals in the Sales Pipeline". */
+  bookedLabel: string;
+  /** Whose revenue the billed side is, e.g. "SHRC" or "ARG Total". */
+  billedLabel: string;
   filter: NewBusinessFilter;
   /** Set when the comparison cannot be drawn, naming which side is missing. */
   unavailable: string | null;
@@ -83,7 +89,17 @@ export interface BookedVsActual {
 export function loadBookedVsActual(
   session: SemanticSession,
   divisionCode: string,
-  options: { newBusiness?: NewBusinessFilter } = {},
+  options: {
+    newBusiness?: NewBusinessFilter;
+    /**
+     * Compare against these divisions' revenue instead of the selected one's —
+     * the division that bills what the booked deals sell. Booked Background
+     * Checks deals against all of ARG's revenue compares two different
+     * businesses.
+     */
+    billed?: { codes: string[]; label: string };
+    bookedLabel?: string;
+  } = {},
 ): BookedVsActual {
   const { bundle, period } = session;
   const filter = options.newBusiness ?? 'all';
@@ -94,7 +110,7 @@ export function loadBookedVsActual(
   const year = period.month.slice(0, 4);
   const months = monthRange(`${year}-01-01` as MonthKey, period.month);
   // Billed revenue at ARG Total is QuickBooks' Total: every class, not only the divisions.
-  const divisions = scopeFor(session, divisionCode);
+  const divisions = options.billed?.codes.length ? options.billed.codes : scopeFor(session, divisionCode);
 
   // --- Booked, from HubSpot ------------------------------------------------
   const deals = bundle.deals.filter((deal) => {
@@ -110,6 +126,10 @@ export function loadBookedVsActual(
     const month = monthKeyOf(deal.closedate!);
     bookedByMonth.set(month, (bookedByMonth.get(month) ?? new Decimal(0)).plus(deal.amount));
   }
+  const priorYearBooked = months.reduce(
+    (sum, month) => sum.plus(bookedByMonth.get(priorYear(month)) ?? 0),
+    new Decimal(0),
+  );
 
   // --- Billed, from QuickBooks ---------------------------------------------
   const revenueIn = (month: MonthKey): Decimal =>
@@ -163,7 +183,15 @@ export function loadBookedVsActual(
       pacedFullYear: monthsElapsed === 0 ? 0 : (billed / monthsElapsed) * 12,
       priorYearFull,
       monthsElapsed,
+      priorYearBooked: priorYearBooked.toNumber(),
     },
+    bookedLabel: options.bookedLabel ?? 'HubSpot deals',
+    billedLabel:
+      options.billed?.label ??
+      (isConsolidated
+        ? 'ARG Total'
+        : (bundle.divisions.find((division) => division.divisionCode === divisionCode)?.divisionName ??
+          divisionCode)),
     filter,
     unavailable,
     perCustomerBlocked:

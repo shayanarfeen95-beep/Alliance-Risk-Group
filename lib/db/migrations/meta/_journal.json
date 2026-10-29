@@ -113,6 +113,13 @@
       "when": 1789100000000,
       "tag": "0015_sync_fingerprints",
       "breakpoints": true
+    },
+    {
+      "idx": 16,
+      "version": "7",
+      "when": 1789110000000,
+      "tag": "0016_leadership_fields",
+      "breakpoints": true
     }
   ]
 }

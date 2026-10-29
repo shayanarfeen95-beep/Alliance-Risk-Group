@@ -4,6 +4,9 @@ import { loadHubspotDashboard } from '@/lib/dashboards/hubspot';
 import { loadEosPanel } from '@/lib/dashboards/hubspot-eos';
 import { loadLeadership2026 } from '@/lib/dashboards/leadership-2026';
 import { loadBookedVsActual, type NewBusinessFilter } from '@/lib/dashboards/booked-vs-actual';
+import { scopeLeadership, LEADERSHIP_SCOPE } from '@/lib/dashboards/leadership-scope';
+import { companyNames, toDealRow } from '@/lib/dashboards/deal-rows';
+import { DealDrillProvider } from '@/components/charts/deal-drill';
 import { buildDivisionColorMap } from '@/lib/charts/colors';
 import { formatMonth } from '@/lib/semantic/periods';
 import { formatNumber } from '@/lib/format';
@@ -19,7 +22,6 @@ import {
   Unavailable,
 } from '@/components/ui/primitives';
 import { OwnerFilter } from '@/components/dashboard/owner-filter';
-import { PipelineFilter } from '@/components/dashboard/pipeline-filter';
 import { EosPanel } from '@/components/dashboard/eos-panel';
 import { Leadership2026Panel } from '@/components/dashboard/leadership-2026-panel';
 import { BookedVsActualPanel } from '@/components/dashboard/booked-vs-actual-panel';
@@ -48,26 +50,70 @@ export default async function HubspotPage({
 }) {
   const resolvedParams = await searchParams;
   const context = await loadDashboardContext(resolvedParams);
-  const { session, divisionCode, range, owners, ownerName, pipelines, pipeline } = context;
+  const { session, divisionCode, range, owners, ownerName } = context;
   const colors = buildDivisionColorMap(session.bundle.divisions);
-  const model = loadHubspotDashboard(session, divisionCode, colors, { range, ownerName, pipeline });
-  const eos = loadEosPanel(session, divisionCode, { range, ownerName, pipeline });
-  const leadership = loadLeadership2026(session, divisionCode);
+
+  // Westport: everything on this page is the background screening business —
+  // Line of Business is Background Checks, in the Sales Pipeline. Narrowed once
+  // here; every panel below reads the narrowed deals.
+  const scope = scopeLeadership(session);
+  const model = loadHubspotDashboard(scope, divisionCode, colors, { range, ownerName, pipeline: null });
+  const eos = loadEosPanel(scope.session, divisionCode, { range, ownerName, pipeline: null });
+  const leadership = loadLeadership2026(scope);
   const newBusiness = (first(resolvedParams.newBusiness) ?? 'all') as NewBusinessFilter;
-  const bookedVsActual = loadBookedVsActual(session, divisionCode, { newBusiness });
+
+  // Background Checks deals billed as the division that does background
+  // screening, so booked and billed describe the same business.
+  const screening = session.bundle.divisions.find((division) =>
+    /background/i.test(division.lineOfBusiness),
+  );
+  const bookedVsActual = loadBookedVsActual(scope.session, divisionCode, {
+    newBusiness,
+    bookedLabel: scope.narrowedByLineOfBusiness
+      ? `${LEADERSHIP_SCOPE.lineOfBusiness} deals`
+      : 'deals of every line of business',
+    billed:
+      screening && scope.narrowedByLineOfBusiness
+        ? { codes: [screening.divisionCode], label: screening.divisionName }
+        : undefined,
+  });
+
+  // The deals any chart can list, sent once for the whole page.
+  const referenced = new Set<string>([
+    ...eos.closed.dealIds,
+    ...eos.pipelineAdded.dealIds,
+    ...[
+      leadership.dealsCreatedByMonth,
+      leadership.pipelineAddedByMonth,
+      leadership.pipelineLessLostByMonth,
+      leadership.closedWonByMonth,
+      leadership.closedLostByMonth,
+      leadership.avgDealSizeByMonth,
+      leadership.avgDealSizeIcpByMonth,
+      leadership.complianceReviewsByMonth,
+      leadership.proposalsThisYear,
+    ].flatMap((series) => Object.values(series.drill).flat()),
+    ...Object.values(leadership.dealsWonBySource.idsBySource).flat(),
+    ...Object.values(leadership.complianceReviewsBySource.idsBySource).flat(),
+  ]);
+  const company = companyNames(session.bundle.companies);
+  const drillDeals = scope.deals
+    .filter((deal) => referenced.has(deal.dealId))
+    .map((deal) => toDealRow(deal, scope.stageLabel, company));
 
   return (
+    <DealDrillProvider deals={drillDeals}>
     <div className="space-y-6">
       <header>
         <h1 className="text-[19px] font-semibold tracking-tight">HubSpot Leadership</h1>
         <p className="mt-1 max-w-2xl text-[12.5px] leading-relaxed text-[var(--text-secondary)]">
-          The monthly leadership review, in the order ARG already reads it — activity, discovery
-          calls and demos, pipeline added and closed, attribution, then the same split by rep —
-          followed by the funnel, board and leaderboard. Every figure carries ARG&rsquo;s own
-          definitions.
+          The monthly leadership review for the background screening business — deals whose Line
+          of Business is {LEADERSHIP_SCOPE.lineOfBusiness}, in the {LEADERSHIP_SCOPE.pipeline}.
+          Every chart states what it counts, in Westport&rsquo;s definitions, and lists its deals
+          when you click a bar.
         </p>
         <p className="mt-0.5 text-[12px] text-[var(--text-muted)]">
-          {model.scope.divisionLabel} · {formatMonth(session.period.month)} · deals scoped to{' '}
+          {scope.label} · {formatMonth(session.period.month)} · deals scoped to{' '}
           {model.scope.rangeLabel} · sourced from HubSpot
         </p>
       </header>
@@ -82,12 +128,17 @@ export default async function HubspotPage({
         className="flex flex-wrap items-center gap-3 rounded-[var(--radius)] border px-3 py-2"
         style={{ borderColor: 'var(--border)', background: 'var(--surface-1)' }}
       >
-        <PipelineFilter pipelines={pipelines} selected={pipeline} />
+        <span
+          className="rounded-[4px] border px-2 py-0.5 text-[11px] font-medium"
+          style={{ borderColor: 'var(--border)', background: 'var(--surface-2)' }}
+          title="Set by Westport for this dashboard: Line of Business and pipeline"
+        >
+          {scope.label}
+        </span>
         <OwnerFilter owners={owners} selected={ownerName} />
         <p className="text-[11px] text-[var(--text-muted)]">
-          {formatNumber(model.scope.dealsInScope, 'count')} deal
-          {model.scope.dealsInScope === 1 ? '' : 's'} in scope
-          {pipeline ? ` · ${pipeline === 'default' ? 'Sales Pipeline' : pipeline}` : ''}
+          {formatNumber(scope.deals.length, 'count')} of {formatNumber(scope.totalDeals, 'count')}{' '}
+          HubSpot deals · {formatNumber(model.scope.dealsInScope, 'count')} in the date range
           {ownerName ? ` · ${ownerName}` : ''}
         </p>
       </div>
@@ -343,5 +394,6 @@ export default async function HubspotPage({
         </Card>
       </div>
     </div>
+    </DealDrillProvider>
   );
 }

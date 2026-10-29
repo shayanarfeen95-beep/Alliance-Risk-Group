@@ -130,6 +130,15 @@ export interface SourceConnector {
    * would report a connected source as unconnected — or worse, the reverse.
    */
   isConfigured(): Promise<boolean>;
+  /**
+   * Which set of fields an entity is read with, when that can change.
+   *
+   * A pull that only asks for what changed never returns a record nobody has
+   * edited, so a newly added field would never reach the records already
+   * loaded. When this differs from what the last completed pass recorded, the
+   * pull reads the entity from the beginning once.
+   */
+  fieldsVersion?(entity: string): string | null;
   fetch(entity: string, window: FetchWindow, options?: FetchOptions): Promise<RawBatch>;
   /**
    * The months holding a transaction created, edited or deleted after `since`.

@@ -5,6 +5,15 @@ import type { Database } from '@/lib/db/client';
 import * as t from '@/lib/db/schema';
 import { rollUpGl, type ReportingLine } from './rollup';
 import { lastDayOfMonth, type RawBatch } from '@/lib/connectors/types';
+import {
+  CONTACT_MQL_ENTERED,
+  DEAL_CREATED_BY,
+  LEADERSHIP_FIELDS,
+  findField,
+  readField,
+  type HubspotObjectType,
+  type HubspotPropertyDefinition,
+} from '@/lib/connectors/hubspot-fields';
 
 /**
  * Landed data -> the warehouse the dashboards read.
@@ -1521,6 +1530,104 @@ async function ownerNameMap(db: Database): Promise<Map<string, string>> {
 
 
 /**
+ * HubSpot users, as a map from user id to a person's name.
+ *
+ * "Created by" on a deal is a user id, which is a different number from the
+ * owner id the same person carries. Each owner record holds both, so the name
+ * comes from there.
+ */
+async function userNameMap(db: Database): Promise<Map<string, string>> {
+  const map = new Map<string, string>();
+  const rows = await db
+    .select({ payload: t.rawPayload.payload })
+    .from(t.rawPayload)
+    .where(eq(t.rawPayload.entity, '/crm/v3/owners'))
+    .orderBy(t.rawPayload.fetchedAt);
+
+  for (const row of rows) {
+    const owner = row.payload as {
+      userId?: number | string;
+      firstName?: string;
+      lastName?: string;
+      email?: string;
+    };
+    if (owner?.userId === undefined || owner.userId === null) continue;
+    const name = [owner.firstName, owner.lastName].filter(Boolean).join(' ').trim();
+    map.set(String(owner.userId), name || owner.email || `User ${owner.userId}`);
+  }
+  return map;
+}
+
+/** HubSpot's field list for an object, as last loaded. Empty when never loaded. */
+async function fieldCatalog(
+  db: Database,
+  object: HubspotObjectType,
+): Promise<HubspotPropertyDefinition[]> {
+  const rows = await db
+    .select()
+    .from(t.dimHubspotProperty)
+    .where(eq(t.dimHubspotProperty.objectType, object));
+  return rows.map((row) => ({
+    name: row.name,
+    label: row.label,
+    type: row.type,
+    fieldType: row.fieldType,
+    groupName: row.groupName,
+    options: (row.options as HubspotPropertyDefinition['options']) ?? null,
+  }));
+}
+
+/** Field definitions, replaced whole per object so a deleted field does not linger. */
+async function conformProperties(
+  db: Database,
+  loadRunId: string,
+  records: Array<{ payload: unknown }>,
+  notes: string[],
+): Promise<number> {
+  const byObject = new Map<HubspotObjectType, HubspotPropertyDefinition[]>();
+  for (const record of records) {
+    const field = record.payload as HubspotPropertyDefinition & { objectType?: HubspotObjectType };
+    if (!field?.name || !field.objectType) continue;
+    const list = byObject.get(field.objectType) ?? [];
+    list.push(field);
+    byObject.set(field.objectType, list);
+  }
+
+  let written = 0;
+  for (const [object, fields] of byObject) {
+    await db.delete(t.dimHubspotProperty).where(eq(t.dimHubspotProperty.objectType, object));
+    const rows = fields.map((field) => ({
+      objectType: object,
+      name: field.name,
+      label: field.label ?? field.name,
+      type: field.type ?? null,
+      fieldType: field.fieldType ?? null,
+      groupName: field.groupName ?? null,
+      options: field.options?.length
+        ? field.options.map((option) => ({ label: option.label, value: option.value }))
+        : null,
+      loadRunId,
+    }));
+    for (let index = 0; index < rows.length; index += 200) {
+      await db.insert(t.dimHubspotProperty).values(rows.slice(index, index + 200));
+    }
+    written += rows.length;
+  }
+
+  // Say which field each definition resolved to, so a reader of the pull log
+  // can see what the leadership review is reading without opening HubSpot.
+  for (const spec of Object.values(LEADERSHIP_FIELDS)) {
+    const hit = findField(spec, byObject.get(spec.object));
+    notes.push(
+      hit
+        ? `${spec.label} (${spec.object === 'deals' ? 'deal' : 'contact'}) is read from HubSpot's \`${hit.name}\` field.`
+        : `No ${spec.object === 'deals' ? 'deal' : 'contact'} field is labelled “${spec.label}” in HubSpot, so the charts defined on it will read as not available until one exists.`,
+    );
+  }
+  return written;
+}
+
+/**
  * Where a deal came from, from whichever property this portal records it on.
  *
  * HubSpot has no standard field for it. ARG uses `zoho_lead_source`, carried
@@ -1549,12 +1656,15 @@ async function conformDeals(
   lookup: DivisionLookup,
 ): Promise<number> {
   const ownerNames = await ownerNameMap(db);
+  const userNames = await userNameMap(db);
   const stageLabels = await stageLabelMap(db);
+  const catalog = await fieldCatalog(db, 'deals');
 
   let written = 0;
 
   for (const record of records) {
     const p = record.properties ?? {};
+    const createdBy = p[DEAL_CREATED_BY]?.trim() || null;
     const values = {
       dealId: record.id,
       divisionCode: dealDivision(p, lookup),
@@ -1571,6 +1681,12 @@ async function conformDeals(
       ownerName: ownerNames.get(p.hubspot_owner_id ?? '') ?? null,
       sourceLabel: sourceLabel(p),
       dealType: p.dealtype ?? null,
+      lineOfBusiness: readField(LEADERSHIP_FIELDS.lineOfBusiness, p, catalog),
+      complianceReviewCompletedAt: date(
+        readField(LEADERSHIP_FIELDS.complianceReviewCompleted, p, catalog),
+      ),
+      createdByUserId: createdBy,
+      createdByName: createdBy ? (userNames.get(createdBy) ?? null) : null,
       companyId: record.associations?.companies?.results?.[0]?.id ?? null,
       contactId: null,
       loadRunId,
@@ -1688,6 +1804,7 @@ async function conformContacts(
   loadRunId: string,
   records: HubspotObject[],
 ): Promise<number> {
+  const catalog = await fieldCatalog(db, 'contacts');
   let written = 0;
 
   for (const record of records) {
@@ -1705,6 +1822,8 @@ async function conformContacts(
         date(p.hs_lifecyclestage_customer_date) ?? lifecycleEntry(record, 'customer'),
       becameMqlDate: lifecycleEntry(record, 'marketingqualifiedlead'),
       becameSqlDate: lifecycleEntry(record, 'salesqualifiedlead'),
+      leadSource: readField(LEADERSHIP_FIELDS.contactLeadSource, p, catalog),
+      mqlEnteredAt: date(p[CONTACT_MQL_ENTERED]),
       loadRunId,
     };
 
@@ -2979,7 +3098,11 @@ async function conformInTransaction(
         rowsWritten = await conformCompanies(db, loadRunId, records);
         break;
       case 'contacts':
+      case 'mql_contacts':
         rowsWritten = await conformContacts(db, loadRunId, records);
+        break;
+      case 'properties':
+        rowsWritten = await conformProperties(db, loadRunId, batch.records, notes);
         break;
       case 'meetings':
         rowsWritten = await conformMeetings(db, loadRunId, records);
@@ -2995,6 +3118,13 @@ async function conformInTransaction(
             .update(t.factDeal)
             .set({ ownerName })
             .where(eq(t.factDeal.ownerId, ownerId));
+        }
+        // And who created each deal, which is recorded as a user id.
+        for (const [userId, userName] of await userNameMap(db)) {
+          await db
+            .update(t.factDeal)
+            .set({ createdByName: userName })
+            .where(eq(t.factDeal.createdByUserId, userId));
         }
         rowsWritten = names.size;
         notes.push(

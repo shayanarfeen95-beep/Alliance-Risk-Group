@@ -1,10 +1,11 @@
 import 'server-only';
 import Decimal from 'decimal.js';
-import { resolveKpi, CONSOLIDATED_CODE, type SemanticSession } from '@/lib/semantic/resolve';
+import { resolveKpi, CONSOLIDATED_CODE } from '@/lib/semantic/resolve';
 import { monthBounds, formatMonthShort, type MonthKey } from '@/lib/semantic/periods';
 import type { KpiTileProps } from '@/components/dashboard/kpi-tile';
 import { buildTiles } from './tiles';
 import type { DateRange } from './range';
+import type { LeadershipScope } from './leadership-scope';
 
 /**
  * The HubSpot Leadership Dashboard — the punch-list item from the 13 August
@@ -40,6 +41,8 @@ export interface FunnelStage {
   ofTotalPct: number | null;
   /** Conversion from the stage immediately above. Null on the first stage. */
   fromPreviousPct: number | null;
+  /** The deals that reached it, for the drill-down. */
+  dealIds: string[];
 }
 
 export interface BoardCard {
@@ -106,57 +109,16 @@ export interface HubspotViewModel {
 }
 
 /**
- * Stage labels and their order.
- *
- * HubSpot's default deal pipeline, in pipeline order — which is the order a
- * funnel has to be drawn in and cannot be derived from the data, because a
- * stage with no deals in it still belongs in its place. An unrecognised stage
- * is shown under its raw id rather than dropped: a custom stage nobody told us
- * about is ARG's data, and hiding it would understate the pipeline.
+ * The two headline tiles Westport kept: "We can keep the Pipeline Value and New
+ * Proposals Sent." Both are resolved over the Background Checks deals the page
+ * is scoped to.
  */
-const STAGE_ORDER = [
-  'appointmentscheduled',
-  'qualifiedtobuy',
-  'presentationscheduled',
-  'proposalsent',
-  'decisionmakerboughtin',
-  'contractsent',
-  'closedwon',
-  'closedlost',
-];
-
-const STAGE_LABELS: Record<string, string> = {
-  appointmentscheduled: 'Appointment scheduled',
-  qualifiedtobuy: 'Qualified to buy',
-  presentationscheduled: 'Presentation scheduled',
-  proposalsent: 'Proposal sent',
-  decisionmakerboughtin: 'Decision maker bought in',
-  contractsent: 'Contract sent',
-  closedwon: 'Closed won',
-  closedlost: 'Closed lost',
-};
-
-function labelFor(stage: string): string {
-  return (
-    STAGE_LABELS[stage] ??
-    stage.replace(/[_-]/g, ' ').replace(/\b\w/g, (character) => character.toUpperCase())
-  );
-}
-
-function stageRank(stage: string): number {
-  const index = STAGE_ORDER.indexOf(stage);
-  return index === -1 ? STAGE_ORDER.length : index;
-}
-
 const LEADERSHIP_TILES: Array<{ id: string; hint: string }> = [
-  { id: 'dollars_booked', hint: 'SUM(amount) where closed-won and closedate in the reporting month' },
-  { id: 'count_of_bookings', hint: 'COUNT(deals) where closed-won and closedate in the month' },
-  { id: 'pipeline_value', hint: 'SUM(amount) of deals still open, as of the reporting date' },
-  { id: 'booking_rate_pct', hint: 'Closed-won ÷ deals CLOSED in the period. Not a share of open pipeline.' },
-  { id: 'new_proposals_sent', hint: 'Deals ENTERING the Proposal stage — from stage history, not current stage' },
-  { id: 'meetings_completed', hint: 'COUNT(meetings) by meeting date in the period' },
-  { id: 'average_booking_value', hint: 'Dollars booked ÷ count of bookings' },
-  { id: 'average_close_time', hint: 'AVG(closedate − createdate) for deals won in the period' },
+  { id: 'pipeline_value', hint: 'SUM(amount) of Background Checks deals still open, as of the reporting date' },
+  {
+    id: 'new_proposals_sent',
+    hint: 'Background Checks deals ENTERING the Proposal stage in the month — from stage history, not current stage',
+  },
 ];
 
 export interface HubspotOptions {
@@ -172,12 +134,24 @@ const num = (result: { value: Decimal | null }): number | null =>
   result.value ? result.value.toNumber() : null;
 
 export function loadHubspotDashboard(
-  session: SemanticSession,
+  scope: LeadershipScope,
   divisionCode: string,
   divisionColors: Record<string, string>,
   options: HubspotOptions,
 ): HubspotViewModel {
+  const { session } = scope;
   const { period, bundle } = session;
+
+  // Stage names and order come from HubSpot. The funnel and the board used a
+  // fixed list of HubSpot's DEFAULT stages, so every stage ARG created itself
+  // showed as a number — "1279024896" — and sorted after Closed won.
+  const labelFor = scope.stageLabel;
+  const order = new Map(scope.stages.map((stage, index) => [stage.stageId, index]));
+  const stageRank = (stage: string): number => order.get(stage) ?? scope.stages.length;
+  const lostStages = new Set(
+    bundle.dealStages.filter((stage) => stage.isClosed && !stage.isWon).map((stage) => stage.stageId),
+  );
+  lostStages.add('closedlost');
   const isConsolidated = divisionCode === CONSOLIDATED_CODE;
   const cardsPerColumn = options.cardsPerColumn ?? 6;
 
@@ -261,7 +235,10 @@ export function loadHubspotDashboard(
   // Closed-lost is excluded from the funnel and shown on the board. A funnel
   // that counts losses as a stage reads as though deals progress into losing.
   const funnelStages = [...reachedByStage.entries()]
-    .filter(([stage]) => stage !== 'closedlost')
+    .filter(([stage]) => !lostStages.has(stage))
+    // A stage of another pipeline (a deal moved between pipelines) is not a
+    // step in this one.
+    .filter(([stage]) => order.size === 0 || order.has(stage))
     .sort(([a], [b]) => stageRank(a) - stageRank(b) || a.localeCompare(b));
 
   const entryCount = funnelStages[0]?.[1].size ?? 0;
@@ -280,6 +257,7 @@ export function loadHubspotDashboard(
       value: value.toNumber(),
       ofTotalPct: entryCount > 0 ? (reached.size / entryCount) * 100 : null,
       fromPreviousPct: previous && previous > 0 ? (reached.size / previous) * 100 : null,
+      dealIds: [...reached],
     };
   });
 

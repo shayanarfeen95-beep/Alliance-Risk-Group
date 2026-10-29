@@ -6,50 +6,19 @@
  * ARG's, taken from the HubSpot dashboard they run every month — the point of
  * reproducing it is that nobody has to learn a new one.
  */
-import { ChartCard } from '@/components/charts/chart-card';
+import { DealList } from '@/components/charts/deal-drill';
 import { Card, CardHeader } from '@/components/ui/primitives';
 import { StatTile, RepBars } from '@/components/dashboard/stat-tile';
 import { formatNumber } from '@/lib/format';
 import type { EosViewModel } from '@/lib/dashboards/hubspot-eos';
 
 export function EosPanel({ model, rangeLabel }: { model: EosViewModel; rangeLabel: string }) {
-  const typeSeries = [{ id: 'count', label: 'Meetings', color: 'var(--series-1)' }];
-  const typeData = model.meetingsByType.map((row) => ({
-    x: row.key,
-    xLabel: row.label,
-    count: row.count,
-  }));
-
   return (
     <div className="space-y-4">
-      {/* --- The four headline figures ------------------------------------- */}
+      {/* --- Pipeline added and closed won ----------------------------------
+          Westport keeps these two and the deals behind them; meeting activity
+          is not tracked on the leadership dashboard. */}
       <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-        <StatTile
-          label="Meetings"
-          value={model.meetingsTotal}
-          detail={`${model.meetingsByType.length} type${model.meetingsByType.length === 1 ? '' : 's'} recorded`}
-          basis={`Meetings held in ${rangeLabel}, every type included.`}
-        />
-        <StatTile
-          label="Discovery calls"
-          value={model.typesUnavailable ? null : model.discoveryCalls.total}
-          unavailable={
-            model.typesUnavailable
-              ? 'No meeting carries a call or meeting type, so discovery calls cannot be separated from the rest.'
-              : undefined
-          }
-          basis={model.classification.discovery}
-        />
-        <StatTile
-          label="Demos"
-          value={model.typesUnavailable ? null : model.demos.total}
-          unavailable={
-            model.typesUnavailable
-              ? 'No meeting carries a call or meeting type, so demos cannot be separated from the rest.'
-              : undefined
-          }
-          basis={model.classification.demo}
-        />
         <StatTile
           label="Pipeline added"
           value={model.pipelineAdded.total}
@@ -57,9 +26,6 @@ export function EosPanel({ model, rangeLabel }: { model: EosViewModel; rangeLabe
           detail={`${formatNumber(model.pipelineAdded.deals, 'count')} deal${model.pipelineAdded.deals === 1 ? '' : 's'} created`}
           basis={`Deal amount by the date the deal was CREATED in ${rangeLabel}, open or closed.`}
         />
-      </div>
-
-      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
         <StatTile
           label="Closed won"
           value={model.closed.total}
@@ -68,24 +34,8 @@ export function EosPanel({ model, rangeLabel }: { model: EosViewModel; rangeLabe
           basis={`Won amount by the date the deal CLOSED in ${rangeLabel} — a different set of deals from pipeline added, so the two do not subtract.`}
         />
 
-        <Card>
-          <CardHeader title="Discovery calls by rep" />
-          <RepBars
-            rows={model.discoveryCalls.byRep.map((row) => ({ rep: row.rep, value: row.count }))}
-            emptyLabel="No discovery calls in this range."
-          />
-        </Card>
-
-        <Card>
-          <CardHeader title="Demos by rep" />
-          <RepBars
-            rows={model.demos.byRep.map((row) => ({ rep: row.rep, value: row.count }))}
-            emptyLabel="No demos in this range."
-          />
-        </Card>
-
-        <Card>
-          <CardHeader title="Closed won by rep" />
+        <Card className="sm:col-span-2">
+          <CardHeader title="Closed won by rep" subtitle="Who closed the business, by won value" />
           <RepBars
             rows={model.closed.byRep.map((row) => ({ rep: row.rep, value: row.amount }))}
             valueFormat="currency"
@@ -94,35 +44,13 @@ export function EosPanel({ model, rangeLabel }: { model: EosViewModel; rangeLabe
         </Card>
       </div>
 
-      {/* --- Activity by type ---------------------------------------------- */}
-      <div className="grid gap-4 xl:grid-cols-2">
-        <ChartCard
-          title="Meetings by type"
-          subtitle={`Every meeting held in ${rangeLabel}, by HubSpot's call and meeting type`}
-          series={typeSeries}
-          data={typeData}
-          form="horizontalBar"
-          valueFormat="count"
-          height={Math.max(220, typeData.length * 34 + 40)}
-          note="“Not recorded” is a meeting logged without a type. It is shown rather than folded into another category — how many meetings go untyped is itself worth seeing."
+      <Card>
+        <CardHeader
+          title="Deals closed won"
+          subtitle={`Every deal won in ${rangeLabel}, with who owns it — sort by any column`}
         />
-
-        <ChartCard
-          title="Meetings by type, per rep"
-          subtitle="The same meetings, split by who ran them"
-          series={model.meetingsByTypeByRep.series}
-          data={model.meetingsByTypeByRep.data}
-          form="horizontalBar"
-          valueFormat="count"
-          height={Math.max(
-            220,
-            model.meetingsByTypeByRep.data.length *
-              Math.max(34, model.meetingsByTypeByRep.series.length * 14) +
-              40,
-          )}
-          note="The eight busiest types are shown individually; anything beyond them is grouped as Other rather than dropped, so the bars still sum to the meetings total."
-        />
-      </div>
+        <DealList title="Closed won" ids={model.closed.dealIds} emptyLabel="Nothing closed in this range." />
+      </Card>
 
       {/* --- Attribution ---------------------------------------------------- */}
       <Card>

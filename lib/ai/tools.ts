@@ -17,6 +17,10 @@ import { executeViewSpec, viewSpecJsonSchema, ViewSpecError } from './viewspec';
 import { executeSavedView, pipelineViewJsonSchema } from '@/lib/views/spec';
 import { listViews, saveView } from '@/lib/views/store';
 import type { ChartCardProps } from '@/components/charts/chart-card';
+import { scopeLeadership } from '@/lib/dashboards/leadership-scope';
+import { loadLeadership2026, type MonthlySeries } from '@/lib/dashboards/leadership-2026';
+import { companyNames, toDealRow } from '@/lib/dashboards/deal-rows';
+import { hasOption } from '@/lib/connectors/hubspot-fields';
 
 /**
  * The agent's tools.
@@ -1342,17 +1346,243 @@ const listPipelineFields: ToolDefinition = {
         .sort((a, b) => b.deals - a.deals);
     };
 
+    const stages = context.session.bundle.dealStages;
+    const stageName = new Map(stages.map((stage) => [stage.stageId, stage.label]));
+    const pipelineName = new Map(stages.map((stage) => [stage.pipelineId, stage.pipelineLabel]));
+
     return {
       result: {
         totalDeals: deals.length,
-        stages: tally((deal) => deal.dealstage ?? 'Not recorded'),
+        stages: tally((deal) => (deal.dealstage ? (stageName.get(deal.dealstage) ?? deal.dealstage) : 'Not recorded')),
         owners: tally((deal) => deal.ownerName ?? 'Unassigned'),
         sources: tally((deal) => deal.sourceLabel ?? 'Not recorded'),
-        pipelines: tally((deal) => deal.pipeline ?? 'Not recorded'),
+        pipelines: tally((deal) => (deal.pipeline ? (pipelineName.get(deal.pipeline) ?? deal.pipeline) : 'Not recorded')),
+        linesOfBusiness: tally((deal) => deal.lineOfBusiness ?? 'Not recorded'),
         note:
           'Filter on these exact strings. "Not recorded" and "Unassigned" are real, selectable groups — they are what the field being empty looks like, not an error.',
       },
       activity: `Read the pipeline's stages, owners and sources`,
+    };
+  },
+};
+
+// ---------------------------------------------------------------------------
+// Deals, by name — so nobody has to open HubSpot to see which ones
+// ---------------------------------------------------------------------------
+
+function dayBound(value: unknown, end: boolean): Date | null {
+  if (typeof value !== 'string') return null;
+  if (/^\d{4}-\d{2}$/.test(value)) {
+    const [year, month] = value.split('-').map(Number) as [number, number];
+    return end ? new Date(Date.UTC(year, month, 1)) : new Date(Date.UTC(year, month - 1, 1));
+  }
+  if (/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+    const day = new Date(`${value}T00:00:00Z`);
+    return end ? new Date(day.getTime() + 86_400_000) : day;
+  }
+  return null;
+}
+
+/**
+ * The deals themselves, with names — which deals closed, who closed them, what
+ * is sitting in a stage.
+ *
+ * A list, not a metric: the totals it returns are of the rows it matched, and
+ * the dashboards' figures still come from get_kpi and get_leadership_review.
+ */
+const findDeals: ToolDefinition = {
+  name: 'find_deals',
+  description:
+    'List HubSpot deals by name with their company, owner (for a won deal, who closed it), amount, stage, dates, lead source and Line of Business. Filter by status, owner, stage, pipeline, lead source, Line of Business, company, amount and by close, create or compliance-review dates. Use for "which deals closed in September and who closed them", "what is in Proposal", "Mario\'s open deals over $20k". Set leadershipScope to read the same deals as the HubSpot Leadership dashboard (Line of Business Background Checks, Sales Pipeline).',
+  input_schema: {
+    type: 'object',
+    additionalProperties: false,
+    properties: {
+      status: { type: 'string', enum: ['all', 'won', 'lost', 'open', 'closed'] },
+      leadershipScope: {
+        type: 'boolean',
+        description: 'Only Background Checks deals in the Sales Pipeline — the HubSpot Leadership dashboard\'s deals.',
+      },
+      closedFrom: { type: 'string', description: 'YYYY-MM or YYYY-MM-DD, inclusive.' },
+      closedTo: { type: 'string', description: 'YYYY-MM or YYYY-MM-DD, inclusive.' },
+      createdFrom: { type: 'string' },
+      createdTo: { type: 'string' },
+      reviewedFrom: { type: 'string', description: 'Date Compliance Review Completed, from.' },
+      reviewedTo: { type: 'string', description: 'Date Compliance Review Completed, to.' },
+      owner: { type: 'string', description: 'Salesperson name, or part of it.' },
+      stage: { type: 'string', description: 'Stage name as HubSpot shows it, e.g. "Proposal".' },
+      pipeline: { type: 'string', description: 'Pipeline name, e.g. "Sales Pipeline".' },
+      source: { type: 'string', description: 'Lead source, e.g. "Website".' },
+      lineOfBusiness: { type: 'string', description: 'e.g. "Background Checks".' },
+      company: { type: 'string', description: 'Company name, or part of it.' },
+      minAmount: { type: 'number' },
+      maxAmount: { type: 'number' },
+      sort: { type: 'string', enum: ['amount', 'closedate', 'createdate'] },
+      limit: { type: 'integer', minimum: 1, maximum: 100 },
+    },
+  },
+  async run(input, context) {
+    const { bundle } = context.session;
+    const scope = scopeLeadership(context.session);
+    const pool = input.leadershipScope ? scope.deals : bundle.deals;
+    const pipelineName = new Map(bundle.dealStages.map((stage) => [stage.pipelineId, stage.pipelineLabel]));
+    const company = companyNames(bundle.companies);
+    const like = (value: string | null | undefined, wanted: unknown) =>
+      typeof wanted !== 'string' || (value ?? '').toLowerCase().includes(wanted.toLowerCase());
+    const within = (value: Date | null, fromRaw: unknown, toRaw: unknown) => {
+      const from = dayBound(fromRaw, false);
+      const to = dayBound(toRaw, true);
+      if (!from && !to) return true;
+      if (!value) return false;
+      return (!from || value >= from) && (!to || value < to);
+    };
+
+    const status = typeof input.status === 'string' ? input.status : 'all';
+    const matched = pool.filter((deal) => {
+      if (status === 'won' && !deal.isClosedWon) return false;
+      if (status === 'lost' && !(deal.isClosed && !deal.isClosedWon)) return false;
+      if (status === 'open' && deal.isClosed) return false;
+      if (status === 'closed' && !deal.isClosed) return false;
+      if (!within(deal.closedate, input.closedFrom, input.closedTo)) return false;
+      if (!within(deal.createdate, input.createdFrom, input.createdTo)) return false;
+      if (!within(deal.complianceReviewCompletedAt, input.reviewedFrom, input.reviewedTo)) return false;
+      if (!like(deal.ownerName ?? 'Unassigned', input.owner)) return false;
+      if (typeof input.stage === 'string' && scope.stageLabel(deal.dealstage).toLowerCase() !== input.stage.toLowerCase()) {
+        return false;
+      }
+      if (!like(deal.pipeline ? (pipelineName.get(deal.pipeline) ?? deal.pipeline) : null, input.pipeline)) return false;
+      if (!like(deal.sourceLabel ?? 'Not recorded', input.source)) return false;
+      if (typeof input.lineOfBusiness === 'string' && !hasOption(deal.lineOfBusiness, input.lineOfBusiness)) return false;
+      if (!like(company(deal.companyId), input.company)) return false;
+      if (typeof input.minAmount === 'number' && deal.amount.lessThan(input.minAmount)) return false;
+      if (typeof input.maxAmount === 'number' && deal.amount.greaterThan(input.maxAmount)) return false;
+      return true;
+    });
+
+    const sort = typeof input.sort === 'string' ? input.sort : status === 'won' || status === 'lost' ? 'closedate' : 'amount';
+    const sorted = [...matched].sort((a, b) => {
+      if (sort === 'closedate') return (b.closedate?.getTime() ?? 0) - (a.closedate?.getTime() ?? 0);
+      if (sort === 'createdate') return (b.createdate?.getTime() ?? 0) - (a.createdate?.getTime() ?? 0);
+      return b.amount.comparedTo(a.amount);
+    });
+    const limit = typeof input.limit === 'number' ? Math.min(100, Math.max(1, input.limit)) : 25;
+    const total = matched.reduce((sum, deal) => sum.plus(deal.amount), new Decimal(0));
+
+    // Who, in totals, so "who closed the most" needs no arithmetic.
+    const byOwner = new Map<string, { deals: number; amount: Decimal }>();
+    for (const deal of matched) {
+      const owner = deal.ownerName ?? 'Unassigned';
+      const entry = byOwner.get(owner) ?? { deals: 0, amount: new Decimal(0) };
+      entry.deals += 1;
+      entry.amount = entry.amount.plus(deal.amount);
+      byOwner.set(owner, entry);
+    }
+
+    return {
+      result: {
+        matched: matched.length,
+        totalAmount: formatNumber(total.toNumber(), 'currency'),
+        shown: Math.min(limit, matched.length),
+        byOwner: [...byOwner.entries()]
+          .map(([owner, entry]) => ({ owner, deals: entry.deals, amount: formatNumber(entry.amount.toNumber(), 'currency') }))
+          .sort((a, b) => b.deals - a.deals),
+        deals: sorted.slice(0, limit).map((deal) => {
+          const row = toDealRow(deal, scope.stageLabel, company);
+          return {
+            deal: row.name,
+            company: row.company,
+            owner: row.owner,
+            amount: formatNumber(row.amount, 'currency'),
+            stage: row.stage,
+            pipeline: deal.pipeline ? (pipelineName.get(deal.pipeline) ?? deal.pipeline) : null,
+            status: row.status,
+            created: row.created,
+            closed: row.closed,
+            complianceReviewCompleted: row.reviewed,
+            leadSource: row.source,
+            lineOfBusiness: row.lineOfBusiness,
+            createdBy: row.createdBy,
+          };
+        }),
+        scope: input.leadershipScope ? scope.label : 'Every HubSpot deal',
+        note:
+          matched.length > limit
+            ? `Only the first ${limit} are listed; the totals cover all ${matched.length}.`
+            : undefined,
+      },
+      activity: `Found ${matched.length} deal${matched.length === 1 ? '' : 's'}`,
+    };
+  },
+};
+
+/**
+ * The HubSpot Leadership review, figure by figure — the same series the page
+ * draws, with the definitions they are counted on.
+ */
+const getLeadershipReview: ToolDefinition = {
+  name: 'get_leadership_review',
+  description:
+    'The HubSpot Leadership dashboard\'s figures for Background Checks deals in the Sales Pipeline: SQLs, MQLs, deals created, compliance reviews, proposals, total pipeline value (and minus closed lost), closed won, closed lost, average deal size (2026 and ICP over $10k) by month, and deals won / compliance reviews by lead source — each with Westport\'s definition. Use it for any question about that dashboard; use find_deals for the deals behind a figure.',
+  input_schema: {
+    type: 'object',
+    additionalProperties: false,
+    properties: { month: MONTH_ARG },
+  },
+  async run(input, context) {
+    const month = normaliseMonth(input.month, context.session.period.month);
+    const session =
+      month === context.session.period.month
+        ? context.session
+        : await openSemanticSession(context.db, context.user, month);
+    const scope = scopeLeadership(session);
+    const model = loadLeadership2026(scope);
+
+    const series = (points: MonthlySeries, format: 'count' | 'currency') =>
+      Object.fromEntries(
+        points.points.map((point) => [
+          formatMonth(point.x as MonthKey),
+          point.value === null ? 'not available' : formatNumber(point.value, format),
+        ]),
+      );
+
+    return {
+      result: {
+        scope: scope.label,
+        reportingMonth: formatMonth(month),
+        thisYear: model.yearLabel,
+        trailing: model.trailingLabel,
+        notYetAvailable: model.gaps,
+        figures: {
+          sqlsByMonth: series(model.sqlsByMonth, 'count'),
+          mqlsByMonth: series(model.mqlsByMonth, 'count'),
+          dealsCreatedByMonth: series(model.dealsCreatedByMonth, 'count'),
+          complianceReviewsByMonth: series(model.complianceReviewsByMonth, 'count'),
+          complianceReviewsThisYear: model.complianceReviewsByMonth.dealCount,
+          proposalsByMonth: series(model.proposalsThisYear, 'count'),
+          proposalsThisYear: model.proposalsThisYear.dealCount,
+          totalPipelineValueByMonth: series(model.pipelineAddedByMonth, 'currency'),
+          totalPipelineMinusClosedLostByMonth: series(model.pipelineLessLostByMonth, 'currency'),
+          closedWonByMonth: series(model.closedWonByMonth, 'currency'),
+          closedLostByMonth: series(model.closedLostByMonth, 'currency'),
+          averageDealSizeByMonth2026: series(model.avgDealSizeByMonth, 'currency'),
+          averageDealSizeByMonthIcp: series(model.avgDealSizeIcpByMonth, 'currency'),
+          dealsWonByLeadSourceThisYear: model.dealsWonBySource.ytd.map((row) => ({
+            source: row.label,
+            deals: row.count,
+            amount: formatNumber(row.amount, 'currency'),
+          })),
+          complianceReviewsByLeadSourceThisYear: model.complianceReviewsBySource.ytd.map((row) => ({
+            source: row.label,
+            deals: row.count,
+            amount: formatNumber(row.amount, 'currency'),
+          })),
+        },
+        definitions: model.definitions,
+        instruction:
+          'Quote these figures as given. For the deals behind any of them, call find_deals with leadershipScope true and the matching dates.',
+      },
+      activity: `Read the HubSpot Leadership review for ${formatMonth(month)}`,
+      citations: [{ label: 'Scope', value: scope.label, source: 'HubSpot' }],
     };
   },
 };
@@ -1453,6 +1683,8 @@ export const AGENT_TOOLS: ToolDefinition[] = [
   makeChart,
   makePipelineView,
   listPipelineFields,
+  findDeals,
+  getLeadershipReview,
   saveViewTool,
   listSavedViews,
   listSources,
