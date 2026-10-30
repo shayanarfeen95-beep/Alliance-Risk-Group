@@ -1,7 +1,7 @@
 import 'server-only';
 import type { SemanticSession } from '@/lib/semantic/resolve';
 import type { DealRecord, DealStageRecord } from '@/lib/semantic/facts';
-import { hasOption } from '@/lib/connectors/hubspot-fields';
+import { hasOption, SQL_LEAD_SOURCES } from '@/lib/connectors/hubspot-fields';
 
 /**
  * What the HubSpot Leadership dashboard is about: one line of business.
@@ -26,7 +26,7 @@ export const LEADERSHIP_SCOPE = {
   /** "Deals created by month … Created by is none of Sarah Roy." */
   excludedCreators: ['Sarah Roy'],
   /** "SQLs/month … Lead Source is any of Website, SHRM RFQ, Webinar, or Trade Show/Conference." */
-  sqlLeadSources: ['Website', 'SHRM RFQ', 'Webinar', 'Trade Show/Conference'],
+  sqlLeadSources: SQL_LEAD_SOURCES,
   /**
    * "Total pipeline by month (minus closed lost) … Deal stage is any of
    * Compliance Review, Qualified Discovery, Solution Alignment, Contracting,

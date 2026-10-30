@@ -127,6 +127,14 @@ describe('what the connector asks HubSpot for', () => {
         expect.objectContaining({ propertyName: 'hs_v2_date_entered_marketingqualifiedlead', operator: 'HAS_PROPERTY' }),
       ]),
     );
+    // Or one of the SQL lead sources: the dated field is empty for most contacts.
+    const bySource = (search?.body as { filterGroups: Array<{ filters: Array<{ propertyName: string; operator: string; values?: string[] }> }> })
+      .filterGroups[1]!.filters;
+    expect(bySource).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ propertyName: 'contact_lead_source', operator: 'IN', values: expect.arrayContaining(['Website', 'SHRM RFQ']) }),
+      ]),
+    );
   });
 });
 

@@ -85,7 +85,15 @@ export const CONTACT_MQL_ENTERED = 'hs_v2_date_entered_marketingqualifiedlead';
 export const HUBSPOT_FIELDS_VERSION: Partial<Record<string, string>> = {
   // Line of Business, Date Compliance Review Completed, Created by.
   deals: '2026-10-29.leadership',
+  // Also every contact whose Lead Source is one of the SQL sources.
+  mql_contacts: '2026-10-30.lead-source',
 };
+
+/**
+ * "SQLs/month … Lead Source is any of Website, SHRM RFQ, Webinar, or Trade
+ * Show/Conference" — Westport's words, matched against HubSpot's option labels.
+ */
+export const SQL_LEAD_SOURCES = ['Website', 'SHRM RFQ', 'Webinar', 'Trade Show/Conference'];
 
 /** The field in this list that a spec names, or null when it is not there. */
 export function findField(

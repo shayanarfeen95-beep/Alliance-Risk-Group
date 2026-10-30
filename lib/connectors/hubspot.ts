@@ -27,7 +27,9 @@ import {
   DEAL_CREATED_BY,
   HUBSPOT_FIELDS_VERSION,
   LEADERSHIP_FIELDS,
+  SQL_LEAD_SOURCES,
   findField,
+  hasOption,
   requestedNames,
   type FieldSpec,
   type HubspotObjectType,
@@ -381,6 +383,31 @@ async function dealProperties(): Promise<string[]> {
   ];
 }
 
+interface SearchFilter {
+  propertyName: string;
+  operator: string;
+  value?: string;
+  values?: string[];
+}
+
+/** Who can be an SQL: a date entered MQL, or one of the SQL lead sources. */
+async function sqlCandidateFilters(): Promise<SearchFilter[][]> {
+  const groups: SearchFilter[][] = [[{ propertyName: CONTACT_MQL_ENTERED, operator: 'HAS_PROPERTY' }]];
+  const catalog = await catalogOrNull('contacts');
+  const field = findField(LEADERSHIP_FIELDS.contactLeadSource, catalog);
+  if (!field) return groups;
+  const options = field.options ?? [];
+  // HubSpot filters on an option's internal value; Westport named its label.
+  const values = options.length
+    ? options
+        .filter((option) => SQL_LEAD_SOURCES.some((source) => hasOption(option.label ?? '', source)))
+        .map((option) => option.value)
+        .filter((value): value is string => Boolean(value))
+    : SQL_LEAD_SOURCES;
+  if (values.length) groups.push([{ propertyName: field.name, operator: 'IN', values }]);
+  return groups;
+}
+
 async function contactProperties(): Promise<string[]> {
   const leadership = requestedNames('contacts', await catalogOrNull('contacts'));
   return [...new Set([...CONTACT_PROPERTIES, ...leadership])];
@@ -478,8 +505,11 @@ async function fetchChanged(
     withHistory?: string[];
     associateTo?: string;
     pageSize?: number;
-    /** Further conditions every record must meet, ANDed with the watermark. */
-    filters?: Array<{ propertyName: string; operator: string; value?: string }>;
+    /**
+     * Conditions a record must meet, ANDed with the watermark. Each inner list
+     * is one alternative: a record matching any of them is read.
+     */
+    filterGroups?: SearchFilter[][];
   } = {},
 ): Promise<{ records: RawRecord[]; nextCursor: string | null; watermark: Date | null }> {
   const path = `/crm/v3/objects/${object}`;
@@ -494,14 +524,12 @@ async function fetchChanged(
 
   for (;;) {
     const page = await post<SearchPage>(`${path}/search`, {
-      filterGroups: [
-        {
-          filters: [
-            { propertyName: 'hs_lastmodifieddate', operator: 'GTE', value: String(since) },
-            ...(config.filters ?? []),
-          ],
-        },
-      ],
+      filterGroups: (config.filterGroups?.length ? config.filterGroups : [[]]).map((group) => ({
+        filters: [
+          { propertyName: 'hs_lastmodifieddate', operator: 'GTE', value: String(since) },
+          ...group,
+        ],
+      })),
       // Ascending, so an exhausted query can be restarted from the last record
       // rather than from the beginning.
       sorts: [{ propertyName: 'hs_lastmodifieddate', direction: 'ASCENDING' }],
@@ -624,7 +652,7 @@ const INCREMENTAL_ENTITIES: Record<
     properties: () => Promise<string[]>;
     withHistory?: string[];
     associateTo?: string;
-    filters?: Array<{ propertyName: string; operator: string; value?: string }>;
+    filterGroups?: () => Promise<SearchFilter[][]>;
   }
 > = {
   deals: {
@@ -638,14 +666,16 @@ const INCREMENTAL_ENTITIES: Record<
     properties: contactProperties,
     withHistory: ['lifecyclestage'],
   },
-  // Only the contacts that ever reached MQL. Their first pass reads every one
-  // of them — a few thousand rather than the whole portal — and every pass
-  // after that reads only those changed since.
+  // The contacts an SQL can be: those with HubSpot's date entered MQL, and
+  // those whose Lead Source is one of the SQL sources (whose MQL date may only
+  // be in lifecycle history — the dated field is empty for most contacts in
+  // this portal). Their first pass reads every one of them rather than the
+  // whole portal; every pass after that reads only those changed since.
   mql_contacts: {
     object: 'contacts',
     properties: contactProperties,
     withHistory: ['lifecyclestage'],
-    filters: [{ propertyName: CONTACT_MQL_ENTERED, operator: 'HAS_PROPERTY' }],
+    filterGroups: sqlCandidateFilters,
   },
   meetings: {
     object: 'meetings',
@@ -700,7 +730,7 @@ export const hubspotConnector: SourceConnector = {
         withHistory: config.withHistory,
         associateTo: config.associateTo,
         pageSize: config.withHistory?.length ? HISTORY_PAGE_SIZE : DEFAULT_PAGE_SIZE,
-        filters: config.filters,
+        filterGroups: config.filterGroups ? await config.filterGroups() : undefined,
       });
 
       return {

@@ -319,8 +319,10 @@ describe('Leadership 2026, on Westport’s definitions', () => {
 
   it('counts SQLs from date entered MQL and the four lead sources', async () => {
     const model = await panel();
-    // c1: Website, entered MQL in August. c2: Referral. c3: never entered.
-    expect(at(model.sqlsByMonth, MONTH)).toBe(1);
+    // c1: Website, HubSpot's date entered MQL in August. c2: Referral — not an
+    // SQL source. c3: Website, with no dated field but an MQL entry in its
+    // lifecycle history, as most contacts in ARG's portal have.
+    expect(at(model.sqlsByMonth, MONTH)).toBe(2);
   });
 
   it('breaks wins and reviews down by lead source, as totals and by month', async () => {

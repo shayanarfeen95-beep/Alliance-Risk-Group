@@ -135,11 +135,14 @@ export function loadLeadership2026(
     );
   }
   const createdByKnown = bundle.deals.some((deal) => deal.createdByName !== null);
-  const contactsKnown = bundle.contacts.some((contact) => contact.mqlEnteredAt !== null);
+  const contactsKnown = bundle.contacts.some(
+    (contact) => contact.mqlEnteredAt !== null || contact.leadSource !== null,
+  );
   if (!contactsKnown) {
     gaps.push(
-      'No contact carries a Date entered Marketing Qualified Lead yet, so SQLs per month cannot be ' +
-        'counted. They load with the “Marketing qualified leads” step of the next HubSpot pull.',
+      'No contact carries a Lead Source or a Date entered Marketing Qualified Lead yet, so SQLs per ' +
+        'month cannot be counted. They load with the “Marketing qualified leads” step of the next ' +
+        'HubSpot pull.',
     );
   }
 
@@ -213,7 +216,10 @@ export function loadLeadership2026(
       .filter((contact) =>
         LEADERSHIP_SCOPE.sqlLeadSources.some((source) => hasOption(contact.leadSource, source)),
       )
-      .map((contact) => ({ id: contact.contactId, date: contact.mqlEnteredAt })),
+      // HubSpot's dated field where it is set; the lifecycle history where it
+      // is not — the field is empty for most contacts in this portal, and the
+      // history records the same transition.
+      .map((contact) => ({ id: contact.contactId, date: contact.mqlEnteredAt ?? contact.becameMqlDate })),
     'count',
     contactsKnown,
   );
@@ -347,7 +353,7 @@ export function loadLeadership2026(
   const lob = LEADERSHIP_SCOPE.lineOfBusiness;
   const definitions: Record<DefinedChart, string> = {
     mqlsByMonth: 'Contacts by the month they entered Marketing Qualified Lead, from lifecycle-stage history.',
-    sqlsByMonth: `Date entered “Marketing Qualified Lead (Lifecycle Stage Pipeline)” is known, and Lead Source is any of ${LEADERSHIP_SCOPE.sqlLeadSources.join(', ')}. Counted in the month the contact entered MQL.`,
+    sqlsByMonth: `Date entered “Marketing Qualified Lead (Lifecycle Stage Pipeline)” is known, and Lead Source is any of ${LEADERSHIP_SCOPE.sqlLeadSources.join(', ')}. Counted in the month the contact entered MQL — from that field, or from lifecycle-stage history where HubSpot left it empty.`,
     dealsCreatedByMonth: `Line of Business is any of ${lob}, and Created by is none of ${LEADERSHIP_SCOPE.excludedCreators.join(', ')}. By create date.`,
     avgDealSizeByMonth: `Date Compliance Review Completed is this year, and Line of Business is any of ${lob}. The average amount of every such deal, whatever its value or stage, by the month its review completed.`,
     avgDealSizeIcpByMonth: `Line of Business is any of ${lob}, and Amount is greater than ${LEADERSHIP_SCOPE.icpMinimumAmount.toLocaleString('en-US')}. Average amount, by the month the deal was created.`,
