@@ -147,6 +147,9 @@ export async function GET(request: Request, context: { params: Promise<{ source:
         // handle that lets us ask Composio to use it.
         data: {
           connectedAccountId: account.id,
+          // The Composio user the connection belongs to. Packaged tool calls
+          // are refused without it (Sheets' tab listing is one).
+          composioUserId: account.userId ?? user.id,
           toolkit: account.toolkitSlug ?? COMPOSIO_TOOLKITS[sourceSystem].slug,
           ...(accountId ? { realmId: accountId } : {}),
         },

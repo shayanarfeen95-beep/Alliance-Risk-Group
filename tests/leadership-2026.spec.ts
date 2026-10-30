@@ -1,30 +1,28 @@
 /**
- * The Leadership 2026 review, and the link between booked and billed.
+ * The Leadership 2026 review, on Westport's definitions, and booked against billed.
  *
- * Three of these panels ask questions the warehouse could not previously answer,
- * and each was blocked by the same class of problem: a field that HubSpot
- * documents but this portal leaves empty, or an identifier that carries no
- * meaning on its own. Both fail silently — they produce a zero, and a zero on a
- * leadership dashboard is indistinguishable from a fact.
+ * Westport's October 2026 corrections define every chart on HubSpot fields:
+ * Line of Business is any of Background Checks, in the Sales Pipeline; Date
+ * Compliance Review Completed is this year; Created by is none of Sarah Roy;
+ * SQLs are contacts with a date entered MQL and one of four lead sources.
  *
- *   Stage ids are opaque. ARG's Proposal stage is `presentationscheduled` and
- *   its Compliance Review stage is `1383067404`. Matching stage names against
- *   the id — which is what the code did — finds nothing on a real portal while
- *   working perfectly on seeded data, where ids happen to read like words.
+ * The fixture deliberately gives the custom fields internal names that are NOT
+ * the obvious ones (`lob_custom`, `compliance_done__c`, `lead_src`), the way a
+ * real portal does, so these tests also prove the fields are found by their
+ * LABEL. Guessing the internal name fails silently — HubSpot returns nothing
+ * for a field it does not have — and the page would show zeros.
  *
- *   Lifecycle dates are absent. Every `hs_lifecyclestage_*_date` property in
- *   ARG's portal is empty, so the month a contact became an MQL exists only
- *   inside the property's history.
- *
- * So what is asserted here is mostly that these count the right thing and say so
- * when they cannot count at all.
+ * And, as before: stage ids carry no words (ARG's Proposal stage is
+ * `presentationscheduled`), so stages are matched by name.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { eq } from 'drizzle-orm';
 import { createTestDb, loadSeededUser, type TestDb } from './helpers/db';
 import { seedDatabase } from '@/lib/seed/load';
 import { conformBatch } from '@/lib/etl/conform';
 import { openSemanticSession, CONSOLIDATED_CODE } from '@/lib/semantic/resolve';
-import { loadLeadership2026 } from '@/lib/dashboards/leadership-2026';
+import { loadLeadership2026, type MonthlySeries } from '@/lib/dashboards/leadership-2026';
+import { scopeLeadership } from '@/lib/dashboards/leadership-scope';
 import { loadBookedVsActual } from '@/lib/dashboards/booked-vs-actual';
 import * as t from '@/lib/db/schema';
 import type { RawBatch } from '@/lib/connectors/types';
@@ -36,15 +34,16 @@ let runId: string;
 
 /** Past the seeded history, so the fixture is the only data in these months. */
 const MONTH = '2026-08-01';
+const JULY = '2026-07-01';
 
-function batch(entity: string, payloads: unknown[]): RawBatch {
+function batch(entity: string, payloads: unknown[], path?: string): RawBatch {
   return {
     sourceSystem: 'HUBSPOT',
     entity,
     window: { start: MONTH, end: MONTH },
     fetchedAt: new Date(),
     records: payloads.map((payload, index) => ({
-      entity: entity === 'deal_stages' ? '/crm/v3/pipelines/deals' : `/crm/v3/objects/${entity}`,
+      entity: path ?? `/crm/v3/objects/${entity}`,
       key: String(index),
       payload,
     })),
@@ -58,44 +57,74 @@ beforeAll(async () => {
   const [run] = await harness.db.select({ id: t.loadRun.id }).from(t.loadRun).limit(1);
   runId = run!.id;
 
-  // Stages first — ARG's real ids, which carry no words at all.
+  // HubSpot's field list: the labels Westport wrote, behind generated names.
   await conformBatch(
     harness.db,
     runId,
-    batch('deal_stages', [
-      {
-        id: 'default',
-        label: 'Sales Pipeline',
-        stages: [
-          { id: '1383067404', label: 'Compliance Review', displayOrder: 0 },
-          { id: 'presentationscheduled', label: 'Proposal', displayOrder: 1 },
-          { id: 'closedwon', label: 'Closed won', displayOrder: 2, metadata: { isClosed: 'true', probability: '1' } },
-        ],
-      },
-    ]),
+    batch(
+      'properties',
+      [
+        {
+          objectType: 'deals',
+          name: 'lob_custom',
+          label: 'Line of Business',
+          type: 'enumeration',
+          options: [
+            { label: 'Background Checks', value: 'bg_checks' },
+            { label: 'Drug Testing', value: 'drug_testing' },
+          ],
+        },
+        { objectType: 'deals', name: 'compliance_done__c', label: 'Date Compliance Review Completed', type: 'date' },
+        {
+          objectType: 'contacts',
+          name: 'lead_src',
+          label: 'Lead Source',
+          type: 'enumeration',
+          options: [
+            { label: 'Website', value: 'web' },
+            { label: 'Referral', value: 'referral' },
+          ],
+        },
+      ],
+      '/crm/v3/properties/deals',
+    ),
   );
+
+  // Owners carry both an owner id and the user id "Created by" records.
+  await harness.db.insert(t.rawPayload).values([
+    { loadRunId: runId, sourceSystem: 'HUBSPOT', entity: '/crm/v3/owners', payload: { id: '501', userId: 9001, firstName: 'Dana', lastName: 'Whitfield' } },
+    { loadRunId: runId, sourceSystem: 'HUBSPOT', entity: '/crm/v3/owners', payload: { id: '502', userId: 9002, firstName: 'Sarah', lastName: 'Roy' } },
+  ]);
 
   await conformBatch(
     harness.db,
     runId,
-    batch('companies', [
-      { id: 'co1', properties: { name: 'Tier one co', hs_ideal_customer_profile: 'Tier 1' } },
-      { id: 'co2', properties: { name: 'Tier three co', hs_ideal_customer_profile: 'Tier 3' } },
-    ]),
+    batch(
+      'deal_stages',
+      [
+        {
+          id: 'default',
+          label: 'Sales Pipeline',
+          stages: [
+            { id: '1383067404', label: 'Compliance Review', displayOrder: 0 },
+            { id: 'presentationscheduled', label: 'Proposal', displayOrder: 1 },
+            { id: 'closedwon', label: 'Closed won/Onboarding', displayOrder: 2, metadata: { isClosed: 'true', probability: '1' } },
+            { id: 'closedlost', label: 'Closed lost', displayOrder: 3, metadata: { isClosed: 'true', probability: '0' } },
+          ],
+        },
+        { id: 'renewals', label: 'Renewals', stages: [{ id: 'r1', label: 'Renewal due', displayOrder: 0 }] },
+      ],
+      '/crm/v3/pipelines/deals',
+    ),
   );
 
   await conformBatch(
     harness.db,
     runId,
     batch('contacts', [
-      // No hs_lifecyclestage_* dates at all — exactly as ARG's portal returns.
-      lifecycle('c1', [
-        { value: 'lead', timestamp: '2026-08-02T00:00:00Z' },
-        { value: 'marketingqualifiedlead', timestamp: '2026-08-05T00:00:00Z' },
-        { value: 'salesqualifiedlead', timestamp: '2026-08-20T00:00:00Z' },
-      ]),
-      lifecycle('c2', [{ value: 'marketingqualifiedlead', timestamp: '2026-08-11T00:00:00Z' }]),
-      lifecycle('c3', [{ value: 'subscriber', timestamp: '2026-08-01T00:00:00Z' }]),
+      contact('c1', { mql: '2026-08-05T00:00:00Z', source: 'web' }),
+      contact('c2', { mql: '2026-08-11T00:00:00Z', source: 'referral' }),
+      contact('c3', { source: 'web' }),
     ]),
   );
 
@@ -104,24 +133,40 @@ beforeAll(async () => {
     runId,
     batch('deals', [
       deal('d1', {
-        amount: '100000',
-        won: true,
-        company: 'co1',
-        source: 'Employee Referral',
-        type: 'newbusiness',
+        amount: '100000', status: 'won', lob: 'bg_checks', reviewed: '2026-08-03', creator: '9001',
+        source: 'Employee Referral', type: 'newbusiness',
         history: [
           { value: '1383067404', timestamp: '2026-08-03T00:00:00Z' },
           { value: 'presentationscheduled', timestamp: '2026-08-09T00:00:00Z' },
           { value: 'closedwon', timestamp: '2026-08-25T00:00:00Z' },
         ],
       }),
+      // Created by Sarah Roy: out of "deals created", in everything else.
       deal('d2', {
-        amount: '300000',
-        won: true,
-        company: 'co2',
-        source: 'Trade Show/Conference',
-        type: 'existingbusiness',
+        amount: '300000', status: 'won', lob: 'bg_checks', reviewed: '2026-08-10', creator: '9002',
+        source: 'Trade Show/Conference', type: 'existingbusiness',
         history: [{ value: 'closedwon', timestamp: '2026-08-26T00:00:00Z' }],
+      }),
+      // Another line of business: out of the page entirely.
+      deal('d3', {
+        amount: '50000', status: 'won', lob: 'drug_testing', reviewed: '2026-08-04', creator: '9001',
+        source: 'Website', history: [{ value: 'closedwon', timestamp: '2026-08-26T00:00:00Z' }],
+      }),
+      // Background Checks, but another pipeline: out too.
+      deal('d4', {
+        amount: '70000', status: 'open', lob: 'bg_checks', reviewed: '2026-08-04', creator: '9001',
+        source: 'Website', pipeline: 'renewals', history: [{ value: 'r1', timestamp: '2026-08-04T00:00:00Z' }],
+      }),
+      // Lost: counts in total pipeline, not in "minus closed lost".
+      deal('d5', {
+        amount: '20000', status: 'lost', lob: 'bg_checks', reviewed: '2026-08-12', creator: '9001',
+        source: 'Website', history: [{ value: 'closedlost', timestamp: '2026-08-28T00:00:00Z' }],
+      }),
+      // Open in Proposal, reviewed and created in July, under the ICP floor.
+      deal('d6', {
+        amount: '8000', status: 'open', lob: 'bg_checks', reviewed: '2026-07-05', creator: '9001',
+        source: 'Website', created: '2026-07-01T00:00:00Z',
+        history: [{ value: 'presentationscheduled', timestamp: '2026-07-20T00:00:00Z' }],
       }),
     ]),
   );
@@ -131,14 +176,18 @@ afterAll(async () => {
   await harness?.close();
 });
 
-function lifecycle(id: string, history: Array<{ value: string; timestamp: string }>) {
+function contact(id: string, o: { mql?: string; source: string }) {
   return {
     id,
     properties: {
-      lifecyclestage: history[history.length - 1]!.value,
+      lifecyclestage: 'marketingqualifiedlead',
       createdate: '2026-08-01T00:00:00Z',
+      lead_src: o.source,
+      ...(o.mql ? { hs_v2_date_entered_marketingqualifiedlead: o.mql } : {}),
     },
-    propertiesWithHistory: { lifecyclestage: history },
+    propertiesWithHistory: {
+      lifecyclestage: [{ value: 'marketingqualifiedlead', timestamp: o.mql ?? '2026-08-01T00:00:00Z' }],
+    },
   };
 }
 
@@ -146,109 +195,152 @@ function deal(
   id: string,
   o: {
     amount: string;
-    won: boolean;
-    company: string;
+    status: 'won' | 'lost' | 'open';
+    lob: string;
+    reviewed: string;
+    creator: string;
     source: string;
-    type: string;
+    type?: string;
+    pipeline?: string;
+    created?: string;
     history: Array<{ value: string; timestamp: string }>;
   },
 ) {
   return {
     id,
     properties: {
-      dealname: id,
+      dealname: `Deal ${id}`,
       amount: o.amount,
       dealstage: o.history[o.history.length - 1]!.value,
-      pipeline: 'default',
-      hs_is_closed_won: o.won ? 'true' : 'false',
-      hs_is_closed: o.won ? 'true' : 'false',
-      createdate: '2026-08-01T00:00:00Z',
+      pipeline: o.pipeline ?? 'default',
+      hs_is_closed_won: o.status === 'won' ? 'true' : 'false',
+      hs_is_closed: o.status === 'open' ? 'false' : 'true',
+      createdate: o.created ?? '2026-08-01T00:00:00Z',
       closedate: '2026-08-26T00:00:00Z',
       zoho_lead_source: o.source,
-      dealtype: o.type,
+      dealtype: o.type ?? null,
+      lob_custom: o.lob,
+      compliance_done__c: o.reviewed,
+      hs_created_by_user_id: o.creator,
     },
     propertiesWithHistory: { dealstage: o.history },
-    associations: { companies: { results: [{ id: o.company }] } },
   };
 }
 
-async function panel() {
+async function scoped() {
   const session = await openSemanticSession(harness.db, user, MONTH);
-  return loadLeadership2026(session, CONSOLIDATED_CODE, { trailingMonths: 3 });
+  return scopeLeadership(session);
 }
 
-describe('Leadership 2026', () => {
-  it('counts MQLs and SQLs from lifecycle history, not from the empty dated fields', async () => {
-    const model = await panel();
-    const august = (points: Array<{ x: string; value: number }>) =>
-      points.find((point) => point.x === MONTH)?.value;
+async function panel() {
+  return loadLeadership2026(await scoped(), { trailingMonths: 3 });
+}
 
-    // c1 and c2 became MQLs in August; c1 alone went on to SQL. None of them
-    // carries an hs_lifecyclestage_*_date — that is the point.
-    expect(august(model.mqlsByMonth)).toBe(2);
-    expect(august(model.sqlsByMonth)).toBe(1);
+const at = (series: MonthlySeries, month: string) => series.points.find((point) => point.x === month)?.value;
+
+describe('the Leadership scope', () => {
+  it('keeps only Background Checks deals in the Sales Pipeline', async () => {
+    const scope = await scoped();
+    // The seeded deals carry no Line of Business, so once real ones do, they
+    // are out too — as are another line of business and another pipeline.
+    expect(scope.deals.map((deal) => deal.dealId).sort()).toEqual(['d1', 'd2', 'd5', 'd6']);
+    expect(scope.label).toBe('Background Checks · Sales Pipeline');
+    expect(scope.gaps).toEqual([]);
   });
 
-  it('finds the proposal stage by its NAME, not by its id', async () => {
-    const model = await panel();
-
-    // The id is `presentationscheduled`. Matching /proposal/ against the id —
-    // which is what this used to do — finds nothing, and the review reports no
-    // proposals while looking perfectly healthy.
-    expect(model.proposalsThisYear.count).toBe(1);
-    expect(model.proposalsThisYear.amount).toBe(100_000);
+  it('reads Line of Business by its label and shows the option label, not its value', async () => {
+    const [row] = await harness.db
+      .select({ lob: t.factDeal.lineOfBusiness, reviewed: t.factDeal.complianceReviewCompletedAt, by: t.factDeal.createdByName })
+      .from(t.factDeal)
+      .where(eq(t.factDeal.dealId, 'd2'));
+    expect(row?.lob).toBe('Background Checks');
+    expect(row?.reviewed?.toISOString().slice(0, 10)).toBe('2026-08-10');
+    // "Created by" is a user id; the name comes from the owner who has it.
+    expect(row?.by).toBe('Sarah Roy');
   });
 
-  it('finds compliance reviews behind a numeric stage id', async () => {
+  it('says so, and narrows nothing, while no deal carries a Line of Business', async () => {
+    const session = await openSemanticSession(harness.db, user, MONTH);
+    const unloaded = scopeLeadership({
+      ...session,
+      bundle: { ...session.bundle, deals: session.bundle.deals.map((deal) => ({ ...deal, lineOfBusiness: null })) },
+    });
+    expect(unloaded.gaps.join(' ')).toMatch(/No deal carries a Line of Business yet/);
+    expect(unloaded.label).toMatch(/^Every line of business/);
+  });
+});
+
+describe('Leadership 2026, on Westport’s definitions', () => {
+  it('counts compliance reviews by Date Compliance Review Completed, this year', async () => {
     const model = await panel();
-    expect(model.complianceReviews.deals).toBe(1);
+    expect(at(model.complianceReviewsByMonth, MONTH)).toBe(3); // d1, d2, d5
+    expect(at(model.complianceReviewsByMonth, JULY)).toBe(1); // d6
+    expect(model.complianceReviewsByMonth.dealCount).toBe(4);
   });
 
-  it('keeps stage-based and meeting-based compliance reviews apart', async () => {
+  it('totals pipeline by review month, and leaves closed lost out of the second chart', async () => {
     const model = await panel();
-
-    // Two different things share the name: a deal that reached the Compliance
-    // Review stage, and a meeting logged as one. A deal whose review was also
-    // logged as a meeting would be counted twice if these were added, so they
-    // stay two figures. This fixture has the stage and no such meeting.
-    expect(model.complianceReviews.deals).toBe(1);
-    expect(model.complianceReviews.meetings).toBe(0);
+    expect(at(model.pipelineAddedByMonth, MONTH)).toBe(420_000);
+    expect(at(model.pipelineLessLostByMonth, MONTH)).toBe(400_000);
+    // Proposal is one of the stages the definition names.
+    expect(at(model.pipelineLessLostByMonth, JULY)).toBe(8_000);
   });
 
-  it('attributes compliance reviews and wins to the lead source', async () => {
+  it('averages every reviewed deal, whatever its value or stage', async () => {
     const model = await panel();
+    expect(at(model.avgDealSizeByMonth, MONTH)).toBe(140_000);
+  });
 
-    expect(model.complianceReviewsBySource).toEqual([
-      { key: 'Employee Referral', label: 'Employee Referral', count: 1, amount: 100_000 },
+  it('averages only deals over $10,000 for ICP, and leaves a month with none empty', async () => {
+    const model = await panel();
+    expect(at(model.avgDealSizeIcpByMonth, MONTH)).toBe(140_000);
+    // d6 is $8,000: under the floor. An average of no deals is not zero.
+    expect(at(model.avgDealSizeIcpByMonth, JULY)).toBeNull();
+  });
+
+  it('leaves Sarah Roy’s deals out of deals created, and lists the deals behind a bar', async () => {
+    const model = await panel();
+    expect(at(model.dealsCreatedByMonth, MONTH)).toBe(2);
+    expect(model.dealsCreatedByMonth.drill[MONTH]?.sort()).toEqual(['d1', 'd5']);
+  });
+
+  it('splits closed won from closed lost', async () => {
+    const model = await panel();
+    expect(at(model.closedWonByMonth, MONTH)).toBe(400_000);
+    expect(at(model.closedLostByMonth, MONTH)).toBe(20_000);
+  });
+
+  it('counts proposals by the stage NAME, once per deal, this year', async () => {
+    const model = await panel();
+    expect(model.proposalsThisYear.dealCount).toBe(2);
+    expect(at(model.proposalsThisYear, MONTH)).toBe(1);
+    expect(at(model.proposalsThisYear, JULY)).toBe(1);
+  });
+
+  it('counts SQLs from date entered MQL and the four lead sources', async () => {
+    const model = await panel();
+    // c1: Website, HubSpot's date entered MQL in August. c2: Referral — not an
+    // SQL source. c3: Website, with no dated field but an MQL entry in its
+    // lifecycle history, as most contacts in ARG's portal have.
+    expect(at(model.sqlsByMonth, MONTH)).toBe(2);
+  });
+
+  it('breaks wins and reviews down by lead source, as totals and by month', async () => {
+    const model = await panel();
+    expect(model.dealsWonBySource.ytd.map((row) => row.key).sort()).toEqual([
+      'Employee Referral',
+      'Trade Show/Conference',
     ]);
-    // Largest first. The seeded dataset contributes its own unattributed wins,
-    // so the assertion is on the two this fixture added and their order.
-    const keys = model.dealsWonBySource.map((row) => row.key);
-    expect(keys.indexOf('Trade Show/Conference')).toBeLessThan(keys.indexOf('Employee Referral'));
-    expect(model.dealsWonBySource.find((row) => row.key === 'Employee Referral')?.amount).toBe(
-      100_000,
-    );
+    expect(model.complianceReviewsBySource.idsBySource['Website']?.sort()).toEqual(['d5', 'd6']);
+    const august = model.complianceReviewsBySource.monthly.data.find((row) => row.x === MONTH);
+    expect(august?.['Website']).toBe(1);
+    expect(model.complianceReviewsBySource.monthly.drill[`${MONTH}|Website`]).toEqual(['d5']);
   });
 
-  it('averages deal size within each month, and splits it by ICP tier', async () => {
+  it('states every definition it counts on', async () => {
     const model = await panel();
-    const august = model.avgDealSizeByMonth.find((point) => point.x === MONTH);
-
-    // Two deals, 100k and 300k, both closing in August.
-    expect(august?.value).toBe(200_000);
-
-    const row = model.avgDealSizeByIcp.data.find((entry) => entry.x === MONTH);
-    expect(row?.['Tier 1']).toBe(100_000);
-    expect(row?.['Tier 3']).toBe(300_000);
-  });
-
-  it('leaves a tier with no wins empty rather than plotting zero', async () => {
-    const model = await panel();
-    const earlier = model.avgDealSizeByIcp.data.find((entry) => entry.x !== MONTH);
-
-    // An average of no deals is not zero, and drawing it as zero would put a
-    // collapse on the chart that never happened.
-    expect(earlier?.['Tier 1']).toBeNull();
+    expect(model.definitions.sqlsByMonth).toMatch(/Website, SHRM RFQ, Webinar, Trade Show\/Conference/);
+    expect(model.definitions.dealsCreatedByMonth).toMatch(/none of Sarah Roy/);
   });
 });
 
@@ -266,6 +358,17 @@ describe('booked versus billed', () => {
     expect(isNew.ytd.booked).toBe(100_000);
     expect(existing.ytd.booked).toBe(300_000);
     expect(all.ytd.booked).toBeGreaterThan(isNew.ytd.booked + existing.ytd.booked);
+  });
+
+  it('bills against the division named, and books only the scoped deals', async () => {
+    const scope = await scoped();
+    const model = loadBookedVsActual(scope.session, CONSOLIDATED_CODE, {
+      billed: { codes: ['SHRC'], label: 'SHRC' },
+    });
+    const total = loadBookedVsActual(scope.session, CONSOLIDATED_CODE);
+    expect(model.ytd.booked).toBe(400_000);
+    expect(model.billedLabel).toBe('SHRC');
+    expect(model.ytd.billed).toBeLessThan(total.ytd.billed);
   });
 
   it('compares against the same months of last year, not the whole of it', async () => {
@@ -297,5 +400,42 @@ describe('booked versus billed', () => {
 
     expect(model.perCustomerBlocked).toMatch(/by customer/i);
     expect(model.perCustomerBlocked).toMatch(/mapping/i);
+  });
+});
+
+describe('the assistant reads the same deals', () => {
+  it('lists won Background Checks deals by name, with who closed them', async () => {
+    const { toolByName } = await import('@/lib/ai/tools');
+    const session = await openSemanticSession(harness.db, user, MONTH);
+    const outcome = await toolByName('find_deals')!.run(
+      { status: 'won', leadershipScope: true, closedFrom: '2026-08', closedTo: '2026-08' },
+      { db: harness.db, user, session, conversationId: null },
+    );
+    const result = outcome.result as {
+      matched: number;
+      deals: Array<{ deal: string; owner: string; stage: string; lineOfBusiness: string }>;
+    };
+    expect(result.matched).toBe(2);
+    expect(result.deals.map((row) => row.deal).sort()).toEqual(['Deal d1', 'Deal d2']);
+    expect(result.deals.every((row) => row.stage === 'Closed won/Onboarding')).toBe(true);
+    expect(result.deals.every((row) => row.lineOfBusiness === 'Background Checks')).toBe(true);
+  });
+
+  it('quotes the Leadership review with its definitions', async () => {
+    const { toolByName } = await import('@/lib/ai/tools');
+    const session = await openSemanticSession(harness.db, user, MONTH);
+    const outcome = await toolByName('get_leadership_review')!.run(
+      {},
+      { db: harness.db, user, session, conversationId: null },
+    );
+    const result = outcome.result as {
+      scope: string;
+      figures: { complianceReviewsThisYear: number; closedLostByMonth: Record<string, string> };
+      definitions: Record<string, string>;
+    };
+    expect(result.scope).toBe('Background Checks · Sales Pipeline');
+    expect(result.figures.complianceReviewsThisYear).toBe(4);
+    expect(result.figures.closedLostByMonth['August 2026']).toBe('$20,000');
+    expect(result.definitions.complianceReviewsByMonth).toMatch(/Date Compliance Review Completed/);
   });
 });

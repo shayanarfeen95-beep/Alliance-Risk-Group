@@ -136,7 +136,15 @@ async function ingestionIdentity(db: Database): Promise<SessionUser | null> {
   };
 }
 
-/** The same anchored window the Pull button uses — never reaching past it. */
+/**
+ * The nightly window: the three months ending at the month we are in.
+ *
+ * This used to end at DEFAULT_REPORTING_MONTH, which is a display setting and
+ * sat at its seeded 2026-03 — so every night refreshed January to March and the
+ * months actually being booked were never refreshed at all. The current month
+ * and the two before it are the ones still moving: late invoices, accruals and
+ * reclasses land in the prior month for weeks after it ends.
+ */
 async function reportingWindow(db: Database): Promise<{ start: string; end: string }> {
   const [configured] = await db
     .select({ value: t.appConfig.value })
@@ -144,7 +152,8 @@ async function reportingWindow(db: Database): Promise<{ start: string; end: stri
     .where(eq(t.appConfig.key, 'DEFAULT_REPORTING_MONTH'))
     .limit(1);
 
-  const end = configured?.value ?? new Date().toISOString().slice(0, 8) + '01';
+  const thisMonth = new Date().toISOString().slice(0, 8) + '01';
+  const end = configured?.value && configured.value > thisMonth ? configured.value : thisMonth;
   const [year, month] = end.split('-').map(Number) as [number, number];
   const shifted = new Date(Date.UTC(year, month - 3, 1));
   const start = `${shifted.getUTCFullYear()}-${String(shifted.getUTCMonth() + 1).padStart(2, '0')}-01`;

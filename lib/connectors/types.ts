@@ -89,6 +89,14 @@ export interface FetchOptions {
    * still walk every record, which is the cost this exists to avoid.
    */
   since?: Date | null;
+  /**
+   * For a report fetched a month at a time: only these months.
+   *
+   * Set by the pull when it already holds the other months unchanged — so a
+   * refresh fetches the months that are new or could have changed, not the
+   * whole window every time. Absent means every month in the window.
+   */
+  months?: string[] | null;
 }
 
 /**
@@ -122,7 +130,24 @@ export interface SourceConnector {
    * would report a connected source as unconnected — or worse, the reverse.
    */
   isConfigured(): Promise<boolean>;
+  /**
+   * Which set of fields an entity is read with, when that can change.
+   *
+   * A pull that only asks for what changed never returns a record nobody has
+   * edited, so a newly added field would never reach the records already
+   * loaded. When this differs from what the last completed pass recorded, the
+   * pull reads the entity from the beginning once.
+   */
+  fieldsVersion?(entity: string): string | null;
   fetch(entity: string, window: FetchWindow, options?: FetchOptions): Promise<RawBatch>;
+  /**
+   * The months holding a transaction created, edited or deleted after `since`.
+   *
+   * Lets a pull re-check only the months that changed. `undated` counts changes
+   * the source reports without a date (a deletion carries none), which the
+   * caller must treat as "could be any month".
+   */
+  changedMonths?(since: Date): Promise<{ months: string[]; undated: number }>;
 }
 
 export class ConnectorNotConfiguredError extends Error {

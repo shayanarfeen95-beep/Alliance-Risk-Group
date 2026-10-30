@@ -6,6 +6,15 @@ import type { SessionUser } from '@/lib/auth/session';
 import { can } from '@/lib/auth/scope';
 import { getConnector, CONNECTORS, type SourceSystemCode } from '@/lib/connectors';
 import { conformBatch } from './conform';
+import {
+  compareBatch,
+  isFingerprinted,
+  isMonthly,
+  planReportMonths,
+  saveFingerprints,
+  touchFingerprints,
+} from './fingerprint';
+import { monthsInWindow } from '@/lib/connectors/types';
 
 /**
  * Running a load.
@@ -66,6 +75,12 @@ interface RunPlan {
   slices?: number;
   /** Newest source-side change seen so far in this run, across all its slices. */
   watermark?: string | null;
+  /** For a monthly report: the months this run fetches (decided on its first slice). */
+  months?: string[] | null;
+  /** What the first slice decided about which months to fetch, for the log. */
+  planNotes?: string[];
+  /** Every note the run has produced, across slices, for the pull log. */
+  notes?: string[];
 }
 
 /** The later of what the run has already seen and what this slice just saw. */
@@ -76,17 +91,41 @@ function highWatermark(plan: RunPlan, fromBatch: Date | null): Date | null {
   return fromBatch > carried ? fromBatch : carried;
 }
 
-async function readWatermark(
+/**
+ * Where the last completed pass got to — or null when it no longer covers
+ * every record, because the entity is now read with fields that pass did not
+ * ask for.
+ */
+export async function readWatermark(
   db: Database,
   source: SourceSystemCode,
   entity: string,
 ): Promise<Date | null> {
   const [row] = await db
-    .select({ watermark: t.syncState.watermark })
+    .select({ watermark: t.syncState.watermark, fieldsVersion: t.syncState.fieldsVersion })
     .from(t.syncState)
     .where(and(eq(t.syncState.sourceSystem, source), eq(t.syncState.entity, entity)))
     .limit(1);
-  return row?.watermark ?? null;
+  if (!row) return null;
+  const wanted = getConnector(source).fieldsVersion?.(entity) ?? null;
+  if (wanted && row.fieldsVersion !== wanted) return null;
+  return row.watermark ?? null;
+}
+
+/** True when the last completed pass read this entity with a different set of fields. */
+async function fieldsChanged(
+  db: Database,
+  source: SourceSystemCode,
+  entity: string,
+): Promise<boolean> {
+  const wanted = getConnector(source).fieldsVersion?.(entity) ?? null;
+  if (!wanted) return false;
+  const [row] = await db
+    .select({ fieldsVersion: t.syncState.fieldsVersion, watermark: t.syncState.watermark })
+    .from(t.syncState)
+    .where(and(eq(t.syncState.sourceSystem, source), eq(t.syncState.entity, entity)))
+    .limit(1);
+  return Boolean(row?.watermark) && row?.fieldsVersion !== wanted;
 }
 
 async function advanceWatermark(
@@ -102,6 +141,7 @@ async function advanceWatermark(
     watermark,
     lastSyncedAt: new Date(),
     lastRecordCount: recordCount,
+    fieldsVersion: getConnector(source).fieldsVersion?.(entity) ?? null,
   };
 
   await db
@@ -210,14 +250,50 @@ export async function executeLoadRun(
   };
 
   try {
+    const window = { start: run.windowStart!, end: run.windowEnd! };
+    const incremental = !options.fullRefresh && isFingerprinted(run.sourceSystem, run.entity);
+
+    // Which months could have changed — decided once, on the first slice, and
+    // carried on the run so later slices fetch the same set.
+    let months = priorPlan.months ?? null;
+    let planNotes = priorPlan.planNotes ?? [];
+    if (incremental && isMonthly(run.sourceSystem, run.entity) && slices === 1 && !priorPlan.cursor) {
+      const plan = await planReportMonths(db, connector, run.sourceSystem, run.entity, window);
+      months = plan.months;
+      planNotes = plan.notes;
+      const skipped = monthsInWindow(window).filter((month) => !plan.months.includes(month));
+      if (skipped.length) await touchFingerprints(db, run.sourceSystem, run.entity, skipped);
+    }
+
+    // Nothing could have changed: the run is complete without a single request.
+    if (months && months.length === 0) {
+      await db
+        .update(t.loadRun)
+        .set({
+          status: 'SUCCEEDED',
+          finishedAt: new Date(),
+          plan: { ...priorPlan, cursor: null, slices, months, planNotes, notes: planNotes },
+        })
+        .where(eq(t.loadRun.id, run.id));
+      await db.insert(t.auditEvent).values({
+        userId: user.id,
+        action: auditAction,
+        entity: 'load_run',
+        entityId: run.id,
+        detail: { source: run.sourceSystem, entity: run.entity, records: 0, rowsWritten: 0, slices, notes: planNotes },
+      });
+      return { ...base, ok: true, done: true, notes: planNotes };
+    }
+
     const batch = await connector.fetch(
       run.entity,
-      { start: run.windowStart!, end: run.windowEnd! },
+      window,
       {
         cursor: priorPlan.cursor ?? null,
         deadline: options.deadline ?? Date.now() + SLICE_FETCH_BUDGET_MS,
         maxRecords: options.maxRecords ?? SLICE_MAX_RECORDS,
         since,
+        months,
       },
     );
 
@@ -248,18 +324,40 @@ export async function executeLoadRun(
     // Then conform, in the same run. Landing data and stopping was the gap that
     // let a connected source and a seeded dashboard coexist with nothing
     // anywhere saying the two were unrelated.
-    const conformed = await conformBatch(db, run.id, batch);
+    // Only what is new or different goes on to be imported. Fingerprints are
+    // computed on "Re-import everything" too, so the next ordinary pull can
+    // compare against what it wrote.
+    const comparison = isFingerprinted(run.sourceSystem, run.entity)
+      ? await compareBatch(db, batch, incremental)
+      : null;
+    const toConform = comparison?.batch ?? batch;
+    const conformed = toConform.records.length
+      ? await conformBatch(db, run.id, toConform)
+      : { rowsWritten: 0, notes: [] as string[] };
+    if (comparison) await saveFingerprints(db, run.sourceSystem, run.entity, comparison, run.id);
 
     // Say so when a pull is continuing rather than starting over. Without this
     // a resumed pull and a restarted one look identical from the outside, which
     // is exactly the doubt this whole mechanism exists to remove.
-    const notes = [...conformed.notes];
+    const notes = [...(slices === 1 ? planNotes : []), ...(comparison?.notes ?? []), ...conformed.notes];
+    if (options.fullRefresh && isFingerprinted(run.sourceSystem, run.entity) && slices === 1) {
+      notes.unshift('Re-import everything: every month and list was fetched and imported again, changed or not.');
+    }
     if (options.continuation) {
       notes.unshift('Continued from where the last pull stopped, rather than starting again.');
     }
     if (slices === 1 && !priorPlan.cursor && since) {
       notes.unshift(
         `Only what changed since ${since.toISOString().slice(0, 16).replace('T', ' ')} was fetched.`,
+      );
+    } else if (
+      slices === 1 &&
+      !options.fullRefresh &&
+      (await fieldsChanged(db, run.sourceSystem as SourceSystemCode, run.entity))
+    ) {
+      notes.unshift(
+        'Read from the beginning this once: it is now read with fields the last pass did not ask ' +
+          'for, and records nobody has edited since would otherwise never receive them.',
       );
     }
 
@@ -297,6 +395,9 @@ export async function executeLoadRun(
           ...priorPlan,
           cursor: batch.nextCursor ?? null,
           slices,
+          months,
+          planNotes,
+          notes: [...(priorPlan.notes ?? []), ...notes].slice(-60),
           // Carried across slices so the finishing one can commit the newest
           // timestamp the whole run saw, not just the newest in its own page.
           watermark: highWatermark(priorPlan, batch.watermark ?? null)?.toISOString() ?? null,
@@ -340,7 +441,7 @@ export async function executeLoadRun(
       notes,
     };
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
+    const message = describeLoadError(error);
 
     await db
       .update(t.loadRun)
@@ -349,6 +450,43 @@ export async function executeLoadRun(
 
     return { ...base, ok: false, done: true, error: message };
   }
+}
+
+/**
+ * What a failed load says about itself, reason first.
+ *
+ * A database error arrives wrapped: the outer message is the whole statement —
+ * "Failed query: insert into fact_gl_balance … values ($1, $2, …" followed by
+ * every parameter — and the reason (a duplicate key, a constraint, a trigger's
+ * own words) is on its `cause`. Storing only the outer message cut the reason
+ * off: October's failed P&L refreshes said which table they were writing and
+ * never why, so nobody could tell a duplicate row from a full database.
+ */
+export function describeLoadError(error: unknown): string {
+  if (!(error instanceof Error)) return String(error);
+
+  const cause = (error as { cause?: unknown }).cause as
+    | { message?: string; detail?: string; constraint_name?: string; constraint?: string; code?: string }
+    | undefined;
+  if (!cause || typeof cause !== 'object' || !cause.message) return error.message;
+
+  const constraint = cause.constraint_name ?? cause.constraint;
+  const reason = [
+    cause.message,
+    cause.detail,
+    constraint ? `constraint ${constraint}` : null,
+    cause.code ? `code ${cause.code}` : null,
+  ]
+    .filter(Boolean)
+    .join(' — ');
+
+  // Which statement, without its parameter list: the table is what helps.
+  const statement = error.message
+    .replace(/^Failed query:\s*/i, '')
+    .replace(/\s+values[\s\S]*$/i, '')
+    .replace(/\s+/g, ' ')
+    .slice(0, 160);
+  return statement ? `${reason} (while running: ${statement})` : reason;
 }
 
 /**
@@ -525,22 +663,43 @@ async function unfinishedRun(
 /**
  * Deletes landed payloads that nothing will read again.
  *
- * Two rules: anything from an entity that is no longer landed at all, and
- * anything older than the retention window. Both are safe because the single
- * reader — the owner-name lookup — wants the current owners, and a pull that
- * needs owners has just landed them.
+ * Anything older than the retention window goes — except the most recent
+ * owners pull, whatever its age. The owner-name lookup is the one reader, and
+ * it reads only what is landed: deleting the last owner list because it was
+ * more than 30 days old left every deal imported afterwards with no owner name,
+ * shown as "Unassigned", until somebody happened to pull owners again. Owners
+ * change rarely, so an old list is still the right list.
  *
  * Failures are swallowed. Reclaiming space is housekeeping; a pull that
  * succeeded must not be reported as failed because the sweep could not run.
  */
-async function sweepRawPayloads(db: Database): Promise<void> {
+export async function sweepRawPayloads(db: Database): Promise<void> {
   const cutoff = new Date(Date.now() - RAW_RETENTION_DAYS * 86_400_000);
   try {
-    await db.delete(t.rawPayload).where(lt(t.rawPayload.fetchedAt, cutoff));
+    const [latestOwners] = await db
+      .select({ loadRunId: t.rawPayload.loadRunId })
+      .from(t.rawPayload)
+      .where(eq(t.rawPayload.entity, OWNERS_ENTITY))
+      .orderBy(desc(t.rawPayload.fetchedAt))
+      .limit(1);
+
+    await db
+      .delete(t.rawPayload)
+      .where(
+        latestOwners
+          ? and(
+              lt(t.rawPayload.fetchedAt, cutoff),
+              sql`not (${t.rawPayload.entity} = ${OWNERS_ENTITY} and ${t.rawPayload.loadRunId} = ${latestOwners.loadRunId})`,
+            )
+          : lt(t.rawPayload.fetchedAt, cutoff),
+      );
   } catch {
     // Housekeeping only.
   }
 }
+
+/** How owners are stored in raw_payload: the connector's own path. */
+const OWNERS_ENTITY = '/crm/v3/owners';
 
 /**
  * Removes every landed payload that no code path reads.

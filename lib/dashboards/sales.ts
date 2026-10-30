@@ -3,6 +3,7 @@ import Decimal from 'decimal.js';
 import { resolveKpi, CONSOLIDATED_CODE, type SemanticSession } from '@/lib/semantic/resolve';
 import { monthBounds, formatMonthShort } from '@/lib/semantic/periods';
 import type { KpiTileProps } from '@/components/dashboard/kpi-tile';
+import { buildTiles } from './tiles';
 import type { DateRange } from './range';
 
 /**
@@ -29,6 +30,8 @@ const SALES_TILES: Array<{ id: string; hint: string }> = [
 export interface PipelineStageRow {
   stage: string;
   label: string;
+  /** The HubSpot pipeline the stage belongs to. */
+  pipeline: string;
   count: number;
   value: number;
 }
@@ -37,14 +40,21 @@ export interface DealRow {
   dealId: string;
   dealName: string;
   divisionCode: string | null;
+  company: string | null;
   amount: number;
   dealstage: string;
+  pipeline: string;
+  /** The deal owner — for a won deal, who closed it. */
   owner: string;
+  source: string;
+  lineOfBusiness: string | null;
   createdate: string | null;
   closedate: string | null;
   status: 'Won' | 'Lost' | 'Open';
   daysToClose: number | null;
 }
+
+export type DealStatusFilter = 'all' | 'won' | 'lost' | 'open';
 
 /** One row of the salesperson leaderboard. */
 export interface SalespersonRow {
@@ -68,19 +78,19 @@ export interface SalesViewModel {
   bookingsTrendSeries: Array<{ id: string; label: string; color: string }>;
   deals: DealRow[];
   /** What the deal table is showing, stated on the card rather than assumed. */
-  dealScope: { rangeLabel: string; ownerName: string | null; shown: number; total: number };
+  dealScope: {
+    rangeLabel: string;
+    ownerName: string | null;
+    shown: number;
+    total: number;
+    status: DealStatusFilter;
+    /** How many deals each status tab holds, before the status filter. */
+    counts: Record<DealStatusFilter, number>;
+  };
   bySalesperson: SalespersonRow[];
   unavailable?: string;
 }
 
-const STAGE_LABELS: Record<string, string> = {
-  qualifiedtobuy: 'Qualified to buy',
-  presentationscheduled: 'Presentation scheduled',
-  proposalsent: 'Proposal sent',
-  decisionmakerboughtin: 'Decision maker bought in',
-  closedwon: 'Closed won',
-  closedlost: 'Closed lost',
-};
 
 const num = (result: { value: Decimal | null }): number | null =>
   result.value ? result.value.toNumber() : null;
@@ -90,6 +100,8 @@ export interface SalesOptions {
   range: DateRange;
   /** Narrows the deal table to one salesperson. Null shows everyone. */
   ownerName: string | null;
+  /** Narrows the deal table to won, lost or open deals. */
+  status?: DealStatusFilter;
 }
 
 export function loadSales(
@@ -101,29 +113,13 @@ export function loadSales(
   const { period, bundle } = session;
   const isConsolidated = divisionCode === CONSOLIDATED_CODE;
 
-  const tiles: KpiTileProps[] = SALES_TILES.map(({ id, hint }) => {
-    const current = resolveKpi(session, id, divisionCode);
-    const priorMonth = resolveKpi(session, id, divisionCode, { month: period.priorMonth });
-    const priorYear = resolveKpi(session, id, divisionCode, { month: period.priorYearMonth });
-
-    const value = num(current);
-    const pm = num(priorMonth);
-    const py = num(priorYear);
-
-    return {
-      name: current.name,
-      formatted: current.formatted,
-      unavailable: current.unavailable,
-      higherIsBetter: current.higherIsBetter,
-      format: current.format,
-      deltaPriorMonth: value !== null && pm !== null ? value - pm : null,
-      deltaPriorYear: value !== null && py !== null ? value - py : null,
-      sparkline: period.trailingTwelveMonths.map((month) =>
-        num(resolveKpi(session, id, divisionCode, { month })),
-      ),
-      hint,
-    };
-  });
+  // The shared builder: comparisons you can switch (prior month, prior year,
+  // budget), the division breakdown and the trend, behind every tile.
+  const tiles: KpiTileProps[] = buildTiles(
+    session,
+    SALES_TILES.map(({ id, hint }) => ({ id, hint, href: resolveKpi(session, id, divisionCode).verifyHref.replace('/finance', '/sales') })),
+    divisionCode,
+  );
 
   const bookingRate = resolveKpi(session, 'booking_rate_pct', divisionCode);
   const bookingRateDenominator = bookingRate.components
@@ -140,6 +136,16 @@ export function loadSales(
   const inScope = (code: string | null) =>
     isConsolidated || (code !== null && code === divisionCode);
 
+  // Stage and pipeline names come from HubSpot. A fixed list of HubSpot's
+  // default stages showed every stage ARG created as a bare number.
+  const stageById = new Map(bundle.dealStages.map((stage) => [stage.stageId, stage]));
+  const pipelineLabel = new Map(bundle.dealStages.map((stage) => [stage.pipelineId, stage.pipelineLabel]));
+  const stageLabel = (stageId: string | null) =>
+    stageId ? (stageById.get(stageId)?.label ?? stageId) : '—';
+  const pipelineOf = (pipelineId: string | null) =>
+    pipelineId ? (pipelineLabel.get(pipelineId) ?? pipelineId) : '—';
+  const companyName = new Map(bundle.companies.map((company) => [company.companyId, company.name]));
+
   // --- Pipeline by stage -------------------------------------------------
   const stageTotals = new Map<string, { count: number; value: Decimal }>();
   for (const deal of bundle.deals) {
@@ -154,7 +160,8 @@ export function loadSales(
   const pipelineByStage: PipelineStageRow[] = [...stageTotals.entries()]
     .map(([stage, entry]) => ({
       stage,
-      label: STAGE_LABELS[stage] ?? stage,
+      label: stageLabel(stage),
+      pipeline: stageById.has(stage) ? pipelineOf(stageById.get(stage)!.pipelineId) : '—',
       count: entry.count,
       value: entry.value.toNumber(),
     }))
@@ -239,18 +246,30 @@ export function loadSales(
     }))
     .sort((a, b) => b.wonValue - a.wonValue);
 
-  const ownerFiltered = options.ownerName
+  const ownerScoped = options.ownerName
     ? scopedDeals.filter((deal) => (deal.ownerName ?? 'Unassigned') === options.ownerName)
     : scopedDeals;
+
+  const status = options.status ?? 'all';
+  const statusOf = (deal: (typeof bundle.deals)[number]): DealStatusFilter =>
+    deal.isClosedWon ? 'won' : deal.isClosed ? 'lost' : 'open';
+  const counts: Record<DealStatusFilter, number> = { all: ownerScoped.length, won: 0, lost: 0, open: 0 };
+  for (const deal of ownerScoped) counts[statusOf(deal)] += 1;
+  const ownerFiltered =
+    status === 'all' ? ownerScoped : ownerScoped.filter((deal) => statusOf(deal) === status);
 
   const deals: DealRow[] = ownerFiltered
     .map((deal) => ({
       dealId: deal.dealId,
       dealName: deal.dealName ?? deal.dealId,
       divisionCode: deal.divisionCode,
+      company: deal.companyId ? (companyName.get(deal.companyId) ?? null) : null,
       amount: deal.amount.toNumber(),
-      dealstage: STAGE_LABELS[deal.dealstage ?? ''] ?? deal.dealstage ?? '—',
+      dealstage: stageLabel(deal.dealstage),
+      pipeline: pipelineOf(deal.pipeline),
       owner: deal.ownerName ?? 'Unassigned',
+      source: deal.sourceLabel ?? 'Not recorded',
+      lineOfBusiness: deal.lineOfBusiness,
       createdate: deal.createdate?.toISOString().slice(0, 10) ?? null,
       closedate: deal.closedate?.toISOString().slice(0, 10) ?? null,
       status: (deal.isClosedWon ? 'Won' : deal.isClosed ? 'Lost' : 'Open') as DealRow['status'],
@@ -259,7 +278,13 @@ export function loadSales(
           ? Math.round((deal.closedate.getTime() - deal.createdate.getTime()) / 86_400_000)
           : null,
     }))
-    .sort((a, b) => b.amount - a.amount)
+    // Closed deals newest first, so "who closed what this month" reads from
+    // the top; open deals largest first.
+    .sort((a, b) =>
+      status === 'won' || status === 'lost'
+        ? (b.closedate ?? '').localeCompare(a.closedate ?? '') || b.amount - a.amount
+        : b.amount - a.amount,
+    )
     .slice(0, 200);
 
   return {
@@ -276,6 +301,8 @@ export function loadSales(
       ownerName: options.ownerName,
       shown: Math.min(ownerFiltered.length, 200),
       total: ownerFiltered.length,
+      status,
+      counts,
     },
     bySalesperson,
     unavailable,

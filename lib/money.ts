@@ -56,7 +56,7 @@ export function within(a: Decimal, b: Decimal, tolerance: Decimal = DOLLAR_TOLER
 // Display formatting — the only place rounding happens
 // ---------------------------------------------------------------------------
 
-export type ValueFormat = 'currency' | 'currency_precise' | 'percent' | 'ratio' | 'days' | 'count' | 'months';
+export type ValueFormat = 'currency' | 'currency_precise' | 'percent' | 'ratio' | 'days' | 'count' | 'months' | 'multiple';
 
 const currency0 = new Intl.NumberFormat('en-US', {
   style: 'currency',
@@ -71,6 +71,7 @@ const currency2 = new Intl.NumberFormat('en-US', {
 });
 const number1 = new Intl.NumberFormat('en-US', { maximumFractionDigits: 1 });
 const number0 = new Intl.NumberFormat('en-US', { maximumFractionDigits: 0 });
+const number2 = new Intl.NumberFormat('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
 /**
  * Negative money renders in parentheses — the convention the Excel uses and the
@@ -99,6 +100,8 @@ export function formatValue(value: Decimal | null | undefined, format: ValueForm
       return `${number1.format(n)} mo`;
     case 'count':
       return number0.format(n);
+    case 'multiple':
+      return `${number2.format(n)}×`;
   }
 }
 

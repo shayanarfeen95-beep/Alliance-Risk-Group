@@ -75,16 +75,17 @@ export function BookedVsActualPanel({
               label="Booked year to date"
               value={model.ytd.booked}
               valueFormat="currency"
-              basis="HubSpot: deals closed won this year, by close date."
+              detail={`Booked in the same months last year: ${formatNumber(model.ytd.priorYearBooked, 'currency')}`}
+              basis={`HubSpot: ${model.bookedLabel} closed won this year, by close date.`}
             />
             <StatTile
               label="Billed year to date"
               value={model.ytd.billed}
               valueFormat="currency"
-              basis="QuickBooks: revenue recognised this year, accrual basis."
+              basis={`QuickBooks: ${model.billedLabel} revenue recognised this year, accrual basis.`}
             />
             <StatTile
-              label="Prior year, same months"
+              label="Billed last year, same months"
               value={model.ytd.priorYearBilled}
               valueFormat="currency"
               detail={
@@ -111,6 +112,14 @@ export function BookedVsActualPanel({
             <p className="text-[11.5px] leading-relaxed text-[var(--text-secondary)]">
               {model.ytd.conversionPct === null ? (
                 'Nothing was booked in this period, so there is no conversion rate to state.'
+              ) : model.ytd.conversionPct > 150 ? (
+                <>
+                  <strong>
+                    Billed is {(model.ytd.conversionPct / 100).toFixed(1)}× what was booked this year.
+                  </strong>{' '}
+                  Most of what bills in a year comes from customers won in earlier years, so billed
+                  running ahead of new bookings is expected and is not a conversion rate.{' '}
+                </>
               ) : (
                 <>
                   <strong>

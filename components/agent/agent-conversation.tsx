@@ -74,19 +74,26 @@ export interface AgentMessage {
  */
 const SUGGESTION_GROUPS: Array<{ label: string; items: string[] }> = [
   {
-    label: 'Read the numbers',
+    label: 'Analyse',
     items: [
-      'What was LITS gross margin last month, and how does it compare to budget?',
-      'Show revenue by division for the last 12 months',
-      'Why did Claims lose money in the most recent closed month?',
+      'How did we do this month against budget, and where will the year land?',
+      'Which division is driving the change in net profit versus last month?',
+      'Where does the revenue figure on the Finance page come from — does it tie to QuickBooks?',
+      'How old is our receivables book, and what is working capital?',
     ],
   },
   {
-    label: 'Check the plumbing',
+    label: 'Build a view',
+    items: [
+      'Chart revenue by division for the last 12 months and save it to my views',
+      'Show gross margin % trend for LITS over the last year',
+    ],
+  },
+  {
+    label: 'Get the data',
     items: [
       'Which months have been loaded from QuickBooks, and which are still missing?',
-      'What still needs doing before QuickBooks can supply data?',
-      'Pull the latest month from QuickBooks',
+      'Pull the QuickBooks budget and the latest balance sheet',
     ],
   },
 ];
@@ -541,13 +548,15 @@ function MessageBubble({
 }
 
 /**
- * Paragraphs, bullets and bold — nothing else.
+ * Paragraphs, bullets, simple tables and bold — nothing else.
  *
  * A finance answer is prose with the occasional list; supporting a full markdown
  * dialect here would mean rendering model-authored markup, which is exactly what
  * this surface refuses to do. Bold is included because a model reaches for it to
  * mark the figure that answers the question, and stripping it loses emphasis
- * the reader is meant to see.
+ * the reader is meant to see. Tables are included because a list of deals —
+ * name, company, owner, amount — is a table, and as raw pipes it is unreadable.
+ * Cells are rendered as text, never as markup.
  */
 function Prose({ text }: { text: string }) {
   const blocks = text.split(/\n{2,}/).filter((block) => block.trim());
@@ -556,6 +565,43 @@ function Prose({ text }: { text: string }) {
     <>
       {blocks.map((block, index) => {
         const lines = block.split('\n');
+        const table = parseTable(lines);
+        if (table) {
+          return (
+            <div key={index} className={`overflow-x-auto ${index > 0 ? 'mt-2' : ''}`}>
+              <table className="w-full border-collapse text-[11.5px]">
+                <thead>
+                  <tr>
+                    {table.header.map((cell, cellIndex) => (
+                      <th
+                        key={cellIndex}
+                        className="border-b px-1.5 py-1 text-left font-semibold"
+                        style={{ borderColor: 'var(--border)' }}
+                      >
+                        <Emphasised text={cell} />
+                      </th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {table.rows.map((row, rowIndex) => (
+                    <tr key={rowIndex}>
+                      {row.map((cell, cellIndex) => (
+                        <td
+                          key={cellIndex}
+                          className="border-b px-1.5 py-1 align-top"
+                          style={{ borderColor: 'var(--border)' }}
+                        >
+                          <Emphasised text={cell} />
+                        </td>
+                      ))}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          );
+        }
         const isList = lines.every((line) => /^\s*[-*•]\s+/.test(line));
 
         if (isList) {
@@ -578,6 +624,20 @@ function Prose({ text }: { text: string }) {
       })}
     </>
   );
+}
+
+/** A pipe table — header, separator, rows — or null when the block is not one. */
+function parseTable(lines: string[]): { header: string[]; rows: string[][] } | null {
+  const trimmed = lines.map((line) => line.trim()).filter(Boolean);
+  if (trimmed.length < 2 || !trimmed.every((line) => line.startsWith('|'))) return null;
+  if (!/^\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?$/.test(trimmed[1]!)) return null;
+  const cells = (line: string) =>
+    line
+      .replace(/^\|/, '')
+      .replace(/\|$/, '')
+      .split('|')
+      .map((cell) => cell.trim());
+  return { header: cells(trimmed[0]!), rows: trimmed.slice(2).map(cells) };
 }
 
 function Emphasised({ text }: { text: string }) {

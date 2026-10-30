@@ -66,11 +66,20 @@ export function AssumptionGrid({
   month,
   divisions,
   canLock,
+  initialFocus = 'ALL',
 }: {
   month: string;
   divisions: DivisionContext[];
   canLock: boolean;
+  /** The division chosen at the top of the app, or 'ALL'. */
+  initialFocus?: string;
 }) {
+  // Which division's inputs are on screen. A forecast is saved for every
+  // division at once — a locked forecast must cover the whole company — so
+  // focusing hides the others' inputs without dropping what was typed into them.
+  const [focus, setFocus] = useState(
+    divisions.some((d) => d.divisionCode === initialFocus) ? initialFocus : 'ALL',
+  );
   const [assumptions, setAssumptions] = useState<Record<string, Assumptions>>(() =>
     Object.fromEntries(divisions.map((d) => [d.divisionCode, { ...d.suggested }])),
   );
@@ -121,9 +130,40 @@ export function AssumptionGrid({
     setAssumptions(Object.fromEntries(divisions.map((d) => [d.divisionCode, { ...d.suggested }])));
   }
 
+  const shown = focus === 'ALL' ? divisions : divisions.filter((d) => d.divisionCode === focus);
+
   return (
     <div className="space-y-4">
-      {divisions.map((division) => {
+      <div className="flex flex-wrap items-center gap-1.5" role="tablist" aria-label="Division">
+        {[{ divisionCode: 'ALL', divisionName: 'All divisions', color: '' }, ...divisions].map((d) => {
+          const active = focus === d.divisionCode;
+          return (
+            <button
+              key={d.divisionCode}
+              type="button"
+              role="tab"
+              aria-selected={active}
+              onClick={() => setFocus(d.divisionCode)}
+              className="inline-flex items-center gap-1.5 rounded-full border px-3 py-1 text-[11.5px] font-medium"
+              style={{
+                background: active ? 'var(--text-primary)' : 'var(--surface-1)',
+                color: active ? 'var(--text-inverse)' : 'var(--text-secondary)',
+                borderColor: active ? 'var(--text-primary)' : 'var(--border-strong)',
+              }}
+            >
+              {d.color ? <span aria-hidden className="h-2 w-2 rounded-[2px]" style={{ background: d.color }} /> : null}
+              {d.divisionName}
+            </button>
+          );
+        })}
+        {focus !== 'ALL' ? (
+          <span className="text-[11px] text-[var(--text-muted)]">
+            Saving still saves every division — the others keep the values already set.
+          </span>
+        ) : null}
+      </div>
+
+      {shown.map((division) => {
         const a = assumptions[division.divisionCode]!;
         const p = projections[division.divisionCode]!;
 

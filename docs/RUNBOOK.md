@@ -28,6 +28,66 @@ It is never "the dashboard and the assistant disagree." They cannot.
 
 ---
 
+## September 2026: the Finance reconciliation fixes
+
+ARG's controller checked August 2026 against the books: the dashboard said
+revenue was $321,078, QuickBooks said $482,405. The causes, all fixed, and what
+has to happen once after deploying:
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| Revenue low by a third; TP $0 revenue Feb–Aug; COGS % ~85%; net margin ~−47% | The P&L parser skipped QuickBooks section **headers**, which is where a parent account's own postings sit ("Litigation Support Income", "Tampa Process Income", "Pass Throughs") | Headers carrying amounts are read (`leafRows` in `lib/etl/conform.ts`); test built from ARG's March 2026 report ties every division to the cent |
+| Working capital blank | Balance sheet never loaded: "Net Income" (no account id) failed it, and the classed balance sheet does not balance by class | Rows placed by QuickBooks section; the company balance sheet is read from QuickBooks' TOTAL column into `fact_company_total` |
+| Budget, Variance, Attainment blank | No budget source had ever loaded: Sheets failed ("User ID is required"; JSON body returned as text) and QuickBooks budgets were never read | QuickBooks **Budgets** are pulled (the newest active P&L budget per year); Sheets fixed; a budget or tab named *Forecast* feeds the full-year outlook |
+| "3 failing" in the header | Future months (Oct–Dec 2026) loaded by a pull window running to December | Pulls stop at the current month; checks ignore months not yet begun; migration 0013 removes the future-dated rows |
+| Dashboards open on March 2026 | `DEFAULT_REPORTING_MONTH` never moved | They open on the last completed month |
+| Nightly refresh never touched recent months | Cron window ended at `DEFAULT_REPORTING_MONTH` | Cron refreshes the three months ending this month |
+
+**After deploying, run Admin → Data → Pull everything once** (the default is now
+24 months, so last year's comparisons fill in). The figures already stored were
+written by the old parser and stay wrong until they are re-pulled. Then check
+the **Ties to QuickBooks** card at the top of Finance: revenue, COGS and OpEx for
+ARG Total should equal the QuickBooks P&L total column, with anything on Not
+Specified or Z Alloc shown as "not in a division".
+
+Also worth confirming with ARG: the QuickBooks class **PS-TP** is mapped to
+LITS in Admin → Class mapping, while the division list names "PS - TP" as a TP
+legacy code. It carries no current P&L column, but decide which is right.
+
+### Pulls import only what is new or changed
+
+`sync_fingerprint` (migration 0015) holds a fingerprint of every QuickBooks
+month, Sheets tab and QuickBooks list as it was last imported. **Pull new &
+changed** — and the nightly refresh — then:
+
+- **QuickBooks reports** (P&L, balance sheet, trial balance): fetch months never
+  loaded, the latest three (books still open), and months QuickBooks' change
+  log (CDC, 30 days) shows were edited since the last check. A balance-sheet edit
+  re-checks every later month. When the change log cannot be used (older than 29
+  days, unreadable, a deletion with no date) every month is fetched — then only
+  the ones whose content differs are imported.
+- **Sheets tabs and QuickBooks lists**: fetched, compared, imported only if different.
+- **HubSpot**: unchanged — only records modified since the last pull.
+
+A change to the importer (`CONFORM_VERSION` in `lib/etl/fingerprint.ts`) or to
+the class mapping re-imports what it affects automatically. **Re-import
+everything** remains for the case the change log cannot see: payroll paychecks
+(not in Intuit's API) edited more than three months back. Every run's notes —
+what was new, changed, left alone — are in **Admin → Data → Pull log**.
+
+The first pull after deploying 0015 fetches everything once, since nothing has
+a fingerprint yet.
+
+### Ties to QuickBooks, explained
+
+The P&L import now records what QuickBooks holds on classes that belong to no
+division (`PL_UNASSIGNED`, per class). *P&L ties to QuickBooks* passes when the
+four divisions plus those amounts equal QuickBooks to the dollar, and the detail
+names the classes — e.g. September OpEx sitting on Not Specified until it is
+allocated. A difference nothing explains still fails.
+
+---
+
 ## Refresh schedule
 
 | What | When | Source | Owner |
@@ -81,6 +141,13 @@ that looks live is worse than no dashboard.
 | Load stuck in `RUNNING` | Process died mid-run | The run is not committed — facts are written in one transaction. Mark it failed and re-run. |
 | `division sums do not tie to ARG Total` | A division row is missing for the period | Check the load covered all four divisions. ARG Total is computed, so a missing division silently shrinks it — this control is what catches that. |
 | `balance sheet does not balance` | Equity moved without a matching entry | Equity is loaded from QBO and never plugged. This is a real accounting question for Westport, not a system fault. |
+| `came back with no class columns` on the balance sheet | ARG does not class its balance sheet (open item 1) | Turn on class tracking for the balance sheet in QuickBooks, or set `BALANCE_SHEET_CLASSED` to false so DSO, DPO, CCC and Cash Runway label themselves as ARG Total rather than showing empty division rows. The pull no longer fails outright over this — it retries unclassed and says what it got. |
+| `X of A/R sits on transactions with no class` | Invoices or bills booked without a class | Class them in QuickBooks. Until then that balance is absent from the divisional aging and reads as a gap against the balance sheet. It is never spread across divisions — that would make the "A/R ties to aging" control pass on a fiction. |
+| `trial balance … not yet conformed into a fact table` | Expected | QuickBooks gives the trial balance no class dimension, so it produces no divisional rows. It is landed in full and carried in the audit pack as the company-level tie-out. Not a fault. |
+| `N accounts carrying a balance … are not in the chart of accounts` | An account on the balance sheet that the chart has not seen | The pull now fetches the chart of accounts **before** the reports that resolve against it, and includes deleted accounts, so this should self-clear on the next run. If it persists, the account is one QuickBooks did not return at all — check it exists in the connected company file. |
+| `N balance-sheet accounts … have no balance_sheet_line` | An account type the mapping does not cover | Most accounts map themselves from their QuickBooks type on the next chart-of-accounts pull. One that does not has an unusual type and needs a line set in `dim_account`. |
+| `No tab in the connected spreadsheet looks like …` | The Sheets tab is named something else | The message lists the tabs that **do** exist. Rename the right one, or set `SHEETS_RANGE_MONTHLY_BUDGET` / `SHEETS_RANGE_TENX_BUDGET` / `SHEETS_RANGE_HEADCOUNT` to an explicit A1 range. |
+| `That range covers N months. The most that can be pulled in one run is 36` | Custom import range too long | QuickBooks is one report per month, so a longer run does not finish. Pull it in several passes — each keeps what it loaded. |
 
 ### Rolling back a load
 

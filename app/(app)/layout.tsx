@@ -27,8 +27,8 @@ export default async function AppLayout({ children }: { children: React.ReactNod
   const shell = await loadShellData(visible, canSeeConsolidated(user, allDivisions));
 
   return (
-    <div className="flex min-h-dvh">
-      <Suspense fallback={<div className="w-[208px] shrink-0" />}>
+    <div className="flex min-h-dvh flex-col md:flex-row">
+      <Suspense fallback={<div className="hidden w-[208px] shrink-0 md:block" />}>
         <Sidebar userName={user.name} userRole={user.role} />
       </Suspense>
 
@@ -38,7 +38,7 @@ export default async function AppLayout({ children }: { children: React.ReactNod
         </Suspense>
 
         {/* Bottom padding clears the floating assistant launcher. */}
-        <main className="min-w-0 flex-1 px-6 pb-24 pt-5">{children}</main>
+        <main className="min-w-0 flex-1 px-4 pb-24 pt-5 md:px-6">{children}</main>
       </div>
 
       {/*

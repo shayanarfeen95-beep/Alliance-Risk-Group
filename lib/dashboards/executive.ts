@@ -5,8 +5,12 @@ import * as t from '@/lib/db/schema';
 import { resolveKpi, CONSOLIDATED_CODE, type SemanticSession } from '@/lib/semantic/resolve';
 import { formatMonthShort, type MonthKey } from '@/lib/semantic/periods';
 import { safeDiv } from '@/lib/money';
+import { formatNumber } from '@/lib/format';
 import type { KpiTileProps } from '@/components/dashboard/kpi-tile';
+import { buildTiles } from './tiles';
 import { openFindings } from '@/lib/ai/goals';
+import { preferredBudgetScenario } from '@/lib/semantic/registry';
+import { key } from '@/lib/semantic/facts';
 
 /** §9.1 — the eight headline tiles. */
 const EXECUTIVE_TILES: Array<{ id: string; hint: string }> = [
@@ -23,6 +27,11 @@ const EXECUTIVE_TILES: Array<{ id: string; hint: string }> = [
 export interface DivisionContribution {
   divisionCode: string;
   divisionName: string;
+  /**
+   * A QuickBooks class that belongs to no division (Z Alloc, Not Specified).
+   * Part of ARG Total, listed so the contributions reconcile to it.
+   */
+  isOtherClass: boolean;
   revenue: number | null;
   revenueContribution: number | null;
   netProfit: number | null;
@@ -71,30 +80,13 @@ export async function loadExecutive(
   const { period } = session;
 
   // --- Tiles -------------------------------------------------------------
-  const tiles: KpiTileProps[] = EXECUTIVE_TILES.map(({ id, hint }) => {
-    const current = resolveKpi(session, id, divisionCode);
-    const priorMonth = resolveKpi(session, id, divisionCode, { month: period.priorMonth });
-    const priorYear = resolveKpi(session, id, divisionCode, { month: period.priorYearMonth });
-
-    const currentValue = numberOrNull(current);
-    const pmValue = numberOrNull(priorMonth);
-    const pyValue = numberOrNull(priorYear);
-
-    return {
-      name: current.name,
-      formatted: current.formatted,
-      unavailable: current.unavailable,
-      higherIsBetter: current.higherIsBetter,
-      format: current.format,
-      deltaPriorMonth: currentValue !== null && pmValue !== null ? currentValue - pmValue : null,
-      deltaPriorYear: currentValue !== null && pyValue !== null ? currentValue - pyValue : null,
-      sparkline: period.trailingTwelveMonths.map((month) =>
-        numberOrNull(resolveKpi(session, id, divisionCode, { month })),
-      ),
-      href: current.verifyHref,
-      hint,
-    };
-  });
+  // The shared builder: comparisons you can switch (prior month, prior year,
+  // budget), the division breakdown and the trend, behind every tile.
+  const tiles: KpiTileProps[] = buildTiles(
+    session,
+    EXECUTIVE_TILES.map(({ id, hint }) => ({ id, hint, href: resolveKpi(session, id, divisionCode).verifyHref })),
+    divisionCode,
+  );
 
   // --- Division contribution --------------------------------------------
   // §7: "Division contribution % = division revenue ÷ ARG Total revenue. Net
@@ -108,30 +100,50 @@ export async function loadExecutive(
     : null;
   const totalNetProfitAbs = totalNetProfit === null ? null : Math.abs(totalNetProfit);
 
-  const contributions: DivisionContribution[] = session.bundle.divisions.map((division) => {
-    const revenue = numberOrNull(resolveKpi(session, 'revenue', division.divisionCode));
-    const netProfit = numberOrNull(resolveKpi(session, 'net_profit', division.divisionCode));
+  // The divisions, then — at ARG Total — each QuickBooks class outside them
+  // that holds anything this year, so the rows add up to ARG Total.
+  const contributors = [
+    ...session.bundle.divisions.map((division) => ({
+      code: division.divisionCode,
+      name: division.divisionName,
+      isOtherClass: false,
+    })),
+    ...(session.consolidatedAvailable
+      ? session.bundle.otherClasses
+          .filter((other) => period.ytdMonths.some((month) => session.bundle.pl.has(key(month, other.code))))
+          .map((other) => ({ code: other.code, name: other.name, isOtherClass: true }))
+      : []),
+  ];
+
+  const contributions: DivisionContribution[] = contributors.map((division) => {
+    const revenue = numberOrNull(resolveKpi(session, 'revenue', division.code));
+    const netProfit = numberOrNull(resolveKpi(session, 'net_profit', division.code));
 
     const ytdRevenue = period.ytdMonths.reduce<number | null>((sum, month) => {
-      const value = numberOrNull(resolveKpi(session, 'revenue', division.divisionCode, { month }));
+      const value = numberOrNull(resolveKpi(session, 'revenue', division.code, { month }));
       return value === null ? sum : (sum ?? 0) + value;
     }, null);
     const ytdNetProfit = period.ytdMonths.reduce<number | null>((sum, month) => {
-      const value = numberOrNull(resolveKpi(session, 'net_profit', division.divisionCode, { month }));
+      const value = numberOrNull(resolveKpi(session, 'net_profit', division.code, { month }));
       return value === null ? sum : (sum ?? 0) + value;
     }, null);
 
     return {
-      divisionCode: division.divisionCode,
-      divisionName: division.divisionName,
+      divisionCode: division.code,
+      divisionName: division.name,
+      isOtherClass: division.isOtherClass,
       revenue,
-      revenueContribution:
+      revenueContribution: shareOrNull(
         revenue !== null && totalRevenue ? safeDiv(revenue, totalRevenue).toNumber() : null,
+        division.isOtherClass,
+      ),
       netProfit,
-      netProfitContribution:
+      netProfitContribution: shareOrNull(
         netProfit !== null && totalNetProfitAbs
           ? safeDiv(netProfit, totalNetProfitAbs).toNumber()
           : null,
+        division.isOtherClass,
+      ),
       ytdRevenue,
       ytdNetProfit,
     };
@@ -141,9 +153,11 @@ export async function loadExecutive(
   // §9.1: shown as attainment ratios WITH dollar variance, in two distinctly
   // labelled columns. §7 warns that a reader seeing "−36,773" beside "84%"
   // reasonably assumes both are variances.
+  // The budget ARG measures against: QuickBooks' own when one is loaded.
+  const budgetScenario = preferredBudgetScenario(session.bundle);
   const baselines: BaselineRow[] = (
     [
-      ['Monthly Budget', 'MONTHLY_BUDGET'],
+      [budgetScenario === 'QBO_BUDGET' ? 'Budget (QuickBooks)' : 'Budget', budgetScenario],
       ['10X Plan', 'TENX'],
     ] as const
   ).map(([label, scenario]) => {
@@ -186,15 +200,14 @@ export async function loadExecutive(
 
   // A division running a net loss is an exception a CEO wants on the front page.
   for (const contribution of contributions) {
+    // An allocation class is all cost by design until the month is allocated;
+    // calling it "a division running a loss" would be wrong twice over.
+    if (contribution.isOtherClass) continue;
     if (contribution.netProfit !== null && contribution.netProfit < 0) {
       exceptions.push({
         severity: 'warning',
         headline: `${contribution.divisionName} is running a net loss`,
-        detail: `Net profit of ${contribution.netProfit.toLocaleString('en-US', {
-          style: 'currency',
-          currency: 'USD',
-          maximumFractionDigits: 0,
-        })} for the month.`,
+        detail: `Net profit of ${formatNumber(contribution.netProfit, 'currency')} for the month.`,
       });
     }
   }
@@ -258,4 +271,9 @@ export async function loadExecutive(
 
 export function trailingMonths(period: { trailingTwelveMonths: MonthKey[] }): MonthKey[] {
   return period.trailingTwelveMonths;
+}
+
+/** A class's few dollars are "-0%" of ARG Total; that reads as nothing, so say nothing. */
+function shareOrNull(share: number | null, isOtherClass: boolean): number | null {
+  return isOtherClass && share !== null && Math.abs(share) < 0.0005 ? null : share;
 }

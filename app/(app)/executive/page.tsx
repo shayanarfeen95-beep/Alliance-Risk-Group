@@ -39,7 +39,7 @@ export default async function ExecutivePage({
         </p>
         <p className="mt-0.5 text-[12px] text-[var(--text-muted)]">
           {divisionLabel} · {formatMonth(session.period.month)} ·{' '}
-          {session.periodIsClosed ? 'closed period' : 'open period, figures preliminary'}
+          {session.periodIsClosed ? 'books closed, figures final' : 'books not closed, figures may change'}
         </p>
       </header>
 
@@ -105,9 +105,9 @@ export default async function ExecutivePage({
         <Card>
           <CardHeader
             title="Revenue and net profit by division"
-            subtitle="Contribution % is division revenue ÷ ARG Total revenue. Net profit contribution divides by the absolute value of the total, so the sign stays readable in a loss month."
+            subtitle="Contribution % is division revenue ÷ ARG Total revenue. Net profit contribution divides by the absolute value of the total, so the sign stays readable in a loss month. ARG Total includes QuickBooks classes that are not a division, such as Z Alloc, listed beneath the divisions."
           />
-          <DataTable>
+          <DataTable dense>
             <thead>
               <tr>
                 <Th align="left">Division</Th>
@@ -124,12 +124,28 @@ export default async function ExecutivePage({
                 <tr key={row.divisionCode}>
                   <Td align="left" numeric={false}>
                     <span className="flex items-center gap-2">
-                      <span
-                        aria-hidden
-                        className="h-2.5 w-2.5 shrink-0 rounded-[2px]"
-                        style={{ background: colors[row.divisionCode] }}
-                      />
+                      {row.isOtherClass ? (
+                        <span
+                          aria-hidden
+                          className="h-2.5 w-2.5 shrink-0 rounded-[2px] border border-dashed"
+                          style={{ borderColor: 'var(--text-muted)' }}
+                        />
+                      ) : (
+                        <span
+                          aria-hidden
+                          className="h-2.5 w-2.5 shrink-0 rounded-[2px]"
+                          style={{ background: colors[row.divisionCode] }}
+                        />
+                      )}
                       {row.divisionName}
+                      {row.isOtherClass ? (
+                        <span
+                          className="text-[10.5px] text-[var(--text-muted)]"
+                          title="A QuickBooks class that belongs to no division. Part of ARG Total, as it is of QuickBooks' Total."
+                        >
+                          not a division
+                        </span>
+                      ) : null}
                     </span>
                   </Td>
                   <Td>{formatNumber(row.revenue, 'currency')}</Td>
@@ -168,7 +184,7 @@ export default async function ExecutivePage({
             title="YTD revenue against plan"
             subtitle="Attainment % and Variance $ are labelled distinctly on purpose — they are different measures, and the Excel's layout invited reading both as variances."
           />
-          <DataTable>
+          <DataTable dense>
             <thead>
               <tr>
                 <Th align="left">Baseline</Th>
