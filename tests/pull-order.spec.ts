@@ -50,6 +50,9 @@ describe('the order QuickBooks entities are pulled in', () => {
         'trial_balance',
         'ar_aging',
         'ap_aging',
+        // Billing by customer, for Account billing.
+        'customers',
+        'invoices',
       ]),
     );
   });
