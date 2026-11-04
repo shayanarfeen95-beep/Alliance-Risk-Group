@@ -136,7 +136,7 @@ export function AccountBillingTable({ rows, initialFilter = 'all' }: { rows: Acc
       </div>
 
       <div className="scroll-x max-h-[640px] overflow-auto">
-        <table className="w-full min-w-[1040px] border-collapse text-[12px]">
+        <table className="w-full min-w-[1180px] border-collapse text-[12px]">
           <thead className="sticky top-0 z-[1]" style={{ background: 'var(--surface-1)' }}>
             <tr>
               {th('Account', 'left')}
@@ -162,7 +162,7 @@ export function AccountBillingTable({ rows, initialFilter = 'all' }: { rows: Acc
                     className="cursor-pointer hover:bg-[var(--surface-2)]"
                     style={isOpen ? { background: 'var(--surface-2)' } : undefined}
                   >
-                    <td className={td} style={{ borderColor: 'var(--border)' }}>
+                    <td className={`${td} min-w-[220px]`} style={{ borderColor: 'var(--border)' }}>
                       <span className="flex items-start gap-1 font-medium">
                         {isOpen ? <ChevronDown size={13} className="mt-0.5 shrink-0" /> : <ChevronRight size={13} className="mt-0.5 shrink-0" />}
                         <span>
@@ -174,14 +174,14 @@ export function AccountBillingTable({ rows, initialFilter = 'all' }: { rows: Acc
                       </span>
                     </td>
                     <td className={td} style={{ borderColor: 'var(--border)' }}>{row.owners.join(', ')}</td>
-                    <td className={`${td} tnum text-right`} style={{ borderColor: 'var(--border)' }}>{row.wonOn}</td>
-                    <td className={`${td} tnum text-right`} style={{ borderColor: 'var(--border)' }}>{row.goLiveOn}</td>
-                    <td className={`${td} tnum text-right`} style={{ borderColor: 'var(--border)' }}>{formatNumber(row.booked, 'currency')}</td>
-                    <td className={`${td} tnum text-right`} style={{ borderColor: 'var(--border)' }}>{formatNumber(row.expectedToDate, 'currency')}</td>
-                    <td className={`${td} tnum text-right font-medium`} style={{ borderColor: 'var(--border)' }}>{formatNumber(row.billedSinceWon, 'currency')}</td>
-                    <td className={`${td} tnum text-right`} style={{ borderColor: 'var(--border)' }}>{pct(row.pctOfExpected)}</td>
-                    <td className={`${td} tnum text-right`} style={{ borderColor: 'var(--border)' }}>{pct(row.pctOfContract)}</td>
-                    <td className={`${td} tnum text-right`} style={{ borderColor: 'var(--border)' }}>{row.lastInvoice ?? '—'}</td>
+                    <td className={`${td} tnum whitespace-nowrap text-right`} style={{ borderColor: 'var(--border)' }}>{row.wonOn}</td>
+                    <td className={`${td} tnum whitespace-nowrap text-right`} style={{ borderColor: 'var(--border)' }}>{row.goLiveOn}</td>
+                    <td className={`${td} tnum whitespace-nowrap text-right`} style={{ borderColor: 'var(--border)' }}>{formatNumber(row.booked, 'currency')}</td>
+                    <td className={`${td} tnum whitespace-nowrap text-right`} style={{ borderColor: 'var(--border)' }}>{formatNumber(row.expectedToDate, 'currency')}</td>
+                    <td className={`${td} tnum whitespace-nowrap text-right font-medium`} style={{ borderColor: 'var(--border)' }}>{formatNumber(row.billedSinceWon, 'currency')}</td>
+                    <td className={`${td} tnum whitespace-nowrap text-right`} style={{ borderColor: 'var(--border)' }}>{pct(row.pctOfExpected)}</td>
+                    <td className={`${td} tnum whitespace-nowrap text-right`} style={{ borderColor: 'var(--border)' }}>{pct(row.pctOfContract)}</td>
+                    <td className={`${td} tnum whitespace-nowrap text-right`} style={{ borderColor: 'var(--border)' }}>{row.lastInvoice ?? '—'}</td>
                     <td className={td} style={{ borderColor: 'var(--border)' }}><StatusBadge status={row.status} /></td>
                   </tr>
                   {isOpen ? (
