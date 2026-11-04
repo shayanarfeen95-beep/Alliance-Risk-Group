@@ -198,6 +198,11 @@ export function AgentConversation({ pageContext }: { pageContext: PageContext })
                 content: message.content + String(event.delta ?? ''),
               }));
               break;
+            case 'reset':
+              // The answer so far stated a figure no lookup returned; it is
+              // being rewritten, so what was shown is taken back.
+              updateLast((message) => ({ ...message, content: '' }));
+              break;
             case 'activity':
               updateLast((message) => ({
                 ...message,

@@ -7,6 +7,9 @@ import { DataControls } from '@/components/admin/data-controls';
 import { PullIndicator } from '@/components/admin/pull-indicator';
 import { UserManager } from '@/components/admin/user-manager';
 import { ClassMapping } from '@/components/admin/class-mapping';
+import { AccountMatching } from '@/components/admin/account-matching';
+import { listCustomerOptions, loadAccountBilling } from '@/lib/billing/accounts';
+import { openSemanticSession } from '@/lib/semantic/resolve';
 import { DataHealthPanel } from '@/components/admin/data-health';
 import {
   AdminTabBar,
@@ -145,6 +148,7 @@ export default async function AdminPage({
     ...(classMap.length
       ? [{ id: 'mapping', label: 'Class mapping', badge: unmapped.length ? String(unmapped.length) : undefined, badgeTone: 'warning' as const }]
       : []),
+    { id: 'accounts', label: 'Account matching' },
     ...(canManageUsers ? [{ id: 'people', label: 'People & access', badge: String(userRows.length) }] : []),
     { id: 'settings', label: 'Settings', badge: awaiting.length ? String(awaiting.length) : undefined, badgeTone: 'warning' },
     { id: 'audit', label: 'Audit trail' },
@@ -486,6 +490,9 @@ export default async function AdminPage({
         </div>
       ) : null}
 
+      {/* --- Account matching ---------------------------------------------- */}
+      {tab === 'accounts' ? await accountMatchingTab(db, user) : null}
+
       {/* --- People -------------------------------------------------------- */}
       {tab === 'people' && canManageUsers ? (
         <Card padded>
@@ -673,5 +680,37 @@ function LoadTable({ runs }: { runs: LoadRunRow[] }) {
         ))}
       </tbody>
     </DataTable>
+  );
+}
+
+/**
+ * Every account won in the last two years, with how it is matched to QuickBooks.
+ * Loaded only when the tab is open: it reads the deals and the customer list.
+ */
+async function accountMatchingTab(
+  db: Awaited<ReturnType<typeof getDb>>,
+  user: NonNullable<Awaited<ReturnType<typeof getSessionUser>>>,
+) {
+  const now = new Date();
+  const month = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, '0')}-01` as const;
+  const session = await openSemanticSession(db, user, month);
+  const [model, customers] = await Promise.all([
+    loadAccountBilling(db, session, {
+      wonFrom: new Date(Date.UTC(now.getUTCFullYear() - 2, now.getUTCMonth(), 1)),
+      wonTo: new Date(now.getTime() + 86_400_000),
+    }),
+    listCustomerOptions(db),
+  ]);
+  return (
+    <div className="space-y-3">
+      <p className="max-w-3xl text-[12px] leading-relaxed text-[var(--text-secondary)]">
+        HubSpot and QuickBooks do not share an account id, so each account won in HubSpot is matched to the QuickBooks
+        customer it is billed as: by a shared domain first, then by the same name. Those matches are counted on the
+        Account billing page and labelled as suggested. Confirm them here, pick another customer, or mark an account as
+        having no QuickBooks customer — a decision here always wins.
+      </p>
+      {model.unavailable ? <p className="text-[12px] text-[var(--text-muted)]">{model.unavailable}</p> : null}
+      <AccountMatching rows={model.rows} customers={customers} canEdit={can(user, 'EDIT_MAPPINGS')} />
+    </div>
   );
 }

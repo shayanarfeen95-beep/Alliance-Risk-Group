@@ -27,7 +27,7 @@ import { ActiveFilters, DateRangeControl, type ActiveFilter } from './filter-bar
 const CONSOLIDATED = 'ARG_TOTAL';
 
 /** Pages whose figures are lists of dated events, and so honour the date filter. */
-const RANGE_PAGES = ['/sales', '/hubspot'];
+const RANGE_PAGES = ['/sales', '/hubspot', '/accounts'];
 
 export function GlobalControls({ shell }: { shell: ShellData }) {
   const router = useRouter();

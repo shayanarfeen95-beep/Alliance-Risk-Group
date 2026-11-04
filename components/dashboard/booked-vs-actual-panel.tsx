@@ -192,7 +192,10 @@ export function BookedVsActualPanel({
       )}
 
       <p className="text-[10.5px] leading-relaxed text-[var(--text-muted)]">
-        <strong>Per customer is not shown.</strong> {model.perCustomerBlocked}
+        <strong>Per account:</strong> {model.perCustomerBlocked}{' '}
+        <a href="/accounts" className="underline underline-offset-2">
+          Open Account billing
+        </a>
       </p>
     </div>
   );

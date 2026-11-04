@@ -14,6 +14,7 @@ import {
   Wallet,
   Filter,
   LayoutGrid,
+  Receipt,
   Menu,
   X,
 } from 'lucide-react';
@@ -36,6 +37,7 @@ const NAV_GROUPS: Array<{ label: string; items: Array<{ href: string; label: str
       { href: '/finance', label: 'Finance', icon: Wallet },
       { href: '/sales', label: 'Sales', icon: TrendingUp },
       { href: '/hubspot', label: 'HubSpot Leadership', icon: Filter },
+      { href: '/accounts', label: 'Account billing', icon: Receipt },
       { href: '/marketing', label: 'Marketing', icon: Megaphone },
       { href: '/views', label: 'Views', icon: LayoutGrid },
     ],

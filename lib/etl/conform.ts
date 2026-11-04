@@ -1529,6 +1529,162 @@ async function ownerNameMap(db: Database): Promise<Map<string, string>> {
 }
 
 
+// ---------------------------------------------------------------------------
+// QuickBooks billing by customer
+// ---------------------------------------------------------------------------
+
+/** Mailbox providers: a shared one says nothing about which company a customer is. */
+const GENERIC_EMAIL_DOMAINS = new Set([
+  'gmail.com', 'yahoo.com', 'outlook.com', 'hotmail.com', 'aol.com', 'icloud.com', 'me.com',
+  'live.com', 'msn.com', 'comcast.net', 'att.net', 'verizon.net', 'protonmail.com', 'ymail.com',
+]);
+
+/** "https://www.Acme.com/about" or "ap@acme.com" → "acme.com". */
+export function domainOf(value: string | null | undefined): string | null {
+  if (!value) return null;
+  let text = value.trim().toLowerCase();
+  if (!text) return null;
+  if (text.includes('@')) text = text.split('@').pop() ?? '';
+  text = text.replace(/^[a-z]+:\/\//, '').replace(/^www\./, '');
+  text = text.split(/[/?#:]/)[0] ?? '';
+  if (!/^[a-z0-9-]+(\.[a-z0-9-]+)+$/.test(text)) return null;
+  return text;
+}
+
+async function conformQboCustomers(
+  db: Database,
+  loadRunId: string,
+  pages: unknown[],
+  notes: string[],
+): Promise<number> {
+  type QboCustomer = {
+    Id?: string;
+    DisplayName?: string;
+    CompanyName?: string;
+    FullyQualifiedName?: string;
+    ParentRef?: { value?: string };
+    PrimaryEmailAddr?: { Address?: string };
+    WebAddr?: { URI?: string };
+    Active?: boolean;
+  };
+  const customers = pages.flatMap(
+    (page) => ((page as { QueryResponse?: { Customer?: QboCustomer[] } }).QueryResponse?.Customer ?? []),
+  );
+
+  let written = 0;
+  for (let index = 0; index < customers.length; index += 200) {
+    const rows = customers
+      .slice(index, index + 200)
+      .filter((customer) => customer.Id && customer.DisplayName)
+      .map((customer) => {
+        const email = domainOf(customer.PrimaryEmailAddr?.Address);
+        return {
+          customerId: customer.Id!,
+          displayName: customer.DisplayName!,
+          companyName: customer.CompanyName?.trim() || null,
+          fullyQualifiedName: customer.FullyQualifiedName ?? null,
+          parentId: customer.ParentRef?.value ?? null,
+          emailDomain: email && !GENERIC_EMAIL_DOMAINS.has(email) ? email : null,
+          webDomain: domainOf(customer.WebAddr?.URI),
+          active: customer.Active !== false,
+          loadRunId,
+        };
+      });
+    if (!rows.length) continue;
+    await db
+      .insert(t.dimQboCustomer)
+      .values(rows)
+      .onConflictDoUpdate({
+        target: t.dimQboCustomer.customerId,
+        set: {
+          displayName: sql`excluded.display_name`,
+          companyName: sql`excluded.company_name`,
+          fullyQualifiedName: sql`excluded.fully_qualified_name`,
+          parentId: sql`excluded.parent_id`,
+          emailDomain: sql`excluded.email_domain`,
+          webDomain: sql`excluded.web_domain`,
+          active: sql`excluded.active`,
+          loadRunId: sql`excluded.load_run_id`,
+        },
+      });
+    written += rows.length;
+  }
+  notes.push(`${written.toLocaleString()} QuickBooks customers, including inactive ones and sub-customers.`);
+  return written;
+}
+
+async function conformInvoices(
+  db: Database,
+  loadRunId: string,
+  pages: unknown[],
+  notes: string[],
+): Promise<number> {
+  type QboBilling = {
+    Id?: string;
+    DocNumber?: string;
+    TxnDate?: string;
+    CustomerRef?: { value?: string; name?: string };
+    TotalAmt?: number;
+    Balance?: number;
+    TxnTaxDetail?: { TotalTax?: number };
+    MetaData?: { LastUpdatedTime?: string };
+  };
+
+  let invoices = 0;
+  let credits = 0;
+  for (const page of pages) {
+    const { kind, rows } = page as { kind: 'Invoice' | 'CreditMemo'; rows: QboBilling[] };
+    const sign = kind === 'CreditMemo' ? -1 : 1;
+    const values = (rows ?? [])
+      .filter((row) => row.Id && row.TxnDate && row.CustomerRef?.value)
+      .map((row) => {
+        const total = new Decimal(row.TotalAmt ?? 0);
+        const tax = new Decimal(row.TxnTaxDetail?.TotalTax ?? 0);
+        return {
+          invoiceKey: `${kind === 'CreditMemo' ? 'CM' : 'INV'}:${row.Id}`,
+          kind,
+          docNumber: row.DocNumber ?? null,
+          customerId: row.CustomerRef!.value!,
+          customerName: row.CustomerRef!.name ?? null,
+          txnDate: row.TxnDate!.slice(0, 10),
+          total: total.times(sign).toFixed(4),
+          tax: tax.times(sign).toFixed(4),
+          billed: total.minus(tax).times(sign).toFixed(4),
+          balance: new Decimal(row.Balance ?? 0).times(sign).toFixed(4),
+          lastUpdated: date(row.MetaData?.LastUpdatedTime),
+          loadRunId,
+        };
+      });
+    for (let index = 0; index < values.length; index += 500) {
+      const chunk = values.slice(index, index + 500);
+      await db
+        .insert(t.factInvoice)
+        .values(chunk)
+        .onConflictDoUpdate({
+          target: t.factInvoice.invoiceKey,
+          set: {
+            docNumber: sql`excluded.doc_number`,
+            customerId: sql`excluded.customer_id`,
+            customerName: sql`excluded.customer_name`,
+            txnDate: sql`excluded.txn_date`,
+            total: sql`excluded.total`,
+            tax: sql`excluded.tax`,
+            billed: sql`excluded.billed`,
+            balance: sql`excluded.balance`,
+            lastUpdated: sql`excluded.last_updated`,
+            loadRunId: sql`excluded.load_run_id`,
+          },
+        });
+    }
+    if (kind === 'CreditMemo') credits += values.length;
+    else invoices += values.length;
+  }
+  notes.push(
+    `${invoices.toLocaleString()} invoice${invoices === 1 ? '' : 's'} and ${credits.toLocaleString()} credit memo${credits === 1 ? '' : 's'} imported, by customer.`,
+  );
+  return invoices + credits;
+}
+
 /**
  * HubSpot users, as a map from user id to a person's name.
  *
@@ -2978,6 +3134,16 @@ async function conformInTransaction(
           `open ${entityName.toLowerCase()}${transactions.length === 1 ? '' : 's'}. This is today's ` +
           `position, not a reconstruction of that month.`,
       );
+      return { rowsWritten, notes };
+    }
+
+    // Billing by customer — not monthly reports, so before the per-month loop.
+    if (batch.entity === 'customers') {
+      rowsWritten += await conformQboCustomers(db, loadRunId, batch.records.map((record) => record.payload), notes);
+      return { rowsWritten, notes };
+    }
+    if (batch.entity === 'invoices') {
+      rowsWritten += await conformInvoices(db, loadRunId, batch.records.map((record) => record.payload), notes);
       return { rowsWritten, notes };
     }
 

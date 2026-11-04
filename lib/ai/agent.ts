@@ -14,6 +14,8 @@ import {
   type ConversationMessage,
 } from './provider';
 import type { ChartCardProps } from '@/components/charts/chart-card';
+import { and, eq } from 'drizzle-orm';
+import { unsupportedFigures } from './figure-check';
 
 /**
  * The agent loop.
@@ -59,6 +61,8 @@ export interface AgentTurnInput {
 
 export type AgentStreamEvent =
   | { type: 'text'; delta: string }
+  /** The answer so far is withdrawn: it stated a figure no tool returned. */
+  | { type: 'reset' }
   | { type: 'activity'; tool: string; summary: string }
   | { type: 'citations'; citations: AgentCitation[] }
   | { type: 'view'; view: ChartCardProps }
@@ -139,6 +143,24 @@ export async function runAgentTurn(input: AgentTurnInput): Promise<AgentTurnResu
    */
   let nudged = false;
 
+  /**
+   * What the figures in an answer may come from: every tool result in this
+   * conversation, and what the user wrote. NOT the assistant's earlier answers —
+   * repeating a number from one of those is exactly how an unsourced figure
+   * survives from turn to turn.
+   */
+  const evidence: string[] = input.messages
+    .filter((message) => message.role === 'user')
+    .map((message) => message.content);
+  if (input.conversationId) {
+    const earlier = await db
+      .select({ output: t.aiQueryLog.toolOutput })
+      .from(t.aiQueryLog)
+      .where(and(eq(t.aiQueryLog.conversationId, input.conversationId), eq(t.aiQueryLog.role, 'tool')));
+    for (const row of earlier) if (row.output) evidence.push(JSON.stringify(row.output));
+  }
+  let checked = false;
+
   for (let iteration = 0; iteration < MAX_ITERATIONS; iteration++) {
     const turn = await streamTurn({
       system: buildSystemPrompt(input.user, input.session, input.pageContext),
@@ -167,10 +189,38 @@ export async function runAgentTurn(input: AgentTurnInput): Promise<AgentTurnResu
         continue;
       }
 
+      // Every dollar figure and count must be one a tool returned. The first
+      // time one is not, the answer is withdrawn from the screen and sent back
+      // to be rewritten; a second time, it is marked rather than shown as fact.
+      let answer = text || FALLBACK_ANSWER;
+      const unsupported = text ? unsupportedFigures(text, evidence) : [];
+      if (unsupported.length && !checked) {
+        checked = true;
+        emit({ type: 'reset' });
+        spoken = '';
+        messages.push({ role: 'assistant', content: text });
+        messages.push({
+          role: 'user',
+          content:
+            `Before this reaches the reader: your answer states ${unsupported.map((f) => `"${f.text}"`).join(', ')}, ` +
+            'but no tool in this conversation returned ' +
+            (unsupported.length === 1 ? 'that figure' : 'those figures') +
+            '. Call the tool that returns each one, or leave it out and say it is not available. Do not repeat a ' +
+            'figure from an earlier answer unless a tool returned it. Rewrite the whole answer.',
+        });
+        continue;
+      }
+      if (unsupported.length) {
+        const note =
+          `\n\n_Not confirmed by the data: ${unsupported.map((f) => f.text).join(', ')}. ` +
+          'Treat ' + (unsupported.length === 1 ? 'it' : 'them') + ' as unverified._';
+        answer += note;
+        emit({ type: 'text', delta: note });
+      }
+
       // What is logged is what the user was shown. Logging the empty string
       // while showing a fallback would leave an audit trail that disagrees with
       // the conversation it is supposed to be a record of.
-      const answer = text || FALLBACK_ANSWER;
 
       await logTurn(db, input, 'assistant', answer, false, Date.now() - started, citations, model);
 
@@ -237,7 +287,9 @@ export async function runAgentTurn(input: AgentTurnInput): Promise<AgentTurnResu
           model,
         });
 
-        toolResults.push({ id: toolUse.id, content: JSON.stringify(outcome.result) });
+        const serialised = JSON.stringify(outcome.result);
+        evidence.push(serialised);
+        toolResults.push({ id: toolUse.id, content: serialised });
       } catch (error) {
         toolResults.push({
           id: toolUse.id,

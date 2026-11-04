@@ -195,11 +195,9 @@ export function loadBookedVsActual(
     filter,
     unavailable,
     perCustomerBlocked:
-      'Per customer needs two things this warehouse does not hold: QuickBooks revenue by ' +
-      'customer — it is landed by class, which is division — and a rule mapping a HubSpot ' +
-      'company onto a QuickBooks customer. Matching them on name would be wrong in exactly the ' +
-      'cases anybody would check, so the comparison is shown by division until Westport confirms ' +
-      'the mapping.',
+      'This panel compares the division as a whole. Billing by customer is on the Account billing page: ' +
+      'each won account beside the QuickBooks invoices of the customer it is matched to, with the mapping ' +
+      'confirmed in Admin → Account matching.',
     dealTypeMissing:
       bundle.deals.length > 0 && bundle.deals.every((deal) => deal.dealType === null),
   };

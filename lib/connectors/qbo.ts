@@ -98,6 +98,23 @@ const ENTITIES: EntityDescriptor[] = [
     description:
       'Built from the open bills themselves, for the same reason as A/R. Feeds the DPO reconciliation and the aging view.',
   },
+  // Billing by customer: what each account has actually been billed, so a deal
+  // closed won in HubSpot can be followed into QuickBooks. Customers first —
+  // invoices name the customer they bill.
+  {
+    entity: 'customers',
+    label: 'Customers',
+    cadence: 'DAILY',
+    description:
+      'QuickBooks customers, with their parent and their email and website domains, so a HubSpot account can be matched to the customer QuickBooks bills.',
+  },
+  {
+    entity: 'invoices',
+    label: 'Invoices and credit memos',
+    cadence: 'DAILY',
+    description:
+      'What each customer was billed and when, from the start of last year: total less sales tax, credit memos netted. After the first pull only what changed is read.',
+  },
 ];
 
 /**
@@ -328,7 +345,7 @@ async function fetchMonthlyReport(
  * losing its tail silently, which is the same class of failure as the active
  * filter and just as hard to notice.
  */
-type QueryEntity = 'Account' | 'Class' | 'Invoice' | 'Bill' | 'Budget';
+type QueryEntity = 'Account' | 'Class' | 'Invoice' | 'Bill' | 'Budget' | 'Customer';
 
 const QUERY_ENTITY_TO_ENTITY: Record<QueryEntity, string> = {
   Account: 'accounts',
@@ -336,9 +353,14 @@ const QUERY_ENTITY_TO_ENTITY: Record<QueryEntity, string> = {
   Invoice: 'ar_aging',
   Bill: 'ap_aging',
   Budget: 'budgets',
+  Customer: 'customers',
 };
 
-async function queryAll(entityName: QueryEntity, where?: string): Promise<RawRecord[]> {
+async function queryAll(
+  entityName: QueryEntity,
+  where?: string,
+  fields = '*',
+): Promise<RawRecord[]> {
   const pageSize = 1000;
   const records: RawRecord[] = [];
   let startPosition = 1;
@@ -348,12 +370,15 @@ async function queryAll(entityName: QueryEntity, where?: string): Promise<RawRec
   // held on earlier balance sheets, so omitting it does not remove it from the
   // report — only our ability to read one.
   const clause =
-    where ?? (entityName === 'Account' || entityName === 'Class' ? 'Active in (true, false)' : null);
+    where ??
+    (entityName === 'Account' || entityName === 'Class' || entityName === 'Customer'
+      ? 'Active in (true, false)'
+      : null);
 
   for (;;) {
     const payload = (await callApi('query', {
       query:
-        `select * from ${entityName}` +
+        `select ${fields} from ${entityName}` +
         (clause ? ` where ${clause}` : '') +
         ` startposition ${startPosition} maxresults ${pageSize}`,
     })) as { QueryResponse?: Record<string, unknown[]> };
@@ -370,6 +395,72 @@ async function queryAll(entityName: QueryEntity, where?: string): Promise<RawRec
   }
 
   return records;
+}
+
+/**
+ * Invoices and credit memos, a page at a time, resumable.
+ *
+ * Only the columns the comparison reads are asked for — QuickBooks' query
+ * language takes a field list — because a full invoice carries every line item
+ * and two years of them is far more than this needs to move or keep.
+ *
+ * The first pass reads everything dated from January of last year; later passes
+ * read only what QuickBooks says was updated since the last completed one, which
+ * catches edits and voids (a voided invoice is updated to zero) as well as new
+ * invoices.
+ */
+const BILLING_FIELDS = 'Id, DocNumber, TxnDate, CustomerRef, TotalAmt, Balance, TxnTaxDetail, MetaData';
+const BILLING_KINDS = ['Invoice', 'CreditMemo'] as const;
+
+interface BillingCursor {
+  kind: number;
+  start: number;
+}
+
+async function fetchBilling(
+  options: FetchOptions | undefined,
+): Promise<{ records: RawRecord[]; nextCursor: string | null; watermark: Date | null }> {
+  const pageSize = 1000;
+  const records: RawRecord[] = [];
+  let watermark: Date | null = null;
+
+  let cursor: BillingCursor = { kind: 0, start: 1 };
+  if (options?.cursor) {
+    try {
+      cursor = JSON.parse(options.cursor) as BillingCursor;
+    } catch {
+      // A cursor this code did not write is a fresh start, not a failure.
+    }
+  }
+
+  const horizon = `${new Date().getUTCFullYear() - 1}-01-01`;
+  const clause = options?.since
+    ? `MetaData.LastUpdatedTime >= '${options.since.toISOString().replace(/\.\d{3}Z$/, 'Z')}'`
+    : `TxnDate >= '${horizon}'`;
+
+  for (;;) {
+    const kind = BILLING_KINDS[cursor.kind];
+    if (!kind) return { records, nextCursor: null, watermark };
+
+    const payload = (await callApi('query', {
+      query: `select ${BILLING_FIELDS} from ${kind} where ${clause} startposition ${cursor.start} maxresults ${pageSize}`,
+    })) as { QueryResponse?: Record<string, Array<{ MetaData?: { LastUpdatedTime?: string } }>> };
+
+    const rows = payload.QueryResponse?.[kind] ?? [];
+    records.push({ entity: 'invoices', key: `${kind}-${cursor.start}`, payload: { kind, rows } });
+    for (const row of rows) {
+      const updated = row.MetaData?.LastUpdatedTime ? new Date(row.MetaData.LastUpdatedTime) : null;
+      if (updated && !Number.isNaN(updated.getTime()) && (!watermark || updated > watermark)) {
+        watermark = updated;
+      }
+    }
+
+    cursor = rows.length < pageSize ? { kind: cursor.kind + 1, start: 1 } : { kind: cursor.kind, start: cursor.start + pageSize };
+    if (!BILLING_KINDS[cursor.kind]) return { records, nextCursor: null, watermark };
+    if (budgetSpent(options, records.reduce((sum, record) => sum + ((record.payload as { rows: unknown[] }).rows.length), 0))) {
+      return { records, nextCursor: JSON.stringify(cursor), watermark };
+    }
+  }
 }
 
 /**
@@ -471,6 +562,27 @@ export const qboConnector: SourceConnector = {
       case 'budgets':
         records = await queryAll('Budget');
         break;
+      // Every customer, active or not: an inactive customer can still have
+      // been billed this year.
+      case 'customers':
+        records = await queryAll(
+          'Customer',
+          undefined,
+          'Id, DisplayName, CompanyName, FullyQualifiedName, ParentRef, Job, PrimaryEmailAddr, WebAddr, Active',
+        );
+        break;
+      case 'invoices': {
+        const billing = await fetchBilling(options);
+        return {
+          sourceSystem: 'QBO',
+          entity,
+          window,
+          records: billing.records,
+          fetchedAt: new Date(),
+          nextCursor: billing.nextCursor,
+          watermark: billing.watermark,
+        };
+      }
       default:
         throw new Error(`Unknown QBO entity "${entity}".`);
     }

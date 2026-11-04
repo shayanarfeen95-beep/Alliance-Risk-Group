@@ -394,12 +394,12 @@ describe('booked versus billed', () => {
     expect(model.unavailable).toMatch(/no hubspot deals/i);
   });
 
-  it('says why there is no per-customer view instead of approximating one', async () => {
+  it('points to the account-by-account comparison', async () => {
     const session = await openSemanticSession(harness.db, user, MONTH);
     const model = loadBookedVsActual(session, CONSOLIDATED_CODE);
 
     expect(model.perCustomerBlocked).toMatch(/by customer/i);
-    expect(model.perCustomerBlocked).toMatch(/mapping/i);
+    expect(model.perCustomerBlocked).toMatch(/Account matching/);
   });
 });
 

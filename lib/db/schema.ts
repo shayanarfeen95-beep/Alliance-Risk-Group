@@ -1044,6 +1044,65 @@ export const dimDealStage = pgTable('dim_deal_stage', {
 });
 
 /**
+ * QuickBooks customers, so billing can be read account by account.
+ *
+ * A sub-customer (a job) carries its parent, and a customer's billing includes
+ * its jobs. The email and website domains are what a HubSpot company is matched
+ * on first: a shared domain is firmer evidence than a similar name.
+ */
+export const dimQboCustomer = pgTable('dim_qbo_customer', {
+  customerId: text('customer_id').primaryKey(),
+  displayName: text('display_name').notNull(),
+  companyName: text('company_name'),
+  fullyQualifiedName: text('fully_qualified_name'),
+  parentId: text('parent_id'),
+  emailDomain: text('email_domain'),
+  webDomain: text('web_domain'),
+  active: boolean('active').notNull().default(true),
+  loadRunId: uuid('load_run_id').references(() => loadRun.id),
+});
+
+/**
+ * QuickBooks invoices and credit memos: what each customer was billed, and when.
+ *
+ * `billed` is the total less sales tax — revenue, not cash — and negative for a
+ * credit memo, so a customer's billing nets its credits.
+ */
+export const factInvoice = pgTable(
+  'fact_invoice',
+  {
+    /** `INV:<id>` or `CM:<id>`: QuickBooks numbers each type separately. */
+    invoiceKey: text('invoice_key').primaryKey(),
+    kind: text('kind').notNull(),
+    docNumber: text('doc_number'),
+    customerId: text('customer_id').notNull(),
+    customerName: text('customer_name'),
+    txnDate: date('txn_date').notNull(),
+    total: money('total').notNull().default('0'),
+    tax: money('tax').notNull().default('0'),
+    billed: money('billed').notNull().default('0'),
+    balance: money('balance').notNull().default('0'),
+    lastUpdated: timestamp('last_updated', { withTimezone: true }),
+    loadRunId: uuid('load_run_id').references(() => loadRun.id),
+  },
+  (t) => [index('fact_invoice_customer_idx').on(t.customerId, t.txnDate)],
+);
+
+/**
+ * Which QuickBooks customer a HubSpot company is — when a person has decided.
+ *
+ * Suggested matches are computed, never stored: only Westport's confirmation,
+ * correction or rejection lives here. A null customer is the explicit answer
+ * "this company has no QuickBooks customer".
+ */
+export const mapCompanyCustomer = pgTable('map_company_customer', {
+  companyId: text('company_id').primaryKey(),
+  qboCustomerId: text('qbo_customer_id'),
+  decidedByUserId: uuid('decided_by_user_id').references(() => users.id),
+  decidedAt: timestamp('decided_at', { withTimezone: true }).notNull().defaultNow(),
+});
+
+/**
  * HubSpot's field definitions, so a field is found by the label people use.
  *
  * Custom properties carry internal names nobody types — Westport's definitions

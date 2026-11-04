@@ -21,6 +21,12 @@ import { scopeLeadership } from '@/lib/dashboards/leadership-scope';
 import { loadLeadership2026, type MonthlySeries } from '@/lib/dashboards/leadership-2026';
 import { companyNames, toDealRow } from '@/lib/dashboards/deal-rows';
 import { hasOption } from '@/lib/connectors/hubspot-fields';
+import {
+  CONTRACT_MONTHS,
+  STATUS_LABEL as BILLING_STATUS_LABEL,
+  loadAccountBilling,
+  type BillingStatus,
+} from '@/lib/billing/accounts';
 
 /**
  * The agent's tools.
@@ -1587,6 +1593,122 @@ const getLeadershipReview: ToolDefinition = {
   },
 };
 
+/**
+ * Booked against billed, account by account — the Account billing page.
+ *
+ * The only path to "has this account started billing" and "how much has it
+ * billed": each won HubSpot account beside the QuickBooks invoices of the
+ * customer it is matched to. Nothing here is computed by the model.
+ */
+const getAccountBilling: ToolDefinition = {
+  name: 'get_account_billing',
+  description:
+    'Which accounts closed won in HubSpot have started billing in QuickBooks, and how much each has billed since it was won, against what was booked and what a 12-month straight line says should have billed by now. Returns per account: owner, won and live dates, booked, expected by now, billed since won, % of expected, last invoice, status (Not billing, Behind pace, On pace, Ahead, Waiting for first invoice, No QuickBooks customer) and which QuickBooks customer it was matched to and how. Filter by won dates, owner, account name, status, Line of Business. Use this for any question about whether won deals are billing, booked versus billed for an account or a month of bookings, and alerts.',
+  input_schema: {
+    type: 'object',
+    additionalProperties: false,
+    properties: {
+      wonFrom: { type: 'string', description: 'Deals won from this month or day (YYYY-MM or YYYY-MM-DD). Defaults to January of the current year.' },
+      wonTo: { type: 'string', description: 'Deals won up to and including this month or day. Defaults to today.' },
+      owner: { type: 'string', description: 'Salesperson / account owner, or part of the name.' },
+      account: { type: 'string', description: 'Account name, or part of it.' },
+      status: {
+        type: 'string',
+        enum: ['NOT_BILLING', 'BEHIND', 'ON_PACE', 'AHEAD', 'WAITING', 'NO_MATCH', 'REACHED', 'NEEDS_ATTENTION'],
+      },
+      lineOfBusiness: { type: 'string', description: 'e.g. "Background Checks".' },
+      limit: { type: 'integer', minimum: 1, maximum: 100 },
+    },
+  },
+  async run(input, context) {
+    if (!context.session.consolidatedAvailable) {
+      return {
+        result: {
+          available: false,
+          explanation: 'Billing by customer covers the whole company and is available only to people who can see ARG Total.',
+        },
+      };
+    }
+    const now = new Date();
+    const from = dayBound(input.wonFrom, false) ?? new Date(Date.UTC(now.getUTCFullYear(), 0, 1));
+    const to = dayBound(input.wonTo, true) ?? new Date(now.getTime() + 86_400_000);
+    const model = await loadAccountBilling(context.db, context.session, {
+      wonFrom: from,
+      wonTo: to,
+      lineOfBusiness: typeof input.lineOfBusiness === 'string' ? input.lineOfBusiness : null,
+    });
+
+    if (model.unavailable) {
+      return {
+        result: {
+          available: false,
+          explanation: model.unavailable,
+          instruction: 'Say this is not available yet and why. Do not estimate billing.',
+        },
+      };
+    }
+
+    const like = (value: string, wanted: unknown) =>
+      typeof wanted !== 'string' || value.toLowerCase().includes(wanted.toLowerCase());
+    const rows = model.rows.filter((row) => {
+      if (!like(row.account, input.account)) return false;
+      if (typeof input.owner === 'string' && !row.owners.some((owner) => like(owner, input.owner))) return false;
+      if (input.status === 'NEEDS_ATTENTION') return row.status === 'NOT_BILLING' || row.status === 'BEHIND';
+      if (typeof input.status === 'string' && row.status !== (input.status as BillingStatus)) return false;
+      return true;
+    });
+    const limit = typeof input.limit === 'number' ? Math.min(100, Math.max(1, input.limit)) : 40;
+    const money = (value: number) => formatNumber(value, 'currency');
+    const total = (pick: (row: (typeof rows)[number]) => number) => rows.reduce((sum, row) => sum + pick(row), 0);
+
+    return {
+      result: {
+        available: true,
+        asOf: model.asOf,
+        wonBetween: `${from.toISOString().slice(0, 10)} – ${new Date(to.getTime() - 86_400_000).toISOString().slice(0, 10)}`,
+        accounts: rows.length,
+        accountsBilling: rows.filter((row) => row.billedSinceWon > 0).length,
+        booked: money(total((row) => row.booked)),
+        expectedByNow: money(total((row) => row.expectedToDate)),
+        billedSinceWon: money(total((row) => row.billedSinceWon)),
+        needAttention: rows.filter((row) => row.status === 'NOT_BILLING' || row.status === 'BEHIND').length,
+        rows: rows.slice(0, limit).map((row) => ({
+          account: row.account,
+          owners: row.owners,
+          deals: row.deals.map((deal) => `${deal.name} (${money(deal.amount)}, won ${deal.closed})`),
+          wonOn: row.wonOn,
+          liveSince: row.goLiveOn,
+          booked: money(row.booked),
+          expectedByNow: money(row.expectedToDate),
+          billedSinceWon: money(row.billedSinceWon),
+          billedLast30Days: money(row.billedLast30Days),
+          percentOfExpected: row.pctOfExpected === null ? null : `${Math.round(row.pctOfExpected * 100)}%`,
+          lastInvoice: row.lastInvoice,
+          status: BILLING_STATUS_LABEL[row.status],
+          quickbooksCustomer: row.match.customerName,
+          matchedBy:
+            row.match.method === 'CONFIRMED'
+              ? 'confirmed by Westport'
+              : row.match.method === 'DOMAIN'
+                ? 'shared domain (not yet confirmed)'
+                : row.match.method === 'NAME'
+                  ? 'same name (not yet confirmed)'
+                  : 'not matched',
+          billedBeforeWonLast12Months: row.billedBeforeWon ? money(row.billedBeforeWon) : undefined,
+        })),
+        basis:
+          `Booked is the won deal amount, read as what the account bills over its first ${CONTRACT_MONTHS} months from going live; ` +
+          'expected by now spreads it evenly. Billed is QuickBooks invoices less credit memos, excluding tax, since the win, ' +
+          'for the matched customer and its sub-customers. Matches by domain or name are suggestions until confirmed in Admin.',
+        instruction:
+          'Quote these figures as given. Name accounts whose match is not yet confirmed as such. Point the reader to the Account billing page for the full list.',
+      },
+      activity: `Compared ${rows.length} won account${rows.length === 1 ? '' : 's'} with QuickBooks billing`,
+      citations: [{ label: 'Billed since won', value: money(total((row) => row.billedSinceWon)), source: 'QuickBooks' }],
+    };
+  },
+};
+
 /** Keeping a view, so it is on the dashboard next month without being rebuilt. */
 const saveViewTool: ToolDefinition = {
   name: 'save_view',
@@ -1685,6 +1807,7 @@ export const AGENT_TOOLS: ToolDefinition[] = [
   listPipelineFields,
   findDeals,
   getLeadershipReview,
+  getAccountBilling,
   saveViewTool,
   listSavedViews,
   listSources,
