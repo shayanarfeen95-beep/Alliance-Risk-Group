@@ -166,6 +166,20 @@ export function normaliseName(value: string | null | undefined): string {
     .join(' ');
 }
 
+/**
+ * Westport's QuickBooks customers carry their account number in front of the
+ * name — "10416 - D A Collins", "10357 Town of Niskayuna", even "10403The
+ * Medical Center…". HubSpot has the name alone, so the number is set aside
+ * before names are compared (the name as written is compared too).
+ */
+export function withoutAccountNumber(value: string | null | undefined): string | null {
+  if (!value) return null;
+  const stripped = value.replace(/^\s*\d{4,6}(?:\s*[-–—:.]\s*|\s+|(?=[A-Za-z]))/, '');
+  return stripped && stripped !== value ? stripped : null;
+}
+
+const DELETED = /\(deleted\)\s*$/i;
+
 /** "Acme Corp - New Deal" → "Acme Corp": the account a deal name starts with. */
 function accountPartOfDealName(dealName: string | null): string {
   if (!dealName) return '';
@@ -195,11 +209,15 @@ function topOf(id: string, byId: Map<string, CustomerRow>): string {
 
 export function suggestMatch(
   company: { name: string | null; domain: string | null; dealNames: string[] },
-  customers: CustomerRow[],
+  allCustomers: CustomerRow[],
   byId: Map<string, CustomerRow>,
 ): Omit<AccountMatch, 'method'> & { method: 'DOMAIN' | 'NAME' | 'NONE' } {
   const nameOf = (id: string) => byId.get(id)?.displayName ?? id;
   const unique = (ids: string[]) => [...new Set(ids.map((id) => topOf(id, byId)))];
+
+  // QuickBooks renames a deleted customer "… (deleted)"; it is never the one a
+  // newly won account is billed as.
+  const customers = allCustomers.filter((customer) => !DELETED.test(customer.displayName));
 
   const domain = company.domain?.toLowerCase().replace(/^www\./, '') ?? null;
   if (domain) {
@@ -218,6 +236,7 @@ export function suggestMatch(
   );
   const namesOf = (customer: CustomerRow) =>
     [customer.displayName, customer.companyName, customer.fullyQualifiedName?.split(':')[0]]
+      .flatMap((name) => [name, withoutAccountNumber(name)])
       .map(normaliseName)
       .filter(Boolean);
 

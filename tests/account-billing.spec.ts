@@ -25,6 +25,8 @@ import {
   decideAccountMatch,
   loadAccountBilling,
   normaliseName,
+  suggestMatch,
+  withoutAccountNumber,
   type AccountBillingRow,
 } from '@/lib/billing/accounts';
 import { statedFigures, unsupportedFigures } from '@/lib/ai/figure-check';
@@ -186,6 +188,38 @@ describe('QuickBooks billing by customer', () => {
     expect(normaliseName('The Acme Company, LLC')).toBe('acme');
     expect(normaliseName('Beta Health LLC')).toBe(normaliseName('Beta Health'));
     expect(normaliseName('New York Life')).toBe('new york life');
+  });
+});
+
+describe('QuickBooks customer names with an account number in front', () => {
+  const customer = (customerId: string, displayName: string) => ({
+    customerId, displayName, companyName: null, fullyQualifiedName: displayName,
+    parentId: null, emailDomain: null, webDomain: null,
+  });
+  const customers = [
+    customer('1', '10416 - D A Collins'),
+    customer('2', '9506 - D.A. Collins Construction Co., Inc'),
+    customer('3', '10357 Town of Niskayuna'),
+    customer('4', '10403The Medical Center of Southeast Texas (deleted)'),
+    customer('5', '10419 - Darrah Land Surveying, PLLC'),
+  ];
+  const byId = new Map(customers.map((c) => [c.customerId, c]));
+  const match = (name: string) => suggestMatch({ name, domain: null, dealNames: [] }, customers, byId);
+
+  it('sets the number aside before comparing names', () => {
+    expect(withoutAccountNumber('10416 - D A Collins')).toBe('D A Collins');
+    expect(withoutAccountNumber('10357 Town of Niskayuna')).toBe('Town of Niskayuna');
+    expect(withoutAccountNumber('10403The Medical Center')).toBe('The Medical Center');
+    expect(withoutAccountNumber('Acme Corp')).toBeNull();
+    expect(match('D A Collins')).toMatchObject({ method: 'NAME', customerId: '1' });
+    expect(match('Town of Niskayuna')).toMatchObject({ method: 'NAME', customerId: '3' });
+    expect(match('Darrah Land Surveying')).toMatchObject({ method: 'NAME', customerId: '5' });
+  });
+
+  it('never offers a customer QuickBooks marks deleted', () => {
+    const result = match('The Medical Center of Southeast Texas');
+    expect(result.customerId).toBeNull();
+    expect(result.suggestions).toEqual([]);
   });
 });
 
