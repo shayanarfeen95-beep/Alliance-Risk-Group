@@ -11,7 +11,8 @@
  * allocation bucket, an unclassified catch-all, a class kept for something other
  * than divisional reporting. Saying so out loud lets the month load and puts the
  * consequence on the record, rather than leaving somebody to guess a division
- * for a bucket that has none.
+ * for a bucket that has none. Such a class is in no division but still in ARG
+ * Total, on its own line, so ARG Total agrees with QuickBooks' Total column.
  */
 'use client';
 
@@ -98,10 +99,11 @@ export function ClassMapping({
       </DataTable>
 
       <p className="mt-3 text-[10.5px] leading-relaxed text-[var(--text-muted)]">
-        A class marked <strong>not a division</strong> is left out of every divisional figure and
-        out of ARG Total — which is what an allocation or unclassified bucket should do, and is why
-        it is a decision somebody makes rather than a default. Every change here is recorded against
-        the person who made it, because it changes what the divisional P&amp;Ls say.
+        A class marked <strong>not a division</strong> stays out of every divisional P&amp;L but is
+        still counted in ARG Total, on a line of its own — as QuickBooks&apos; own Total column counts it.
+        That is what an allocation bucket such as Z Alloc, or Not Specified, should do: its costs are
+        real, and ARG Total has to agree with QuickBooks. Every change here is recorded against the
+        person who made it, because it changes what the divisional P&amp;Ls say.
       </p>
     </Card>
   );
@@ -140,7 +142,7 @@ function ClassDecisionForm({
               {division.divisionName}
             </option>
           ))}
-          <option value="__excluded__">Not a division — leave it out</option>
+          <option value="__excluded__">Not a division — count it in ARG Total only</option>
         </select>
         <SaveButton />
       </div>
@@ -186,7 +188,7 @@ function State({ decision }: { decision: ClassMapRow['decision'] }) {
     return (
       <span className="flex items-center gap-1 text-[11px] text-[var(--text-muted)]">
         <MinusCircle size={11} aria-hidden />
-        Excluded
+        In ARG Total only
       </span>
     );
   }

@@ -360,6 +360,44 @@ export const factGlBalance = pgTable(
   ],
 );
 
+/**
+ * QuickBooks' own company-level figures — the TOTAL column of each report.
+ *
+ * Two jobs, both about agreeing with the books rather than with ourselves:
+ *
+ *   1. **The balance sheet.** ARG's balance sheet is not usable by class: the
+ *      classed report shows CLAIMS with $424k of assets against $942k of
+ *      liabilities and equity, $849k of assets on "Not Specified" and −$2.16M on
+ *      "Z Alloc". Only the TOTAL column balances, so the balance sheet, working
+ *      capital, DSO, DPO and Cash Runway at ARG Total are read from here.
+ *   2. **The P&L tie-out.** ARG Total is the four divisions plus the classes
+ *      that belong to no division — Not Specified, Z Alloc — exactly as
+ *      QuickBooks' own Total column is. Holding QuickBooks' total beside ours is
+ *      what lets the Finance page say "ties to QuickBooks" or name the difference.
+ *
+ * `statement` is 'PL', 'BS', 'AR_AGING' or 'AP_AGING'; `line` is a P&L reporting
+ * line, a fact_bs_actual field, or an aging bucket. 'PL_UNASSIGNED' holds what
+ * sits on each class outside the divisions (`line|class`), and 'GL_UNASSIGNED'
+ * the accounts behind it (`class|accountId`) — both part of ARG Total.
+ * Company-level rows carry no division, so this table is read only by users
+ * entitled to every division.
+ */
+export const factCompanyTotal = pgTable(
+  'fact_company_total',
+  {
+    periodMonth: date('period_month')
+      .notNull()
+      .references(() => dimPeriod.periodMonth),
+    statement: text('statement').notNull(),
+    line: text('line').notNull(),
+    amount: money('amount').notNull().default('0'),
+    sourceSystem: sourceSystem('source_system').notNull(),
+    loadRunId: uuid('load_run_id').references(() => loadRun.id),
+    loadedAt: timestamp('loaded_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.periodMonth, t.statement, t.line] })],
+);
+
 // ---------------------------------------------------------------------------
 // §4.4 FACT_BUDGET — month × division × scenario × line item
 // ---------------------------------------------------------------------------
@@ -558,6 +596,17 @@ export const factDeal = pgTable(
      * questions for a new logo and for an existing account.
      */
     dealType: text('deal_type'),
+    /**
+     * HubSpot's Line of Business, as the option LABEL people see ("Background
+     * Checks"), several joined by "; ". The Leadership dashboard is scoped on it.
+     */
+    lineOfBusiness: text('line_of_business'),
+    /** HubSpot's "Date Compliance Review Completed" — a deal property, not a meeting. */
+    complianceReviewCompletedAt: timestamp('compliance_review_completed_at', { withTimezone: true }),
+    /** HubSpot's "Created by": a user id, which is not an owner id. */
+    createdByUserId: text('created_by_user_id'),
+    /** That user's name, resolved from the owners list at load. */
+    createdByName: text('created_by_name'),
     /** The company the deal is against, for ICP tiering and revenue matching. */
     companyId: text('company_id'),
     contactId: text('contact_id'),
@@ -610,6 +659,15 @@ export const factContact = pgTable(
     becameMqlDate: timestamp('became_mql_date', { withTimezone: true }),
     becameSqlDate: timestamp('became_sql_date', { withTimezone: true }),
     becameCustomerDate: timestamp('became_customer_date', { withTimezone: true }),
+    /** The contact's Lead Source, as its option label. */
+    leadSource: text('lead_source'),
+    /**
+     * HubSpot's "Date entered Marketing Qualified Lead (Lifecycle Stage
+     * Pipeline)" — hs_v2_date_entered_marketingqualifiedlead, the field ARG's
+     * own SQL report reads. Kept beside the history-derived became_mql_date
+     * because the two can differ, and the review is defined on this one.
+     */
+    mqlEnteredAt: timestamp('mql_entered_at', { withTimezone: true }),
     loadRunId: uuid('load_run_id').references(() => loadRun.id),
   },
   (t) => [index('fact_contact_lead_date_idx').on(t.becameLeadDate)],
@@ -986,6 +1044,88 @@ export const dimDealStage = pgTable('dim_deal_stage', {
 });
 
 /**
+ * QuickBooks customers, so billing can be read account by account.
+ *
+ * A sub-customer (a job) carries its parent, and a customer's billing includes
+ * its jobs. The email and website domains are what a HubSpot company is matched
+ * on first: a shared domain is firmer evidence than a similar name.
+ */
+export const dimQboCustomer = pgTable('dim_qbo_customer', {
+  customerId: text('customer_id').primaryKey(),
+  displayName: text('display_name').notNull(),
+  companyName: text('company_name'),
+  fullyQualifiedName: text('fully_qualified_name'),
+  parentId: text('parent_id'),
+  emailDomain: text('email_domain'),
+  webDomain: text('web_domain'),
+  active: boolean('active').notNull().default(true),
+  loadRunId: uuid('load_run_id').references(() => loadRun.id),
+});
+
+/**
+ * QuickBooks invoices and credit memos: what each customer was billed, and when.
+ *
+ * `billed` is the total less sales tax — revenue, not cash — and negative for a
+ * credit memo, so a customer's billing nets its credits.
+ */
+export const factInvoice = pgTable(
+  'fact_invoice',
+  {
+    /** `INV:<id>` or `CM:<id>`: QuickBooks numbers each type separately. */
+    invoiceKey: text('invoice_key').primaryKey(),
+    kind: text('kind').notNull(),
+    docNumber: text('doc_number'),
+    customerId: text('customer_id').notNull(),
+    customerName: text('customer_name'),
+    txnDate: date('txn_date').notNull(),
+    total: money('total').notNull().default('0'),
+    tax: money('tax').notNull().default('0'),
+    billed: money('billed').notNull().default('0'),
+    balance: money('balance').notNull().default('0'),
+    lastUpdated: timestamp('last_updated', { withTimezone: true }),
+    loadRunId: uuid('load_run_id').references(() => loadRun.id),
+  },
+  (t) => [index('fact_invoice_customer_idx').on(t.customerId, t.txnDate)],
+);
+
+/**
+ * Which QuickBooks customer a HubSpot company is — when a person has decided.
+ *
+ * Suggested matches are computed, never stored: only Westport's confirmation,
+ * correction or rejection lives here. A null customer is the explicit answer
+ * "this company has no QuickBooks customer".
+ */
+export const mapCompanyCustomer = pgTable('map_company_customer', {
+  companyId: text('company_id').primaryKey(),
+  qboCustomerId: text('qbo_customer_id'),
+  decidedByUserId: uuid('decided_by_user_id').references(() => users.id),
+  decidedAt: timestamp('decided_at', { withTimezone: true }).notNull().defaultNow(),
+});
+
+/**
+ * HubSpot's field definitions, so a field is found by the label people use.
+ *
+ * Custom properties carry internal names nobody types — Westport's definitions
+ * say "Line of Business" and "Date Compliance Review Completed", and HubSpot
+ * stores them under whatever name was generated when they were created. The
+ * options are kept so a stored value can be shown as the label HubSpot shows.
+ */
+export const dimHubspotProperty = pgTable(
+  'dim_hubspot_property',
+  {
+    objectType: text('object_type').notNull(),
+    name: text('name').notNull(),
+    label: text('label').notNull(),
+    type: text('type'),
+    fieldType: text('field_type'),
+    groupName: text('group_name'),
+    options: jsonb('options'),
+    loadRunId: uuid('load_run_id').references(() => loadRun.id),
+  },
+  (t) => [primaryKey({ name: 'dim_hubspot_property_pk', columns: [t.objectType, t.name] })],
+);
+
+/**
  * Companies, for the two questions that cannot be answered from a deal alone:
  * which tier of customer this is, and whether the revenue QuickBooks recorded
  * belongs to the same customer HubSpot booked.
@@ -1026,8 +1166,40 @@ export const syncState = pgTable(
     lastSyncedAt: timestamp('last_synced_at', { withTimezone: true }),
     /** Records read on the last completed pass, for the "nothing changed" message. */
     lastRecordCount: integer('last_record_count').notNull().default(0),
+    /**
+     * The set of fields the last completed pass asked for. A different set
+     * means records not modified since were read without the new fields, so
+     * the watermark no longer covers them and the next pass starts over.
+     */
+    fieldsVersion: text('fields_version'),
   },
   (t) => [primaryKey({ columns: [t.sourceSystem, t.entity] })],
+);
+
+/**
+ * What each piece of source data looked like the last time it was imported.
+ *
+ * One row per QuickBooks month of a report, per Sheets tab, per reference list.
+ * A pull compares what it fetched against this fingerprint and imports only what
+ * is new or different — so pressing Pull, or the nightly refresh, does not
+ * re-import a year of unchanged books every time, and the log can say exactly
+ * which months were new, which changed and which were left alone.
+ */
+export const syncFingerprint = pgTable(
+  'sync_fingerprint',
+  {
+    sourceSystem: text('source_system').notNull(),
+    entity: text('entity').notNull(),
+    /** A month (YYYY-MM-01) for a monthly report; 'all' for a whole list or tab. */
+    scope: text('scope').notNull(),
+    contentHash: text('content_hash').notNull(),
+    /** Last time the source was fetched and compared. */
+    checkedAt: timestamp('checked_at', { withTimezone: true }).notNull().defaultNow(),
+    /** Last time the content was different and was imported. */
+    changedAt: timestamp('changed_at', { withTimezone: true }).notNull().defaultNow(),
+    loadRunId: uuid('load_run_id').references(() => loadRun.id),
+  },
+  (t) => [primaryKey({ columns: [t.sourceSystem, t.entity, t.scope] })],
 );
 
 /**

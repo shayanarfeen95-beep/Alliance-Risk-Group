@@ -14,7 +14,8 @@ export type ValueFormat =
   | 'ratio'
   | 'days'
   | 'count'
-  | 'months';
+  | 'months'
+  | 'multiple';
 
 const currency0 = new Intl.NumberFormat('en-US', {
   style: 'currency',
@@ -29,6 +30,7 @@ const currency2 = new Intl.NumberFormat('en-US', {
 });
 const number0 = new Intl.NumberFormat('en-US', { maximumFractionDigits: 0 });
 const number1 = new Intl.NumberFormat('en-US', { maximumFractionDigits: 1 });
+const number2 = new Intl.NumberFormat('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
 /** Negatives render in parentheses — the convention ARG's leadership reads. */
 export function formatNumber(value: number | null | undefined, format: ValueFormat): string {
@@ -52,6 +54,8 @@ export function formatNumber(value: number | null | undefined, format: ValueForm
       return `${number1.format(value)} mo`;
     case 'count':
       return number0.format(value);
+    case 'multiple':
+      return `${number2.format(value)}×`;
   }
 }
 

@@ -132,23 +132,62 @@ export async function buildAuditPack(
     .where(sql`division_code = any(${sql.raw(`ARRAY[${session.visibleDivisions.map((c) => `'${c}'`).join(',')}]`)})`)
     .orderBy(t.factPlActual.periodMonth, t.factPlActual.divisionCode);
 
+  // QuickBooks classes that belong to no division (Z Alloc, Not Specified) are
+  // part of ARG Total, so they are listed beside the divisions: the rows of this
+  // file add up to ARG Total, and ARG Total to QuickBooks. Only for a reader
+  // entitled to ARG Total, as everywhere else.
+  const classRows: unknown[][] = [];
+  if (session.consolidatedAvailable) {
+    const unassigned = await db
+      .select()
+      .from(t.factCompanyTotal)
+      .where(eq(t.factCompanyTotal.statement, 'PL_UNASSIGNED'))
+      .orderBy(t.factCompanyTotal.periodMonth);
+    const byMonthClass = new Map<string, { month: string; name: string; lines: Record<string, string>; loadRunId: string | null }>();
+    for (const row of unassigned) {
+      const at = row.line.indexOf('|');
+      if (at === -1) continue;
+      const line = row.line.slice(0, at);
+      const name = row.line.slice(at + 1);
+      const k = `${row.periodMonth}|${name}`;
+      const entry = byMonthClass.get(k) ?? { month: row.periodMonth, name, lines: {}, loadRunId: row.loadRunId };
+      entry.lines[line] = row.amount;
+      byMonthClass.set(k, entry);
+    }
+    for (const entry of [...byMonthClass.values()].sort((a, b) => a.month.localeCompare(b.month) || a.name.localeCompare(b.name))) {
+      classRows.push([
+        entry.month,
+        `${entry.name} (QuickBooks class, not a division)`,
+        entry.lines.revenue ?? '0',
+        entry.lines.payroll_direct ?? '0',
+        entry.lines.cogs ?? '0',
+        entry.lines.payroll_expense ?? '0',
+        entry.lines.opex ?? '0',
+        entry.loadRunId ?? '',
+      ]);
+    }
+  }
+
   files['03_pl_actuals.csv'] = strToU8(
     csv(
       ['period_month', 'division_code', 'revenue', 'payroll_direct_MEMO', 'cogs', 'payroll_expense_MEMO', 'opex', 'load_run_id'],
-      plRows.map((row) => [
-        row.periodMonth,
-        row.divisionCode,
-        row.revenue,
-        // Labelled MEMO in the header because that is the single most
-        // consequential fact about these two columns: they are already inside
-        // COGS and OpEx and must never be subtracted again (Defect: SHRC gross
-        // profit is $71,451, not $38,407).
-        row.payrollDirect,
-        row.cogs,
-        row.payrollExpense,
-        row.opex,
-        row.loadRunId ?? '',
-      ]),
+      [
+        ...plRows.map((row) => [
+          row.periodMonth,
+          row.divisionCode,
+          row.revenue,
+          // Labelled MEMO in the header because that is the single most
+          // consequential fact about these two columns: they are already inside
+          // COGS and OpEx and must never be subtracted again (Defect: SHRC gross
+          // profit is $71,451, not $38,407).
+          row.payrollDirect,
+          row.cogs,
+          row.payrollExpense,
+          row.opex,
+          row.loadRunId ?? '',
+        ]),
+        ...classRows,
+      ],
     ),
   );
 
@@ -341,9 +380,12 @@ contained within COGS and Operating Expense respectively. Subtracting them again
 understates gross profit — for the tie-out month it is the difference between
 $71,451 and $38,407 on one division alone.
 
-**ARG Total is computed, never stored.** It is the sum of the four divisions at
-the point of reading. There is no ARG Total row in \`03_pl_actuals.csv\`, and a
-database constraint prevents one from being written.
+**ARG Total is computed, never stored.** It is the sum of the four divisions and
+of the QuickBooks classes that belong to no division (Z Alloc, Not Specified) at
+the point of reading — the same columns as QuickBooks' own Total. Those classes
+are listed in \`03_pl_actuals.csv\` beneath the divisions, so the file's rows add
+up to ARG Total. There is no ARG Total row, and a database constraint prevents
+one from being written.
 
 ## Direction
 

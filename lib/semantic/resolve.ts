@@ -15,7 +15,7 @@ import { formatValue } from '@/lib/money';
 import { canSeeConsolidated, scopeDivisions, ScopeError } from '@/lib/auth/scope';
 import type { SessionUser } from '@/lib/auth/session';
 import type { Database } from '@/lib/db/client';
-import { loadFactBundle, type FactBundle } from './facts';
+import { isOtherClassCode, loadFactBundle, type FactBundle } from './facts';
 import { buildPeriodContext, type MonthKey, type PeriodContext } from './periods';
 import { getKpiDefinition, KPI_REGISTRY } from './registry';
 import type { KpiResult } from './types';
@@ -30,6 +30,13 @@ export interface SemanticSession {
   visibleDivisions: string[];
   /** Whether the consolidated rollup is available to this user. */
   consolidatedAvailable: boolean;
+  /**
+   * What ARG Total adds up: every division, then every QuickBooks class that
+   * belongs to none (Z Alloc, Not Specified) — the same columns QuickBooks'
+   * own Total column adds up. Use `scopeFor`, never `visibleDivisions`, to sum
+   * a figure at ARG Total.
+   */
+  consolidatedScope: string[];
   /** §5.3 / §9 — shown on the face of every view. */
   periodIsClosed: boolean;
   lastRefreshedAt: Date | null;
@@ -55,13 +62,18 @@ export async function openSemanticSession(
   const allDivisions = await listActiveDivisions(db);
   const visible = scopeDivisions(user, allDivisions);
   const bundle = await loadFactBundle(db, period, visible);
+  const visibleDivisions = bundle.divisions.map((d) => d.divisionCode);
+  const consolidatedAvailable = canSeeConsolidated(user, allDivisions);
 
   return {
     period,
     bundle,
     user,
-    visibleDivisions: bundle.divisions.map((d) => d.divisionCode),
-    consolidatedAvailable: canSeeConsolidated(user, allDivisions),
+    visibleDivisions,
+    consolidatedAvailable,
+    consolidatedScope: consolidatedAvailable
+      ? [...visibleDivisions, ...bundle.otherClasses.map((row) => row.code)]
+      : visibleDivisions,
     periodIsClosed: bundle.periodState.get(month)?.isClosed ?? false,
     lastRefreshedAt: bundle.lastRefreshedAt,
     accountingBasis: bundle.config.get('ACCOUNTING_BASIS')?.value ?? 'accrual',
@@ -79,6 +91,24 @@ async function listActiveDivisions(db: Database): Promise<string[]> {
   return rows.map((row) => row.divisionCode);
 }
 
+/**
+ * The codes a figure is summed over: one division, one class outside the
+ * divisions, or — at ARG Total — every division and every such class.
+ */
+export function scopeFor(session: SemanticSession, divisionCode: string): string[] {
+  return divisionCode === CONSOLIDATED_CODE ? session.consolidatedScope : [divisionCode];
+}
+
+/** Display name for a scope code: a division, a class outside them, or ARG Total. */
+export function scopeLabel(session: SemanticSession, code: string): string {
+  if (code === CONSOLIDATED_CODE) return 'ARG Total';
+  return (
+    session.bundle.divisions.find((row) => row.divisionCode === code)?.divisionName ??
+    session.bundle.otherClasses.find((row) => row.code === code)?.name ??
+    code
+  );
+}
+
 export interface ResolveOptions {
   /** Overrides the session's reporting month for this one call. */
   month?: MonthKey;
@@ -87,13 +117,15 @@ export interface ResolveOptions {
 }
 
 /**
- * Resolves one KPI for one division (or ARG Total).
+ * Resolves one KPI for one division, one class outside the divisions, or ARG
+ * Total.
  *
- * ARG Total is computed as the sum of the four divisions — never read from a
- * stored row (§3). Because each KPI receives the division LIST and sums the
- * underlying components itself, ratios consolidate correctly: ARG Total gross
- * margin is total gross profit over total revenue, not an average of four
- * margins.
+ * ARG Total is computed as the sum of the four divisions and the QuickBooks
+ * classes that belong to none (Z Alloc, Not Specified) — never read from a
+ * stored row (§3), and equal to QuickBooks' own Total column. Because each KPI
+ * receives the code LIST and sums the underlying components itself, ratios
+ * consolidate correctly: ARG Total gross margin is total gross profit over total
+ * revenue, not an average of margins.
  */
 export function resolveKpi(
   session: SemanticSession,
@@ -115,11 +147,16 @@ export function resolveKpi(
       'Not entitled to the consolidated view. ARG Total would disclose divisions this user cannot see.',
     );
   }
-  if (!isConsolidated && !session.visibleDivisions.includes(divisionCode)) {
+  // A class outside the divisions is part of ARG Total, so it is visible to
+  // exactly the users who may see ARG Total.
+  const visible = isOtherClassCode(divisionCode)
+    ? session.consolidatedScope.includes(divisionCode)
+    : session.visibleDivisions.includes(divisionCode);
+  if (!isConsolidated && !visible) {
     throw new ScopeError(`Not entitled to division ${divisionCode}.`);
   }
 
-  const divisions = isConsolidated ? session.visibleDivisions : [divisionCode];
+  const divisions = scopeFor(session, divisionCode);
   const period = resolveOptions.month
     ? buildPeriodContext(resolveOptions.month)
     : session.period;

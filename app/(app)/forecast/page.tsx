@@ -2,10 +2,14 @@ import type { Metadata } from 'next';
 import Link from 'next/link';
 import Decimal from 'decimal.js';
 import { Lock, ShieldCheck, TriangleAlert } from 'lucide-react';
+import { CONSOLIDATED_CODE } from '@/lib/semantic/resolve';
+import { loadFinance } from '@/lib/dashboards/finance';
+import { preferredBudgetScenario } from '@/lib/semantic/registry';
+import { Headline } from '@/components/finance/headline';
 import { loadDashboardContext, type SearchParams } from '@/lib/dashboards/context';
 import { buildDivisionColorMap } from '@/lib/charts/colors';
 import { formatMonth } from '@/lib/semantic/periods';
-import { formatNumber } from '@/lib/format';
+import { formatNumber, formatSignedNumber } from '@/lib/format';
 import { resolveKpi } from '@/lib/semantic/resolve';
 import { sumPlOverMonths } from '@/lib/semantic/facts';
 import { budgetedRevenue, forecastGateStatus, listScenarios } from '@/lib/forecast/service';
@@ -76,17 +80,55 @@ export default async function ForecastPage({
 
   const canLock = can(user, 'LOCK_FORECAST');
 
+  // The division chosen at the top: ARG Total shows every division, a single
+  // division narrows the scenarios, the outlook and the tiles to it.
+  const focus = context.divisionCode;
+  const inScope = (code: string) => focus === CONSOLIDATED_CODE || code === focus;
+  const scopeLabel =
+    focus === CONSOLIDATED_CODE
+      ? 'ARG Total'
+      : (session.bundle.divisions.find((d) => d.divisionCode === focus)?.divisionName ?? focus);
+  const scoped = divisions.filter((d) => inScope(d.divisionCode));
+  const sumOf = (pick: (d: DivisionContext) => number | null) =>
+    scoped.every((d) => pick(d) === null) ? null : scoped.reduce((total, d) => total + (pick(d) ?? 0), 0);
+
+  const budgetScenario = preferredBudgetScenario(session.bundle);
+  const budgetName =
+    session.bundle.scenarios.get(budgetScenario)?.description ??
+    session.bundle.scenarios.get(budgetScenario)?.name ??
+    'the budget';
+  const budgetBase = sumOf((d) => d.budgetedRevenue);
+  const priorMonthRevenue = sumOf((d) => d.priorMonth.revenue);
+  const priorYearRevenue = sumOf((d) => d.priorYear.revenue);
+  const official = scenarios.find((scenario) => scenario.isOfficial);
+
+  // The rest of the year, from the same model the Finance page uses.
+  const outlook = loadFinance(session, focus, colors);
+  const outlookRows = outlook.lines.filter((line) => ['revenue', 'gross_profit', 'net_profit'].includes(line.id));
+
   return (
     <div className="space-y-6">
       <header className="flex flex-wrap items-start justify-between gap-3">
         <div>
           <h1 className="text-[19px] font-semibold tracking-tight">Forecast</h1>
           <p className="mt-1 max-w-2xl text-[12.5px] leading-relaxed text-[var(--text-secondary)]">
-            Set next month's assumptions, compare scenarios, and lock the official forecast.
+            Forecast {formatMonth(period.month)} for {scopeLabel}: set assumptions against the budget,
+            save scenarios, then lock the official one. Below that, where the year lands.
           </p>
-          <p className="mt-0.5 text-[12px] text-[var(--text-muted)]">
-            {formatMonth(period.month)} · assumptions in, projected P&amp;L out
-          </p>
+          <ol className="mt-2.5 flex flex-wrap items-center gap-2 text-[11.5px] text-[var(--text-secondary)]">
+            {['Set assumptions', 'Save a scenario', 'Lock the official forecast', 'Score it against actuals'].map((step, index) => (
+              <li key={step} className="inline-flex items-center gap-1.5">
+                <span
+                  className="inline-flex h-5 w-5 items-center justify-center rounded-full text-[10.5px] font-semibold"
+                  style={{ background: 'var(--surface-2)', color: 'var(--text-primary)' }}
+                >
+                  {index + 1}
+                </span>
+                {step}
+                {index < 3 ? <span aria-hidden className="text-[var(--text-muted)]">→</span> : null}
+              </li>
+            ))}
+          </ol>
         </div>
         <Link
           href={`/forecast/accuracy?month=${period.month.slice(0, 7)}&division=${context.divisionCode}`}
@@ -96,6 +138,66 @@ export default async function ForecastPage({
           Forecast vs. actual →
         </Link>
       </header>
+
+      <Headline
+        tiles={[
+          {
+            label: 'Budgeted revenue',
+            value: formatNumber(budgetBase, 'currency'),
+            context: budgetBase ? `Base: ${budgetName}` : 'No budget loaded for this month',
+            tone: 'neutral',
+            hint: 'The revenue budget each forecast scales from (Revenue % of budget).',
+          },
+          {
+            label: `Revenue ${formatMonth(period.priorMonth).split(' ')[0]}`,
+            value: formatNumber(priorMonthRevenue, 'currency'),
+            context: 'Last month, actual',
+            tone: 'neutral',
+          },
+          {
+            label: 'Same month last year',
+            value: formatNumber(priorYearRevenue, 'currency'),
+            context: formatMonth(period.priorYearMonth),
+            tone: 'neutral',
+          },
+          {
+            label: 'Scenarios saved',
+            value: String(scenarios.length),
+            context: official ? `Official: ${official.scenarioName}` : 'None locked yet',
+            tone: official ? 'good' : 'neutral',
+          },
+          {
+            label: 'Full-year revenue outlook',
+            value: formatNumber(outlookRows[0]?.fullYear.outlook ?? null, 'currency'),
+            context:
+              outlookRows[0]?.fullYear.outlook != null && outlookRows[0]?.fullYear.budget != null
+                ? `${formatSignedNumber(outlookRows[0].fullYear.outlook - outlookRows[0].fullYear.budget, 'currency')} vs full-year budget`
+                : 'Needs actuals and a budget',
+            tone:
+              outlookRows[0]?.fullYear.outlook != null && outlookRows[0]?.fullYear.budget != null
+                ? outlookRows[0].fullYear.outlook >= outlookRows[0].fullYear.budget
+                  ? 'good'
+                  : 'bad'
+                : 'neutral',
+            href: '#outlook',
+          },
+          {
+            label: 'Full-year net profit outlook',
+            value: formatNumber(outlookRows[2]?.fullYear.outlook ?? null, 'currency'),
+            context:
+              outlookRows[2]?.fullYear.outlook != null && outlookRows[2]?.fullYear.budget != null
+                ? `${formatSignedNumber(outlookRows[2].fullYear.outlook - outlookRows[2].fullYear.budget, 'currency')} vs full-year budget`
+                : 'Needs actuals and a budget',
+            tone:
+              outlookRows[2]?.fullYear.outlook != null && outlookRows[2]?.fullYear.budget != null
+                ? outlookRows[2].fullYear.outlook >= outlookRows[2].fullYear.budget
+                  ? 'good'
+                  : 'bad'
+                : 'neutral',
+            href: '#outlook',
+          },
+        ]}
+      />
 
       {/* §10.3 — the gate on entering a month's actuals. */}
       <div
@@ -136,7 +238,13 @@ export default async function ForecastPage({
       <SectionTitle hint="Recalculates as you type — sanity-check an assumption before you save it, not after">
         Build a scenario
       </SectionTitle>
-      <AssumptionGrid month={period.month} divisions={divisions} canLock={canLock} />
+      <AssumptionGrid
+        key={focus}
+        month={period.month}
+        divisions={divisions}
+        canLock={canLock}
+        initialFocus={focus === CONSOLIDATED_CODE ? 'ALL' : focus}
+      />
 
       {/* §10.2 — scenarios side by side. */}
       <SectionTitle hint="Exactly one scenario per month is promoted to the official locked forecast">
@@ -152,7 +260,8 @@ export default async function ForecastPage({
       ) : (
         <div className="space-y-3">
           {scenarios.map((scenario) => {
-            const totals = scenario.rows.reduce(
+            const rows = scenario.rows.filter((row) => inScope(row.divisionCode));
+            const totals = rows.reduce(
               (sum, row) => ({
                 revenue: sum.revenue + row.projection.revenue.toNumber(),
                 grossProfit: sum.grossProfit + row.projection.grossProfit.toNumber(),
@@ -207,7 +316,7 @@ export default async function ForecastPage({
                     </tr>
                   </thead>
                   <tbody>
-                    {scenario.rows.map((row) => (
+                    {rows.map((row) => (
                       <tr key={row.divisionCode}>
                         <Td align="left" numeric={false}>
                           {row.divisionCode}
@@ -222,7 +331,7 @@ export default async function ForecastPage({
                     ))}
                     <tr>
                       <Td align="left" numeric={false} style={{ fontWeight: 600 }}>
-                        ARG Total
+                        {focus === CONSOLIDATED_CODE ? 'ARG Total' : `${scopeLabel} total`}
                       </Td>
                       <Td muted>—</Td>
                       <Td muted>—</Td>
@@ -238,6 +347,54 @@ export default async function ForecastPage({
           })}
         </div>
       )}
+
+      <section id="outlook" className="scroll-mt-32">
+        <Card>
+          <CardHeader
+            title={`Where ${period.fiscalYear} lands — ${scopeLabel}`}
+            subtitle={outlook.budget.outlookSource}
+          />
+          <DataTable>
+            <thead>
+              <tr>
+                <Th align="left">Line</Th>
+                <Th>YTD actual</Th>
+                <Th>YTD budget</Th>
+                <Th>Full-year budget</Th>
+                <Th title={outlook.budget.outlookSource}>Full-year outlook</Th>
+                <Th title="Outlook − full-year budget">Outlook vs budget</Th>
+              </tr>
+            </thead>
+            <tbody>
+              {outlookRows.map((line) => {
+                const gap =
+                  line.fullYear.outlook !== null && line.fullYear.budget !== null
+                    ? line.fullYear.outlook - line.fullYear.budget
+                    : null;
+                return (
+                  <tr key={line.id}>
+                    <Td align="left" numeric={false} style={{ fontWeight: line.isSubtotal ? 600 : 400 }}>
+                      {line.label}
+                    </Td>
+                    <Td>{formatNumber(line.ytd.actual, 'currency')}</Td>
+                    <Td muted>{formatNumber(line.ytd.budget, 'currency')}</Td>
+                    <Td muted>{formatNumber(line.fullYear.budget, 'currency')}</Td>
+                    <Td style={{ fontWeight: 600 }}>{formatNumber(line.fullYear.outlook, 'currency')}</Td>
+                    <Td style={{ color: gap === null ? undefined : gap >= 0 ? 'var(--delta-good)' : 'var(--delta-bad)' }}>
+                      {formatSignedNumber(gap, 'currency')}
+                    </Td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </DataTable>
+          <p className="mt-3 text-[11px] leading-relaxed text-[var(--text-muted)]">
+            A QuickBooks budget named “Forecast”, or a Google Sheets tab called Forecast, replaces the
+            budget for the months it covers — load the latest reforecast there and it flows into this
+            outlook and the Finance page on the next pull.
+          </p>
+        </Card>
+      </section>
 
       <p className="text-[11px] leading-relaxed text-[var(--text-muted)]">
         Locking writes an immutable, timestamped, attributed version with all five lines populated.

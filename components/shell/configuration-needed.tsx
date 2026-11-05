@@ -12,8 +12,14 @@
  */
 export function ConfigurationNeeded({
   unreachable,
+  overQuota,
   missing = [],
-}: { unreachable?: boolean; missing?: string[] } = {}) {
+}: { unreachable?: boolean; overQuota?: boolean; missing?: string[] } = {}) {
+  // Neon answered, and refused: the plan's monthly allowance is spent. Nothing
+  // is misconfigured, so the configuration advice below would send somebody
+  // hunting for a fault that is not there.
+  if (overQuota) return <DatabaseOverQuota />;
+
   return (
     <main className="flex min-h-dvh items-center justify-center px-6 py-12">
       <div className="w-full max-w-lg">
@@ -108,6 +114,44 @@ export function ConfigurationNeeded({
           a screen to create the administrator account. Nothing is seeded: every figure that appears
           will have come from a source you connected.
         </p>
+      </div>
+    </main>
+  );
+}
+
+/** Neon refused the connection because the project's plan allowance is used up. */
+function DatabaseOverQuota() {
+  return (
+    <main className="flex min-h-dvh items-center justify-center px-6 py-12">
+      <div className="w-full max-w-lg">
+        <div className="mb-6 flex items-center gap-2.5">
+          <div
+            aria-hidden
+            className="h-7 w-7 rounded-md"
+            style={{ background: 'linear-gradient(135deg, var(--series-1), var(--series-3))' }}
+          />
+          <span className="text-[15px] font-semibold tracking-tight">Alliance Risk Group</span>
+        </div>
+
+        <h1 className="text-[20px] font-semibold tracking-tight">The database plan&rsquo;s limit is used up</h1>
+
+        <p className="mt-2 text-[13px] leading-relaxed text-[var(--text-secondary)]">
+          The database is reachable, but Neon is refusing connections because this project has used
+          its plan&rsquo;s monthly allowance. Nothing is misconfigured and no data is lost. Signing in
+          works again as soon as the allowance resets at the start of the next month, or straight
+          away once the Neon plan is upgraded.
+        </p>
+
+        <div
+          className="mt-5 rounded-[var(--radius)] border p-4"
+          style={{ borderColor: 'var(--border)', background: 'var(--surface-1)' }}
+        >
+          <p className="text-[12px] font-medium">To restore access now</p>
+          <p className="mt-1.5 text-[11.5px] leading-relaxed text-[var(--text-muted)]">
+            In the Neon console, open the project&rsquo;s <strong>Billing</strong> page and move to
+            a paid plan. The usage page there shows which allowance ran out.
+          </p>
+        </div>
       </div>
     </main>
   );

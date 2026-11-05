@@ -22,6 +22,19 @@ import {
 } from './types';
 import { isConnected, loadCredential } from './credentials';
 import { proxy } from './composio';
+import {
+  CONTACT_MQL_ENTERED,
+  DEAL_CREATED_BY,
+  HUBSPOT_FIELDS_VERSION,
+  LEADERSHIP_FIELDS,
+  SQL_LEAD_SOURCES,
+  findField,
+  hasOption,
+  requestedNames,
+  type FieldSpec,
+  type HubspotObjectType,
+  type HubspotPropertyDefinition,
+} from './hubspot-fields';
 
 const API = 'https://api.hubapi.com';
 
@@ -57,6 +70,9 @@ const DEAL_PROPERTIES = [
   // New business versus renewal/expansion. The filter leadership asked for, and
   // the distinction booked-versus-billed depends on.
   'dealtype',
+  // Who created the deal — a user id. Deals created by month leaves one
+  // user's deals out, by Westport's definition.
+  DEAL_CREATED_BY,
   // How the business says the deal was sourced. Portals name this field
   // differently, so the candidates are tried in order and the first one present
   // on the record wins — see sourceLabel() in the conform step.
@@ -76,6 +92,9 @@ const CONTACT_PROPERTIES = [
   // the MQL and SQL dates are derived from lifecyclestage history instead.
   'hs_lifecyclestage_lead_date',
   'hs_lifecyclestage_customer_date',
+  // "Date entered Marketing Qualified Lead (Lifecycle Stage Pipeline)" — the
+  // field Westport's SQL report filters on.
+  CONTACT_MQL_ENTERED,
   LAST_MODIFIED,
 ];
 
@@ -128,7 +147,25 @@ const STAGE_ENTITY: EntityDescriptor = {
 };
 
 
+/**
+ * HubSpot's field list, read before anything that depends on it.
+ *
+ * Westport's definitions name fields by label — "Line of Business", "Date
+ * Compliance Review Completed", "Lead Source" — and custom fields have
+ * generated internal names. Deals and contacts are read with whatever names
+ * these labels resolve to, and the import translates option values back to
+ * the labels people see.
+ */
+const PROPERTIES_ENTITY: EntityDescriptor = {
+  entity: 'properties',
+  label: 'Field definitions',
+  cadence: 'WEEKLY',
+  description:
+    "HubSpot's list of deal and contact fields, so Line of Business, Date Compliance Review Completed and Lead Source are found by the names Westport uses for them.",
+};
+
 const ENTITIES: EntityDescriptor[] = [
+  PROPERTIES_ENTITY,
   STAGE_ENTITY,
   {
     entity: 'owners',
@@ -149,6 +186,13 @@ const ENTITIES: EntityDescriptor[] = [
     label: 'Contacts',
     cadence: 'DAILY',
     description: 'Leads by the date they became a lead, and original source for CPL by channel.',
+  },
+  {
+    entity: 'mql_contacts',
+    label: 'Marketing qualified leads',
+    cadence: 'DAILY',
+    description:
+      'Contacts that have entered Marketing Qualified Lead, with their Lead Source — what SQLs per month is counted on. Read on their own so the review does not wait on a re-read of every contact.',
   },
   {
     entity: 'meetings',
@@ -295,6 +339,81 @@ function latestModified(records: RawRecord[]): Date | null {
 }
 
 // ---------------------------------------------------------------------------
+// Field definitions
+// ---------------------------------------------------------------------------
+
+/** Read once per object per few minutes: a pull asks for it on every slice. */
+const CATALOG_TTL_MS = 10 * 60_000;
+const catalogCache = new Map<HubspotObjectType, { at: number; fields: HubspotPropertyDefinition[] }>();
+
+/** HubSpot's field list for an object. Throws when it cannot be read. */
+async function readCatalog(object: HubspotObjectType): Promise<HubspotPropertyDefinition[]> {
+  const cached = catalogCache.get(object);
+  if (cached && Date.now() - cached.at < CATALOG_TTL_MS) return cached.fields;
+
+  const page = await fetchPage(`/crm/v3/properties/${object}`, {});
+  if (!Array.isArray(page.results)) {
+    throw new Error(`HubSpot returned no field list for ${object}.`);
+  }
+  const fields = page.results as unknown as HubspotPropertyDefinition[];
+  catalogCache.set(object, { at: Date.now(), fields });
+  return fields;
+}
+
+/**
+ * The field list, or null when it cannot be read.
+ *
+ * A deals pull must not fail because the field list is unavailable: it falls
+ * back to the likely internal names, and the field-definitions step — which
+ * does fail loudly — says why in the pull log.
+ */
+async function catalogOrNull(object: HubspotObjectType): Promise<HubspotPropertyDefinition[] | null> {
+  try {
+    return await readCatalog(object);
+  } catch {
+    return null;
+  }
+}
+
+async function dealProperties(): Promise<string[]> {
+  const divisionProperty = process.env.HUBSPOT_DIVISION_PROPERTY;
+  const leadership = requestedNames('deals', await catalogOrNull('deals'));
+  return [
+    ...new Set([...DEAL_PROPERTIES, ...leadership, ...(divisionProperty ? [divisionProperty] : [])]),
+  ];
+}
+
+interface SearchFilter {
+  propertyName: string;
+  operator: string;
+  value?: string;
+  values?: string[];
+}
+
+/** Who can be an SQL: a date entered MQL, or one of the SQL lead sources. */
+async function sqlCandidateFilters(): Promise<SearchFilter[][]> {
+  const groups: SearchFilter[][] = [[{ propertyName: CONTACT_MQL_ENTERED, operator: 'HAS_PROPERTY' }]];
+  const catalog = await catalogOrNull('contacts');
+  const field = findField(LEADERSHIP_FIELDS.contactLeadSource, catalog);
+  if (!field) return groups;
+  const options = field.options ?? [];
+  // HubSpot filters on an option's internal value; Westport named its label.
+  const values = options.length
+    ? options
+        .filter((option) => SQL_LEAD_SOURCES.some((source) => hasOption(option.label ?? '', source)))
+        .map((option) => option.value)
+        .filter((value): value is string => Boolean(value))
+    : SQL_LEAD_SOURCES;
+  if (values.length) groups.push([{ propertyName: field.name, operator: 'IN', values }]);
+  return groups;
+}
+
+async function contactProperties(): Promise<string[]> {
+  const leadership = requestedNames('contacts', await catalogOrNull('contacts'));
+  return [...new Set([...CONTACT_PROPERTIES, ...leadership])];
+}
+
+// ---------------------------------------------------------------------------
 // Incremental reads
 // ---------------------------------------------------------------------------
 
@@ -386,6 +505,11 @@ async function fetchChanged(
     withHistory?: string[];
     associateTo?: string;
     pageSize?: number;
+    /**
+     * Conditions a record must meet, ANDed with the watermark. Each inner list
+     * is one alternative: a record matching any of them is read.
+     */
+    filterGroups?: SearchFilter[][];
   } = {},
 ): Promise<{ records: RawRecord[]; nextCursor: string | null; watermark: Date | null }> {
   const path = `/crm/v3/objects/${object}`;
@@ -400,13 +524,12 @@ async function fetchChanged(
 
   for (;;) {
     const page = await post<SearchPage>(`${path}/search`, {
-      filterGroups: [
-        {
-          filters: [
-            { propertyName: 'hs_lastmodifieddate', operator: 'GTE', value: String(since) },
-          ],
-        },
-      ],
+      filterGroups: (config.filterGroups?.length ? config.filterGroups : [[]]).map((group) => ({
+        filters: [
+          { propertyName: 'hs_lastmodifieddate', operator: 'GTE', value: String(since) },
+          ...group,
+        ],
+      })),
       // Ascending, so an exhausted query can be restarted from the last record
       // rather than from the beginning.
       sorts: [{ propertyName: 'hs_lastmodifieddate', direction: 'ASCENDING' }],
@@ -524,32 +647,53 @@ async function batchAssociations(
  */
 const INCREMENTAL_ENTITIES: Record<
   string,
-  { object: string; properties: () => string[]; withHistory?: string[]; associateTo?: string }
+  {
+    object: string;
+    properties: () => Promise<string[]>;
+    withHistory?: string[];
+    associateTo?: string;
+    filterGroups?: () => Promise<SearchFilter[][]>;
+  }
 > = {
   deals: {
     object: 'deals',
-    properties: () => {
-      const divisionProperty = process.env.HUBSPOT_DIVISION_PROPERTY;
-      return divisionProperty ? [...DEAL_PROPERTIES, divisionProperty] : DEAL_PROPERTIES;
-    },
+    properties: dealProperties,
     withHistory: ['dealstage'],
     associateTo: 'companies',
   },
   contacts: {
     object: 'contacts',
-    properties: () => CONTACT_PROPERTIES,
+    properties: contactProperties,
     withHistory: ['lifecyclestage'],
+  },
+  // The contacts an SQL can be: those with HubSpot's date entered MQL, and
+  // those whose Lead Source is one of the SQL sources (whose MQL date may only
+  // be in lifecycle history — the dated field is empty for most contacts in
+  // this portal). Their first pass reads every one of them rather than the
+  // whole portal; every pass after that reads only those changed since.
+  mql_contacts: {
+    object: 'contacts',
+    properties: contactProperties,
+    withHistory: ['lifecyclestage'],
+    filterGroups: sqlCandidateFilters,
   },
   meetings: {
     object: 'meetings',
-    properties: () => MEETING_PROPERTIES,
+    properties: async () => MEETING_PROPERTIES,
     associateTo: 'deals',
   },
   companies: {
     object: 'companies',
-    properties: () => COMPANY_PROPERTIES,
+    properties: async () => COMPANY_PROPERTIES,
   },
 };
+
+/**
+ * Entities read through search even on their first pass.
+ *
+ * The list endpoint cannot filter, and these are defined by a filter.
+ */
+const SEARCH_ONLY = new Set(['mql_contacts']);
 
 export const hubspotConnector: SourceConnector = {
   sourceSystem: 'HUBSPOT',
@@ -558,6 +702,8 @@ export const hubspotConnector: SourceConnector = {
   entities: () => ENTITIES,
 
   isConfigured: () => isConnected('HUBSPOT'),
+
+  fieldsVersion: (entity: string) => HUBSPOT_FIELDS_VERSION[entity] ?? null,
 
   async fetch(entity: string, window: FetchWindow, options?: FetchOptions): Promise<RawBatch> {
     if (!(await hubspotConnector.isConfigured())) throw new ConnectorNotConfiguredError('HUBSPOT');
@@ -574,14 +720,17 @@ export const hubspotConnector: SourceConnector = {
      */
     const incremental =
       INCREMENTAL_ENTITIES[entity] !== undefined &&
-      (options?.since != null || (options?.cursor?.startsWith('{') ?? false));
+      (SEARCH_ONLY.has(entity) ||
+        options?.since != null ||
+        (options?.cursor?.startsWith('{') ?? false));
 
     if (incremental) {
       const config = INCREMENTAL_ENTITIES[entity]!;
-      const changed = await fetchChanged(config.object, config.properties(), options, {
+      const changed = await fetchChanged(config.object, await config.properties(), options, {
         withHistory: config.withHistory,
         associateTo: config.associateTo,
         pageSize: config.withHistory?.length ? HISTORY_PAGE_SIZE : DEFAULT_PAGE_SIZE,
+        filterGroups: config.filterGroups ? await config.filterGroups() : undefined,
       });
 
       return {
@@ -601,14 +750,9 @@ export const hubspotConnector: SourceConnector = {
         // week 1. If it is unset we still fetch the deals — we simply cannot
         // attribute them to a division, and the KPI layer reports at ARG Total
         // only rather than inventing an attribution rule.
-        const divisionProperty = process.env.HUBSPOT_DIVISION_PROPERTY;
-        const properties = divisionProperty
-          ? [...DEAL_PROPERTIES, divisionProperty]
-          : DEAL_PROPERTIES;
-
         page = await fetchPaged(
           '/crm/v3/objects/deals',
-          properties,
+          await dealProperties(),
           { propertiesWithHistory: 'dealstage', associations: 'companies' },
           options,
           // HubSpot caps a page at 50 when property history is requested, and
@@ -626,7 +770,7 @@ export const hubspotConnector: SourceConnector = {
         // It caps the page at 50, as it does for deals.
         page = await fetchPaged(
           '/crm/v3/objects/contacts',
-          CONTACT_PROPERTIES,
+          await contactProperties(),
           { propertiesWithHistory: 'lifecyclestage' },
           options,
           HISTORY_PAGE_SIZE,
@@ -643,6 +787,31 @@ export const hubspotConnector: SourceConnector = {
           options,
         );
         break;
+      case 'properties': {
+        // Read fresh, not from the cache: this step is how a renamed or newly
+        // created field reaches the next deals pull.
+        catalogCache.clear();
+        const records: RawRecord[] = [];
+        // Only the fields the review is defined on: HubSpot's whole field
+        // list is hundreds of definitions with their options, and landing it
+        // on every pull would fill the warehouse with reference data nobody
+        // reads.
+        const specs = Object.values(LEADERSHIP_FIELDS) as FieldSpec[];
+        for (const object of ['deals', 'contacts'] as const) {
+          const wanted = (await readCatalog(object)).filter((field) =>
+            specs.some((spec) => spec.object === object && findField(spec, [field]) !== null),
+          );
+          for (const field of wanted) {
+            records.push({
+              entity: `/crm/v3/properties/${object}`,
+              key: `${object}:${field.name}`,
+              payload: { ...field, objectType: object },
+            });
+          }
+        }
+        page = { records, nextCursor: null };
+        break;
+      }
       case 'deal_stages': {
         // Not an object route: /crm/v3/pipelines returns every pipeline with its
         // stages inline, so there is nothing to paginate and no cursor to carry.
@@ -657,12 +826,25 @@ export const hubspotConnector: SourceConnector = {
         };
         break;
       }
-      case 'owners':
+      case 'owners': {
         // The owners endpoint is not a CRM object route: it returns whole
         // records rather than a `properties` bag, and takes no properties
         // parameter. Asking it for one is a 400.
-        page = await fetchPaged('/crm/v3/owners', [], {}, options);
+        const active = await fetchPaged('/crm/v3/owners', [], {}, options);
+        if (active.nextCursor) {
+          // Still walking the active list; the archived pass follows once it ends.
+          page = active;
+          break;
+        }
+        // And the people who have left. HubSpot returns only active users
+        // unless asked otherwise, so every deal still owned by a former
+        // employee had an owner id with no name behind it and was shown as
+        // "Unassigned" — which reads as nobody owning it. The list is short,
+        // so it is read whole rather than sliced.
+        const archived = await fetchPaged('/crm/v3/owners', [], { archived: 'true' });
+        page = { records: [...active.records, ...archived.records], nextCursor: null };
         break;
+      }
       default:
         throw new Error(`Unknown HubSpot entity "${entity}".`);
     }

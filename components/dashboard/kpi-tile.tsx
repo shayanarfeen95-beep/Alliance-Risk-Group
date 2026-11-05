@@ -401,6 +401,20 @@ export function KpiTile(props: KpiTileProps) {
               <TrendBars trend={trend} format={format} higherIsBetter={higherIsBetter} />
             </section>
           )}
+
+          {/* A way back at the bottom too: an opened card fills the row, and
+              its own Close sits above all of this. */}
+          <div className="mt-4 flex justify-end">
+            <button
+              type="button"
+              onClick={() => setOpen(false)}
+              className="inline-flex items-center gap-1 rounded-[4px] border px-2 py-0.5 text-[10.5px] transition-colors hover:text-[var(--text-primary)]"
+              style={{ borderColor: 'var(--border)', color: 'var(--text-muted)' }}
+            >
+              <ChevronDown size={11} aria-hidden style={{ transform: 'rotate(180deg)' }} />
+              Close breakdown
+            </button>
+          </div>
         </div>
       )}
     </div>

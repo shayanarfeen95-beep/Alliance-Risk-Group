@@ -1,9 +1,9 @@
 import { NextResponse } from 'next/server';
-import { eq } from 'drizzle-orm';
 import { getSessionUser } from '@/lib/auth/session';
 import { getDb } from '@/lib/db/client';
 import * as t from '@/lib/db/schema';
 import { openSemanticSession } from '@/lib/semantic/resolve';
+import { defaultReportingMonth } from '@/lib/dashboards/context';
 import { runAgentTurn, isAgentConfigured, AgentNotConfiguredError, type AgentStreamEvent } from '@/lib/ai/agent';
 
 export const dynamic = 'force-dynamic';
@@ -50,16 +50,9 @@ export async function POST(request: Request) {
 
   const db = await getDb();
 
-  // Resolve the reporting month the user is actually looking at, falling back
-  // to the configured default rather than guessing.
-  const [defaultMonth] = await db
-    .select({ value: t.appConfig.value })
-    .from(t.appConfig)
-    .where(eq(t.appConfig.key, 'DEFAULT_REPORTING_MONTH'))
-    .limit(1);
-
-  const month =
-    normaliseMonth(body.pageContext?.month) ?? defaultMonth?.value ?? '2026-03-01';
+  // The month the user is looking at; with none in the URL, the same month the
+  // dashboards open on — never a configured value the dashboards would ignore.
+  const month = normaliseMonth(body.pageContext?.month) ?? (await defaultReportingMonth(db));
 
   const session = await openSemanticSession(db, user, month);
 

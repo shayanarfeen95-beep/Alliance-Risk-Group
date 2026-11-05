@@ -26,6 +26,7 @@ import {
   BarChart,
   CartesianGrid,
   Cell,
+  LabelList,
   Line,
   LineChart,
   ReferenceLine,
@@ -36,6 +37,7 @@ import {
 } from 'recharts';
 import { Table2, ChartColumn } from 'lucide-react';
 import { formatAxisTick, formatNumber, type ValueFormat } from '@/lib/format';
+import { DealList, useDeals } from './deal-drill';
 
 export interface ChartSeries {
   id: string;
@@ -60,6 +62,21 @@ export interface ChartCardProps {
   note?: string;
   /** Draws a zero line when the data crosses it. */
   showZeroLine?: boolean;
+  /**
+   * What the chart counts, in the words of whoever defined it. Shown under the
+   * chart so nobody has to ask which properties a figure is built from.
+   */
+  definition?: string;
+  /**
+   * The deals behind each point, keyed by the point's `x`. Clicking a bar (or a
+   * point) lists them under the chart. Needs a DealDrillProvider above it.
+   */
+  drill?: Record<string, string[]>;
+  /**
+   * Print each bar's value on it (single-series bars only; stacked bars would
+   * collide). Hovering shows the values either way.
+   */
+  showValues?: boolean;
 }
 
 export function ChartCard({
@@ -72,9 +89,22 @@ export function ChartCard({
   height = 260,
   note,
   showZeroLine = true,
+  definition,
+  drill,
+  showValues,
 }: ChartCardProps) {
   const [asTable, setAsTable] = useState(false);
+  const [selected, setSelected] = useState<string | null>(null);
   const titleId = useId();
+  const deals = useDeals();
+  const canDrill = Boolean(drill && deals);
+  const isBar = form === 'bar' || form === 'stackedBar' || form === 'horizontalBar';
+  const labelled = Boolean(showValues) && isBar && form !== 'stackedBar' && series.length === 1;
+  const selectedRow = selected ? data.find((row) => row.x === selected) : undefined;
+  const pick = (x: string | undefined) => {
+    if (!canDrill || !x) return;
+    setSelected((current) => (current === x ? null : x));
+  };
 
   const hasNegative = data.some((row) =>
     series.some((s) => typeof row[s.id] === 'number' && (row[s.id] as number) < 0),
@@ -130,14 +160,54 @@ export function ChartCard({
       ) : null}
 
       {asTable ? (
-        <ChartTable series={series} data={data} valueFormat={valueFormat} />
+        <ChartTable
+          series={series}
+          data={data}
+          valueFormat={valueFormat}
+          onPick={canDrill ? pick : undefined}
+          selected={selected}
+        />
       ) : (
-        <div style={{ height }}>
+        <div style={{ height, cursor: canDrill ? 'pointer' : undefined }}>
           <ResponsiveContainer width="100%" height="100%">
-            {renderChart({ form, series, data, valueFormat, hasNegative, showZeroLine })}
+            {renderChart({
+              form,
+              series,
+              data,
+              valueFormat,
+              hasNegative,
+              showZeroLine,
+              labelled,
+              onPick: canDrill ? pick : undefined,
+              selected,
+            })}
           </ResponsiveContainer>
         </div>
       )}
+
+      {canDrill && selected && drill ? (
+        <DealList
+          title={`${title} — ${selectedRow?.xLabel ?? selected}`}
+          ids={drill[selected] ?? []}
+          onClose={() => setSelected(null)}
+          emptyLabel="No deals in this bar."
+        />
+      ) : null}
+
+      {canDrill || definition ? (
+        <div
+          className="mt-3 space-y-1 border-t pt-3 text-[11px] leading-relaxed text-[var(--text-muted)]"
+          style={{ borderColor: 'var(--border)' }}
+        >
+          {definition ? (
+            <p>
+              <span className="font-semibold text-[var(--text-secondary)]">Counted as: </span>
+              {definition}
+            </p>
+          ) : null}
+          {canDrill ? <p>Click a bar to list the deals behind it.</p> : null}
+        </div>
+      ) : null}
 
       {note ? (
         <p className="mt-3 border-t pt-3 text-[11px] leading-relaxed text-[var(--text-muted)]" style={{ borderColor: 'var(--border)' }}>
@@ -157,6 +227,9 @@ function renderChart({
   valueFormat,
   hasNegative,
   showZeroLine,
+  labelled,
+  onPick,
+  selected,
 }: {
   form: ChartForm;
   series: ChartSeries[];
@@ -164,7 +237,20 @@ function renderChart({
   valueFormat: ValueFormat;
   hasNegative: boolean;
   showZeroLine: boolean;
+  labelled: boolean;
+  onPick?: (x: string | undefined) => void;
+  selected: string | null;
 }) {
+  // A click anywhere in a month's band picks that month — a thin bar, or a
+  // month with nothing in it, is still a target.
+  const handleClick = onPick
+    ? (state: { activeIndex?: number | string | null; activeTooltipIndex?: number | string | null } | null) => {
+        const index = Number(state?.activeTooltipIndex ?? state?.activeIndex);
+        if (Number.isFinite(index)) onPick(data[index]?.x);
+      }
+    : undefined;
+  const labelFormatter = (value: unknown) =>
+    typeof value === 'number' && value !== 0 ? formatAxisTick(value, valueFormat) : '';
   /**
    * Categories on the vertical axis instead of the horizontal one.
    *
@@ -242,7 +328,7 @@ function renderChart({
 
   if (form === 'line') {
     return (
-      <LineChart data={data} margin={{ top: 8, right: 8, bottom: 0, left: 0 }}>
+      <LineChart data={data} margin={{ top: 8, right: 8, bottom: 0, left: 0 }} onClick={handleClick}>
         {axes}
         {series.map((s) => (
           <Line
@@ -265,7 +351,7 @@ function renderChart({
 
   if (form === 'area') {
     return (
-      <AreaChart data={data} margin={{ top: 8, right: 8, bottom: 0, left: 0 }}>
+      <AreaChart data={data} margin={{ top: 8, right: 8, bottom: 0, left: 0 }} onClick={handleClick}>
         <defs>
           {series.map((s) => (
             <linearGradient key={s.id} id={`fill-${s.id}`} x1="0" y1="0" x2="0" y2="1">
@@ -297,8 +383,10 @@ function renderChart({
     <BarChart
       data={data}
       layout={horizontal ? 'vertical' : 'horizontal'}
-      margin={{ top: 8, right: 8, bottom: 0, left: 0 }}
+      // Room above the bars (or beside them) for the printed values.
+      margin={{ top: labelled && !horizontal ? 20 : 8, right: labelled && horizontal ? 44 : 8, bottom: 0, left: 0 }}
       barCategoryGap={horizontal ? '18%' : '22%'}
+      onClick={handleClick}
     >
       {axes}
       {series.map((s) => (
@@ -329,8 +417,23 @@ function renderChart({
               : negative
                 ? [0, 0, 4, 4]
                 : [4, 4, 0, 0];
-            return <Cell key={`${s.id}-${row.x}`} radius={radius as unknown as number} />;
+            return (
+              <Cell
+                key={`${s.id}-${row.x}`}
+                radius={radius as unknown as number}
+                // The picked month stays solid; the rest step back.
+                fillOpacity={selected && selected !== row.x ? 0.45 : 1}
+              />
+            );
           })}
+          {labelled ? (
+            <LabelList
+              dataKey={s.id}
+              position={horizontal ? 'right' : 'top'}
+              formatter={labelFormatter}
+              style={{ fontSize: 10.5, fill: 'var(--text-secondary)' }}
+            />
+          ) : null}
         </Bar>
       ))}
     </BarChart>
@@ -397,10 +500,14 @@ function ChartTable({
   series,
   data,
   valueFormat,
+  onPick,
+  selected,
 }: {
   series: ChartSeries[];
   data: ChartDatum[];
   valueFormat: ValueFormat;
+  onPick?: (x: string) => void;
+  selected?: string | null;
 }) {
   return (
     <div className="scroll-x max-h-[280px] overflow-y-auto">
@@ -426,7 +533,12 @@ function ChartTable({
         </thead>
         <tbody>
           {data.map((row) => (
-            <tr key={row.x}>
+            <tr
+              key={row.x}
+              onClick={onPick ? () => onPick(row.x) : undefined}
+              className={onPick ? 'cursor-pointer hover:bg-[var(--surface-2)]' : undefined}
+              style={selected === row.x ? { background: 'var(--surface-2)' } : undefined}
+            >
               <td className="border-b px-3 py-1.5" style={{ borderColor: 'var(--border)' }}>
                 {row.xLabel}
               </td>

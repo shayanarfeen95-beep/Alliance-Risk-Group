@@ -63,6 +63,23 @@ export function formatMonthLabel(month: MonthKey): string {
   });
 }
 
+/**
+ * The rest of this calendar year after the current month, newest first.
+ *
+ * Westport, November 2026: "Month also ends in November, we should have
+ * December listed there as well." The months that have happened are the ones
+ * with figures; these are offered beside them, marked as upcoming, so the year
+ * can be read to its end — pipeline, bookings so far, budget — without an
+ * empty month passing for a month of results.
+ */
+export function remainingMonthsOfYear(today: Date = new Date()): MonthKey[] {
+  const months: MonthKey[] = [];
+  for (let m = 11; m > today.getUTCMonth(); m -= 1) {
+    months.push(`${today.getUTCFullYear()}-${String(m + 1).padStart(2, '0')}-01` as MonthKey);
+  }
+  return months;
+}
+
 /** Accepts '2026-03' or '2026-03-01'. */
 export function normaliseRangeMonth(value: string | undefined): MonthKey | null {
   if (!value) return null;
@@ -154,4 +171,29 @@ export function withinRange(date: Date | null, range: DateRange): boolean {
   if (!date) return false;
   const key = `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, '0')}-01`;
   return key >= range.from && key <= range.to;
+}
+
+/**
+ * The month a dashboard opens on when the URL names none.
+ *
+ * The last COMPLETED month that holds figures — in September, August. The
+ * configured DEFAULT_REPORTING_MONTH only wins when it is later than that (a
+ * deployment deliberately pinned ahead); it was seeded at 2026-03 and never
+ * moved, so honouring it first opened every dashboard on March, six months
+ * stale, with nothing saying why.
+ *
+ * `monthsDescending` must be newest first. Months after `today` are ignored.
+ */
+export function chooseDefaultMonth(
+  monthsDescending: MonthKey[],
+  configured: MonthKey | null,
+  today: Date = new Date(),
+): MonthKey | null {
+  const thisMonth = `${today.toISOString().slice(0, 7)}-01`;
+  const happened = monthsDescending.filter((month) => month <= thisMonth);
+  const lastComplete = happened.find((month) => month < thisMonth) ?? happened[0] ?? null;
+  if (configured && lastComplete && configured > lastComplete && monthsDescending.includes(configured)) {
+    return configured;
+  }
+  return lastComplete ?? configured;
 }

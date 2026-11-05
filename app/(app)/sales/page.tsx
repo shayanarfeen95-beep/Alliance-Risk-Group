@@ -8,6 +8,15 @@ import { KpiTile } from '@/components/dashboard/kpi-tile';
 import { ChartCard } from '@/components/charts/chart-card';
 import { Card, CardHeader, DataTable, SectionTitle, Td, Th, Unavailable } from '@/components/ui/primitives';
 import { OwnerFilter } from '@/components/dashboard/owner-filter';
+import type { DealStatusFilter } from '@/lib/dashboards/sales';
+import Link from 'next/link';
+
+const STATUS_TABS: Array<{ id: DealStatusFilter; label: string }> = [
+  { id: 'all', label: 'All' },
+  { id: 'won', label: 'Closed won' },
+  { id: 'lost', label: 'Closed lost' },
+  { id: 'open', label: 'Open' },
+];
 
 export const metadata: Metadata = { title: 'Sales' };
 export const dynamic = 'force-dynamic';
@@ -17,10 +26,25 @@ export default async function SalesPage({
 }: {
   searchParams: Promise<SearchParams>;
 }) {
-  const context = await loadDashboardContext(await searchParams);
+  const params = await searchParams;
+  const context = await loadDashboardContext(params);
   const { session, divisionCode, range, owners, ownerName } = context;
   const colors = buildDivisionColorMap(session.bundle.divisions);
-  const model = loadSales(session, divisionCode, colors, { range, ownerName });
+  const rawStatus = Array.isArray(params.status) ? params.status[0] : params.status;
+  const status = STATUS_TABS.some((tab) => tab.id === rawStatus) ? (rawStatus as DealStatusFilter) : 'all';
+  const model = loadSales(session, divisionCode, colors, { range, ownerName, status });
+
+  // Each tab keeps every other filter on the page.
+  const tabHref = (id: DealStatusFilter) => {
+    const next = new URLSearchParams();
+    for (const [key, value] of Object.entries(params)) {
+      const single = Array.isArray(value) ? value[0] : value;
+      if (single !== undefined && key !== 'status') next.set(key, single);
+    }
+    if (id !== 'all') next.set('status', id);
+    const query = next.toString();
+    return `/sales${query ? `?${query}` : ''}#deals`;
+  };
 
   const divisionLabel =
     divisionCode === 'ARG_TOTAL'
@@ -81,6 +105,7 @@ export default async function SalesPage({
               <thead>
                 <tr>
                   <Th align="left">Stage</Th>
+                  <Th align="left">Pipeline</Th>
                   <Th>Deals</Th>
                   <Th>Value</Th>
                 </tr>
@@ -90,6 +115,9 @@ export default async function SalesPage({
                   <tr key={row.stage}>
                     <Td align="left" numeric={false}>
                       {row.label}
+                    </Td>
+                    <Td align="left" numeric={false} muted>
+                      {row.pipeline}
                     </Td>
                     <Td>{formatNumber(row.count, 'count')}</Td>
                     <Td>{formatNumber(row.value, 'currency')}</Td>
@@ -159,24 +187,45 @@ export default async function SalesPage({
 
       {/* §9.3: a deal-level table behind every tile. */}
       <Card>
+        <div id="deals" className="scroll-mt-20" />
         <CardHeader
           title="Deals"
           subtitle={
             model.dealScope.ownerName
               ? `${model.dealScope.ownerName}'s deals closed in ${model.dealScope.rangeLabel}, plus everything still open.`
-              : `Deals closed in ${model.dealScope.rangeLabel}, plus everything still open. Sales leadership will not trust an aggregate they cannot open.`
+              : `Deals closed in ${model.dealScope.rangeLabel}, plus everything still open — with who owns each one, which for a won deal is who closed it.`
           }
           action={<OwnerFilter owners={owners} selected={ownerName} />}
         />
+        <nav className="mb-3 flex flex-wrap gap-1" aria-label="Deal status">
+          {STATUS_TABS.map((tab) => (
+            <Link
+              key={tab.id}
+              href={tabHref(tab.id)}
+              scroll={false}
+              aria-current={model.dealScope.status === tab.id ? 'page' : undefined}
+              className="rounded-[4px] border px-2 py-0.5 text-[11px] font-medium"
+              style={{
+                borderColor: model.dealScope.status === tab.id ? 'var(--text-primary)' : 'var(--border)',
+                background: model.dealScope.status === tab.id ? 'var(--text-primary)' : 'transparent',
+                color: model.dealScope.status === tab.id ? 'var(--text-inverse)' : 'var(--text-secondary)',
+              }}
+            >
+              {tab.label} · {formatNumber(model.dealScope.counts[tab.id], 'count')}
+            </Link>
+          ))}
+        </nav>
         <DataTable maxHeight={520}>
           <thead>
             <tr>
               <Th align="left">Deal</Th>
-              <Th align="left">Division</Th>
-              <Th align="left">Salesperson</Th>
+              <Th align="left">Company</Th>
+              <Th align="left">{model.dealScope.status === 'won' ? 'Closed by' : 'Owner'}</Th>
               <Th align="left">Stage</Th>
               <Th align="left">Status</Th>
               <Th>Amount</Th>
+              <Th align="left">Lead source</Th>
+              <Th align="left">Line of business</Th>
               <Th align="left">Created</Th>
               <Th align="left">Closed</Th>
               <Th>Days</Th>
@@ -189,13 +238,14 @@ export default async function SalesPage({
                   {deal.dealName}
                 </Td>
                 <Td align="left" numeric={false} muted>
-                  {deal.divisionCode ?? 'Unattributed'}
+                  {deal.company ?? '—'}
                 </Td>
-                <Td align="left" numeric={false} muted>
+                <Td align="left" numeric={false}>
                   {deal.owner}
                 </Td>
                 <Td align="left" numeric={false} muted>
                   {deal.dealstage}
+                  <span className="block text-[10px]">{deal.pipeline}</span>
                 </Td>
                 <Td align="left" numeric={false}>
                   <span
@@ -219,6 +269,12 @@ export default async function SalesPage({
                   </span>
                 </Td>
                 <Td>{formatNumber(deal.amount, 'currency')}</Td>
+                <Td align="left" numeric={false} muted>
+                  {deal.source}
+                </Td>
+                <Td align="left" numeric={false} muted>
+                  {deal.lineOfBusiness ?? '—'}
+                </Td>
                 <Td align="left" muted>
                   {deal.createdate ?? '—'}
                 </Td>
@@ -236,7 +292,11 @@ export default async function SalesPage({
           </p>
         ) : (
           <p className="pt-3 text-[11px] text-[var(--text-muted)]">
-            Showing {model.dealScope.shown} of {model.dealScope.total} deals, largest first.
+            Showing {model.dealScope.shown} of {model.dealScope.total} deals,{' '}
+            {model.dealScope.status === 'won' || model.dealScope.status === 'lost'
+              ? 'most recently closed first'
+              : 'largest first'}
+            .
           </p>
         )}
       </Card>

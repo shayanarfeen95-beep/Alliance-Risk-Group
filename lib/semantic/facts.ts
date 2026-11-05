@@ -11,9 +11,10 @@
  * the caller was not entitled to, because it was never loaded.
  */
 import Decimal from 'decimal.js';
-import { and, gte, inArray, lte, eq, notInArray, sql } from 'drizzle-orm';
+import { and, gte, inArray, isNull, lt, lte, eq, notInArray, or, sql } from 'drizzle-orm';
 import { getDataMode, seedLoadRunIds } from '@/lib/data-mode';
 import { d } from '@/lib/money';
+import type { AnyPgColumn } from 'drizzle-orm/pg-core';
 import * as t from '@/lib/db/schema';
 import type { Database } from '@/lib/db/client';
 import {
@@ -29,6 +30,37 @@ export interface DivisionRow {
   divisionName: string;
   lineOfBusiness: string;
   sortOrder: number;
+}
+
+/**
+ * A QuickBooks class that belongs to no division — Z Alloc, Not Specified.
+ *
+ * Not a division: it has no budget, no headcount, no HubSpot records and no
+ * place in the division selector. But it is part of ARG Total. Z Alloc holds
+ * the shared costs that are allocated over the business lines only when the
+ * month closes, and "Not Specified" is whatever was posted with no class; both
+ * are in QuickBooks' own Total column, so an ARG Total without them disagrees
+ * with the books — by $165,200 of September expenses before close, and by
+ * $1.76 of revenue.
+ *
+ * Each one sits in the bundle under a code of its own (`CLASS:<name>`), so it is
+ * summed into ARG Total by the same functions as the divisions and can be shown
+ * on its own row, and it is never mistaken for a division.
+ */
+export interface OtherClassRow {
+  code: string;
+  /** The class's name as QuickBooks prints it. */
+  name: string;
+}
+
+export const OTHER_CLASS_PREFIX = 'CLASS:';
+
+export function isOtherClassCode(code: string): boolean {
+  return code.startsWith(OTHER_CLASS_PREFIX);
+}
+
+export function otherClassCode(name: string): string {
+  return `${OTHER_CLASS_PREFIX}${name}`;
 }
 
 export interface PlMeasures {
@@ -78,6 +110,12 @@ export interface DealRecord {
   sourceLabel: string | null;
   /** HubSpot's newbusiness / existingbusiness. */
   dealType: string | null;
+  /** HubSpot's Line of Business, as its option label(s), "; "-joined. */
+  lineOfBusiness: string | null;
+  /** HubSpot's Date Compliance Review Completed. */
+  complianceReviewCompletedAt: Date | null;
+  /** Who created the deal in HubSpot (a user, not necessarily the owner). */
+  createdByName: string | null;
   companyId: string | null;
 }
 
@@ -90,6 +128,10 @@ export interface ContactRecord {
   becameCustomerDate: Date | null;
   becameMqlDate: Date | null;
   becameSqlDate: Date | null;
+  /** The contact's Lead Source, as its option label. */
+  leadSource: string | null;
+  /** HubSpot's Date entered Marketing Qualified Lead (Lifecycle Stage Pipeline). */
+  mqlEnteredAt: Date | null;
 }
 
 export interface CompanyRecord {
@@ -128,6 +170,11 @@ export interface ConfigValue {
 
 export interface FactBundle {
   divisions: DivisionRow[];
+  /**
+   * Classes outside the divisions that held amounts in the window, under their
+   * `CLASS:` codes in `pl` and `gl`. Only for a caller entitled to ARG Total.
+   */
+  otherClasses: OtherClassRow[];
   /** Division codes the caller is entitled to. */
   allowedDivisions: string[];
   periodState: Map<MonthKey, { isClosed: boolean; daysInMonth: number }>;
@@ -145,9 +192,8 @@ export interface FactBundle {
    * Every stage a deal has entered, not only the proposal one.
    *
    * The HubSpot Leadership view draws a funnel and a board, both of which need
-   * the whole history; `proposalEntries` stays because New Proposals Sent is
-   * defined on that single stage and reads better against a list that contains
-   * only it.
+   * the whole history; `proposalEntries` is the part of it New Proposals Sent
+   * counts — entries into any stage named as a proposal.
    */
   stageEntries: Array<{ dealId: string; stage: string; divisionCode: string | null; enteredAt: Date }>;
   contacts: ContactRecord[];
@@ -156,6 +202,16 @@ export interface FactBundle {
   /** Stage ids and the names behind them, so a stage can be matched by name. */
   dealStages: DealStageRecord[];
   config: Map<string, ConfigValue>;
+  /**
+   * QuickBooks' own company-level figures, keyed `${statement}|${month}` then by
+   * line (see fact_company_total). Loaded only for a caller entitled to every
+   * division — a company total discloses all of them — and empty otherwise.
+   */
+  company: Map<string, Map<string, Decimal>>;
+  /** When each company statement was last loaded, keyed `${statement}|${month}`. */
+  companyLoadedAt: Map<string, Date>;
+  /** Budget scenarios by code: what each is called and where it came from. */
+  scenarios: Map<string, { name: string; description: string | null }>;
   /**
    * Source systems that have completed at least one successful load.
    *
@@ -169,6 +225,39 @@ export interface FactBundle {
 }
 
 export const key = (month: MonthKey, division: string) => `${month}|${division}`;
+
+/**
+ * A stage is the Proposal stage when its NAME says so.
+ *
+ * New Proposals Sent read zero for every live month because it counted only
+ * the stage id `proposalsent` — HubSpot's default id, and the one the seeded
+ * data uses. ARG's pipelines carry their own ids (numeric, or a default id
+ * renamed in HubSpot), so no live deal ever matched. The deal import and the
+ * Leadership view already identify the stage by its name; this is the same
+ * rule, so the metric and the dashboards count the same deals.
+ */
+export const PROPOSAL_STAGE_NAME = /proposal|quote/i;
+
+/** Entries into a Proposal stage, from the full stage history. */
+function proposalEntriesFrom(
+  stageRows: Array<{ dealId: string; stage: string; divisionCode: string | null; enteredAt: Date }>,
+  dealStageRows: Array<{ stageId: string; label: string }>,
+): Array<{ dealId: string; divisionCode: string | null; enteredAt: Date }> {
+  const proposalStageIds = new Set(
+    dealStageRows.filter((stage) => PROPOSAL_STAGE_NAME.test(stage.label)).map((stage) => stage.stageId),
+  );
+  // HubSpot's own default id, for a portal (or the seeded data) that kept it.
+  proposalStageIds.add('proposalsent');
+  return stageRows
+    .filter((row) => proposalStageIds.has(row.stage))
+    .map((row) => ({ dealId: row.dealId, divisionCode: row.divisionCode, enteredAt: row.enteredAt }));
+}
+
+/** "opex|Z Alloc" → ["opex", "Z Alloc"]. Only the first `|` separates. */
+function splitOnce(value: string): [string, string] {
+  const at = value.indexOf('|');
+  return at === -1 ? [value, ''] : [value.slice(0, at), value.slice(at + 1)];
+}
 
 const ZERO_PL: PlMeasures = {
   revenue: new Decimal(0),
@@ -225,6 +314,7 @@ export async function loadFactBundle(
   if (scopedCodes.length === 0) {
     return {
       divisions: [],
+      otherClasses: [],
       allowedDivisions: [],
       periodState: new Map(),
       pl: new Map(),
@@ -243,10 +333,17 @@ export async function loadFactBundle(
       companies: [],
       dealStages: [],
       config: new Map(),
+      company: new Map(),
+      companyLoadedAt: new Map(),
+      scenarios: new Map(),
       loadedSources: new Set(),
       lastRefreshedAt: null,
     };
   }
+
+  // A company total is every division at once, so only a caller who may see
+  // every active division gets one.
+  const companyScope = divisions.every((row) => allowedDivisions.includes(row.divisionCode));
 
   const inWindow = (column: never) => and(gte(column, from), lte(column, to));
 
@@ -273,6 +370,8 @@ export async function loadFactBundle(
     glRows,
     configRows,
     lastRun,
+    companyTotalRows,
+    scenarioRows,
   ] = await Promise.all([
     db.select().from(t.dimPeriod),
     db
@@ -354,6 +453,22 @@ export async function loadFactBundle(
       )
       .orderBy(sql`${t.loadRun.finishedAt} desc nulls last`)
       .limit(1),
+    companyScope
+      ? db
+          .select()
+          .from(t.factCompanyTotal)
+          .where(
+            and(
+              // Aging is a snapshot filed under the month it was taken, which can
+              // be later than the month being viewed — so it is not windowed.
+              sql`(${t.factCompanyTotal.statement} in ('AR_AGING', 'AP_AGING') or (${t.factCompanyTotal.periodMonth} >= ${from} and ${t.factCompanyTotal.periodMonth} <= ${to}))`,
+              // The trial balance is account-level audit detail; no KPI reads it.
+              sql`${t.factCompanyTotal.statement} <> 'TB'`,
+              excludeSeed(t.factCompanyTotal.loadRunId as never),
+            ),
+          )
+      : Promise.resolve([] as Array<typeof t.factCompanyTotal.$inferSelect>),
+    db.select().from(t.budgetScenario),
   ]);
 
   const loadedSourceRows = await db
@@ -372,26 +487,45 @@ export async function loadFactBundle(
   const hubspotFrom = monthBounds(addMonths(period.month, -23)).start;
   const hubspotTo = monthBounds(period.month).endExclusive;
 
-  const [dealRows, proposalRows, stageRows, contactRows, meetingRows, companyRows, dealStageRows] =
+  // HubSpot tables are large (ARG has tens of thousands of contacts and
+  // companies) and every dashboard view opens a bundle, so what is read here is
+  // what the database sends on every page. Scope, window and columns are all
+  // applied in SQL: reading the tables whole ran the free Neon plan out of data
+  // transfer and took the site down. A row with no division stays in, as the
+  // in-memory scope below has always kept it.
+  const dealInScope = or(isNull(t.factDeal.divisionCode), inArray(t.factDeal.divisionCode, scopedCodes));
+  const contactInScope = or(isNull(t.factContact.divisionCode), inArray(t.factContact.divisionCode, scopedCodes));
+  const inHubspotWindow = (column: AnyPgColumn) =>
+    and(gte(column, hubspotFrom), lt(column, hubspotTo));
+
+  const [dealRows, stageRows, contactRows, meetingRows, companyRows, dealStageRows] =
     await Promise.all([
-    db.select().from(t.factDeal).where(excludeSeed(t.factDeal.loadRunId as never)),
+    // Deals are not windowed: pipeline as of month end includes deals opened
+    // long before it.
     db
       .select({
-        dealId: t.factDealStageHistory.dealId,
-        enteredAt: t.factDealStageHistory.enteredAt,
+        dealId: t.factDeal.dealId,
         divisionCode: t.factDeal.divisionCode,
+        dealName: t.factDeal.dealName,
+        amount: t.factDeal.amount,
+        dealstage: t.factDeal.dealstage,
+        pipeline: t.factDeal.pipeline,
+        isClosedWon: t.factDeal.isClosedWon,
+        isClosed: t.factDeal.isClosed,
+        createdate: t.factDeal.createdate,
+        closedate: t.factDeal.closedate,
+        enteredProposalAt: t.factDeal.enteredProposalAt,
+        ownerId: t.factDeal.ownerId,
+        ownerName: t.factDeal.ownerName,
+        sourceLabel: t.factDeal.sourceLabel,
+        dealType: t.factDeal.dealType,
+        lineOfBusiness: t.factDeal.lineOfBusiness,
+        complianceReviewCompletedAt: t.factDeal.complianceReviewCompletedAt,
+        createdByName: t.factDeal.createdByName,
+        companyId: t.factDeal.companyId,
       })
-      .from(t.factDealStageHistory)
-      .innerJoin(t.factDeal, eq(t.factDeal.dealId, t.factDealStageHistory.dealId))
-      .where(
-        and(
-          // §6: New Proposals Sent counts deals ENTERING the Proposal stage.
-          eq(t.factDealStageHistory.stage, 'proposalsent'),
-          gte(t.factDealStageHistory.enteredAt, hubspotFrom),
-          lte(t.factDealStageHistory.enteredAt, hubspotTo),
-          excludeSeed(t.factDealStageHistory.loadRunId as never),
-        ),
-      ),
+      .from(t.factDeal)
+      .where(and(dealInScope, excludeSeed(t.factDeal.loadRunId as never))),
     db
       .select({
         dealId: t.factDealStageHistory.dealId,
@@ -408,7 +542,36 @@ export async function loadFactBundle(
           excludeSeed(t.factDealStageHistory.loadRunId as never),
         ),
       ),
-    db.select().from(t.factContact).where(excludeSeed(t.factContact.loadRunId as never)),
+    // Every contact reading counts a lifecycle date inside a window the
+    // dashboards can reach, so a contact with none of them there cannot change
+    // any figure.
+    db
+      .select({
+        contactId: t.factContact.contactId,
+        divisionCode: t.factContact.divisionCode,
+        lifecycleStage: t.factContact.lifecycleStage,
+        originalSource: t.factContact.originalSource,
+        becameLeadDate: t.factContact.becameLeadDate,
+        becameCustomerDate: t.factContact.becameCustomerDate,
+        becameMqlDate: t.factContact.becameMqlDate,
+        becameSqlDate: t.factContact.becameSqlDate,
+        leadSource: t.factContact.leadSource,
+        mqlEnteredAt: t.factContact.mqlEnteredAt,
+      })
+      .from(t.factContact)
+      .where(
+        and(
+          contactInScope,
+          or(
+            inHubspotWindow(t.factContact.becameLeadDate),
+            inHubspotWindow(t.factContact.becameCustomerDate),
+            inHubspotWindow(t.factContact.becameMqlDate),
+            inHubspotWindow(t.factContact.becameSqlDate),
+            inHubspotWindow(t.factContact.mqlEnteredAt),
+          ),
+          excludeSeed(t.factContact.loadRunId as never),
+        ),
+      ),
     db
       .select()
       .from(t.factMeeting)
@@ -419,7 +582,23 @@ export async function loadFactBundle(
           excludeSeed(t.factMeeting.loadRunId as never),
         ),
       ),
-    db.select().from(t.factCompany).where(excludeSeed(t.factCompany.loadRunId as never)),
+    // A company is read for its ICP tier, which only matters for a deal that
+    // names it.
+    db
+      .select({ companyId: t.factCompany.companyId, name: t.factCompany.name, icpTier: t.factCompany.icpTier })
+      .from(t.factCompany)
+      .where(
+        and(
+          inArray(
+            t.factCompany.companyId,
+            db
+              .select({ companyId: t.factDeal.companyId })
+              .from(t.factDeal)
+              .where(and(dealInScope, sql`${t.factDeal.companyId} is not null`)),
+          ),
+          excludeSeed(t.factCompany.loadRunId as never),
+        ),
+      ),
     // Reference data, not a fact: stages describe the pipeline itself and carry
     // no period, so they are read whole rather than windowed.
     db.select().from(t.dimDealStage),
@@ -492,6 +671,85 @@ export async function loadFactBundle(
     gl.set(k, list);
   }
 
+  const company = new Map<string, Map<string, Decimal>>();
+  const companyLoadedAt = new Map<string, Date>();
+  for (const row of companyTotalRows) {
+    const k = `${row.statement}|${row.periodMonth}`;
+    const lines = company.get(k) ?? new Map<string, Decimal>();
+    lines.set(row.line, d(row.amount));
+    company.set(k, lines);
+    const seen = companyLoadedAt.get(k);
+    if (!seen || row.loadedAt > seen) companyLoadedAt.set(k, row.loadedAt);
+  }
+
+  // --- Classes outside the divisions ---------------------------------------
+  //
+  // Read from what the P&L import recorded per class (PL_UNASSIGNED, and the
+  // accounts behind it in GL_UNASSIGNED). Only present for a caller entitled to
+  // ARG Total, because company rows are only loaded for one.
+  const otherClassNames = new Set<string>();
+  const otherAccountIds = new Set<string>();
+  const PL_FIELDS: Record<string, keyof PlMeasures> = {
+    revenue: 'revenue',
+    cogs: 'cogs',
+    opex: 'opex',
+    payroll_direct: 'payrollDirect',
+    payroll_expense: 'payrollExpense',
+  };
+  for (const row of companyTotalRows) {
+    if (row.statement === 'PL_UNASSIGNED') {
+      const [line, className] = splitOnce(row.line);
+      const field = PL_FIELDS[line];
+      if (!className || !field) continue;
+      otherClassNames.add(className);
+      const k = key(row.periodMonth, otherClassCode(className));
+      const measures = pl.get(k) ?? emptyPl();
+      measures[field] = measures[field].plus(d(row.amount));
+      pl.set(k, measures);
+    } else if (row.statement === 'GL_UNASSIGNED') {
+      const [className, accountId] = splitOnce(row.line);
+      if (!className || !accountId) continue;
+      otherClassNames.add(className);
+      otherAccountIds.add(accountId);
+    }
+  }
+  if (otherAccountIds.size) {
+    const accounts = new Map(
+      (
+        await db
+          .select({
+            accountId: t.dimAccount.accountId,
+            accountName: t.dimAccount.accountName,
+            reportingLine: t.dimAccount.reportingLine,
+          })
+          .from(t.dimAccount)
+          .where(inArray(t.dimAccount.accountId, [...otherAccountIds]))
+      ).map((row) => [row.accountId, row]),
+    );
+    for (const row of companyTotalRows) {
+      if (row.statement !== 'GL_UNASSIGNED') continue;
+      const [className, accountId] = splitOnce(row.line);
+      if (!className || !accountId) continue;
+      const account = accounts.get(accountId);
+      const k = key(row.periodMonth, otherClassCode(className));
+      const list = gl.get(k) ?? [];
+      list.push({
+        accountId,
+        accountName: account?.accountName ?? accountId,
+        reportingLine: account?.reportingLine ?? null,
+        amount: d(row.amount),
+      });
+      gl.set(k, list);
+    }
+  }
+  // QuickBooks' column order: named classes alphabetically, "Not Specified" last.
+  const otherClasses: OtherClassRow[] = [...otherClassNames]
+    .sort((a, b) => {
+      const unclassed = (name: string) => (/^not\s*specified$/i.test(name) ? 1 : 0);
+      return unclassed(a) - unclassed(b) || a.localeCompare(b);
+    })
+    .map((name) => ({ code: otherClassCode(name), name }));
+
   const config = new Map<string, ConfigValue>();
   for (const row of configRows) {
     config.set(row.key, {
@@ -528,6 +786,7 @@ export async function loadFactBundle(
 
   return {
     divisions: scoped,
+    otherClasses,
     allowedDivisions: scopedCodes,
     periodState,
     pl,
@@ -554,9 +813,12 @@ export async function loadFactBundle(
       ownerName: row.ownerName,
       sourceLabel: row.sourceLabel,
       dealType: row.dealType,
+      lineOfBusiness: row.lineOfBusiness,
+      complianceReviewCompletedAt: row.complianceReviewCompletedAt,
+      createdByName: row.createdByName,
       companyId: row.companyId,
     })),
-    proposalEntries: proposalRows.filter((row) => inScope(row.divisionCode)),
+    proposalEntries: proposalEntriesFrom(stageRows, dealStageRows).filter((row) => inScope(row.divisionCode)),
     stageEntries: stageRows.filter((row) => inScope(row.divisionCode)),
     contacts: contactRows.filter((row) => inScope(row.divisionCode)).map((row) => ({
       contactId: row.contactId,
@@ -567,6 +829,8 @@ export async function loadFactBundle(
       becameCustomerDate: row.becameCustomerDate,
       becameMqlDate: row.becameMqlDate,
       becameSqlDate: row.becameSqlDate,
+      leadSource: row.leadSource,
+      mqlEnteredAt: row.mqlEnteredAt,
     })),
     meetings: meetingRows.filter((row) => inScope(row.divisionCode)).map((row) => ({
       meetingId: row.meetingId,
@@ -593,6 +857,11 @@ export async function loadFactBundle(
       isWon: row.isWon,
     })),
     config,
+    company,
+    companyLoadedAt,
+    scenarios: new Map(
+      scenarioRows.map((row) => [row.scenarioCode, { name: row.scenarioName, description: row.description }]),
+    ),
     loadedSources: new Set(loadedSourceRows.map((row) => row.sourceSystem)),
     lastRefreshedAt: lastRun[0]?.finishedAt ?? null,
   };
@@ -679,6 +948,64 @@ export function sumBs(
   return total;
 }
 
+const BS_LINE_TO_FIELD: Record<string, keyof BsMeasures> = {
+  cash: 'cash',
+  accounts_receivable: 'accountsReceivable',
+  other_current_assets: 'otherCurrentAssets',
+  fixed_assets: 'fixedAssets',
+  accounts_payable: 'accountsPayable',
+  cc_liability: 'ccLiability',
+  other_current_liabilities: 'otherCurrentLiabilities',
+  lt_liabilities: 'ltLiabilities',
+  shareholder_equity: 'shareholderEquity',
+};
+
+/** QuickBooks' company balance sheet for a month, or null when none is loaded. */
+export function companyBs(bundle: FactBundle, month: MonthKey): BsMeasures | null {
+  const lines = bundle.company.get(`BS|${month}`);
+  if (!lines) return null;
+  const total = {} as BsMeasures;
+  for (const [line, field] of Object.entries(BS_LINE_TO_FIELD)) {
+    total[field] = lines.get(line) ?? new Decimal(0);
+  }
+  return total;
+}
+
+/**
+ * The balance sheet for a reporting scope.
+ *
+ * At ARG Total it is QuickBooks' own company balance sheet whenever one is
+ * loaded: ARG's classed balance sheet does not balance by class, so a sum of
+ * divisional rows is not a balance sheet. At division level it is the
+ * divisional rows, when ARG classes its balance sheet at all.
+ */
+export function balanceSheetFor(
+  bundle: FactBundle,
+  month: MonthKey,
+  divisions: string[],
+  isConsolidated: boolean,
+): BsMeasures | null {
+  if (isConsolidated) {
+    const company = companyBs(bundle, month);
+    if (company) return company;
+  }
+  return sumBs(bundle, month, divisions);
+}
+
+/** QuickBooks' company P&L for a month — the tie-out figure — or null. */
+export function companyPl(bundle: FactBundle, month: MonthKey): PlMeasures | null {
+  const lines = bundle.company.get(`PL|${month}`);
+  if (!lines) return null;
+  const zero = new Decimal(0);
+  return {
+    revenue: lines.get('revenue') ?? zero,
+    payrollDirect: lines.get('payroll_direct') ?? zero,
+    cogs: lines.get('cogs') ?? zero,
+    payrollExpense: lines.get('payroll_expense') ?? zero,
+    opex: lines.get('opex') ?? zero,
+  };
+}
+
 export function sumBudget(
   bundle: FactBundle,
   scenario: string,
@@ -693,6 +1020,45 @@ export function sumBudget(
     }
   }
   return total;
+}
+
+/**
+ * A scenario's budget for a scope, over some months.
+ *
+ * At ARG Total the whole budget is used when QuickBooks supplied one — including
+ * lines not split by class, which belong to no division but are still part of
+ * the plan ARG Total is measured against. Otherwise it is the divisional sum.
+ */
+export function budgetFor(
+  bundle: FactBundle,
+  scenario: string,
+  months: MonthKey[],
+  divisions: string[],
+  lineItem: 'revenue' | 'cogs' | 'opex',
+  isConsolidated: boolean,
+): Decimal | null {
+  if (isConsolidated && months.every((month) => bundle.company.has(`${scenario}|${month}`))) {
+    return months.reduce(
+      (total, month) => total.plus(bundle.company.get(`${scenario}|${month}`)?.get(lineItem) ?? 0),
+      new Decimal(0),
+    );
+  }
+  // The LINE must be budgeted, not just the scenario. A division budgeted for
+  // revenue with its costs kept unclassed has no COGS budget — reading that as $0
+  // makes its gross-profit budget equal its revenue, which is a wrong number
+  // rather than a missing one.
+  const budgeted = months.some((month) =>
+    divisions.some((division) => bundle.budget.has(`${scenario}|${month}|${division}|${lineItem}`)),
+  );
+  // ARG keeps its QuickBooks budget at company level — not split by class — and
+  // the same budget by division in the Monthly Budget sheet (the two agree to
+  // the cent on COGS and OpEx). So a division, or a total whose QuickBooks months
+  // are incomplete, reads the sheet rather than showing no budget at all.
+  if (!budgeted && scenario === 'QBO_BUDGET') {
+    return budgetFor(bundle, 'MONTHLY_BUDGET', months, divisions, lineItem, false);
+  }
+  if (!budgeted) return null;
+  return sumBudget(bundle, scenario, months, divisions, lineItem);
 }
 
 /** True when any budget row exists for the scenario in the window. */

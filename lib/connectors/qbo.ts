@@ -10,6 +10,7 @@
  */
 import {
   ConnectorNotConfiguredError,
+  ConnectorRequestError,
   budgetSpent,
   lastDayOfMonth,
   monthsInWindow,
@@ -33,6 +34,28 @@ function baseUrl(): string {
 }
 
 const ENTITIES: EntityDescriptor[] = [
+  // Reference data first, and that ordering is load-bearing.
+  //
+  // `syncPlan` walks this array in order, so the position of a descriptor IS
+  // the order it is pulled and conformed in. With accounts and classes last,
+  // a single "Pull everything" conformed the balance sheet against whatever
+  // chart of accounts the warehouse happened to be holding, THEN refreshed the
+  // chart — so a newly-seen account failed the balance sheet on every run and
+  // was present by the time anybody looked. That is why the balance sheet kept
+  // reporting accounts "not in the chart of accounts" while the chart itself
+  // showed a healthy row count two lines below it on the same screen.
+  {
+    entity: 'accounts',
+    label: 'Chart of Accounts',
+    cadence: 'WEEKLY',
+    description: 'Reference data. Alerts on new accounts so nothing lands unmapped.',
+  },
+  {
+    entity: 'classes',
+    label: 'Class list',
+    cadence: 'WEEKLY',
+    description: 'Reference data. Alerts on new classes so nothing lands unmapped.',
+  },
   {
     entity: 'profit_and_loss',
     label: 'Profit & Loss by Class, by month',
@@ -48,46 +71,113 @@ const ENTITIES: EntityDescriptor[] = [
       'Month-end balances. Drives DSO, DPO, CCC and Cash Runway. Availability by division depends on whether ARG classes its balance sheet (open item 1).',
   },
   {
+    entity: 'budgets',
+    label: 'Budgets (QuickBooks)',
+    cadence: 'DAILY',
+    description:
+      'The profit-and-loss budgets kept in QuickBooks, by account, class and month. The budget the Finance page measures against; a budget named "Forecast" feeds the rest-of-year outlook.',
+  },
+  {
     entity: 'trial_balance',
-    label: 'Trial Balance (account level)',
+    label: 'Trial Balance (company level)',
     cadence: 'ON_CLOSE',
     description:
-      'Account-level detail. Enables drill-down, the self-generating audit pack, and variance commentary that can say why a line moved.',
+      'Every account’s debit and credit for the month, at company level (QuickBooks gives the trial balance no class). Stored beside the other company totals and checked: debits must equal credits. Account-level detail BY division comes from the classed P&L.',
   },
   {
     entity: 'ar_aging',
-    label: 'A/R Aging Summary',
+    label: 'A/R Aging (open invoices)',
     cadence: 'DAILY',
-    description: 'Feeds the aging view and the DSO reconciliation.',
+    description:
+      'Built from the open invoices themselves rather than an aging report: no QuickBooks aging report carries a class, so none of them can be split by division. An invoice carries its own class, balance and due date. A snapshot of today, not a reconstruction of a past month.',
   },
   {
     entity: 'ap_aging',
-    label: 'A/P Aging Summary',
+    label: 'A/P Aging (open bills)',
     cadence: 'DAILY',
-    description: 'Feeds the DPO reconciliation.',
+    description:
+      'Built from the open bills themselves, for the same reason as A/R. Feeds the DPO reconciliation and the aging view.',
+  },
+  // Billing by customer: what each account has actually been billed, so a deal
+  // closed won in HubSpot can be followed into QuickBooks. Customers first —
+  // invoices name the customer they bill.
+  {
+    entity: 'customers',
+    label: 'Customers',
+    cadence: 'DAILY',
+    description:
+      'QuickBooks customers, with their parent and their email and website domains, so a HubSpot account can be matched to the customer QuickBooks bills.',
   },
   {
-    entity: 'accounts',
-    label: 'Chart of Accounts',
-    cadence: 'WEEKLY',
-    description: 'Reference data. Alerts on new accounts so nothing lands unmapped.',
-  },
-  {
-    entity: 'classes',
-    label: 'Class list',
-    cadence: 'WEEKLY',
-    description: 'Reference data. Alerts on new classes so nothing lands unmapped.',
+    entity: 'invoices',
+    label: 'Invoices and credit memos',
+    cadence: 'DAILY',
+    description:
+      'What each customer was billed and when, from the start of last year: total less sales tax, credit memos netted. After the first pull only what changed is read.',
   },
 ];
 
-/** Which QBO report backs each monthly entity. */
-const MONTHLY_REPORTS: Record<string, string> = {
-  profit_and_loss: 'ProfitAndLoss',
-  balance_sheet: 'BalanceSheet',
-  trial_balance: 'TrialBalance',
-  ar_aging: 'AgedReceivables',
-  ap_aging: 'AgedPayables',
+/**
+ * Which QBO report backs each monthly entity, and the parameters it accepts.
+ *
+ * QuickBooks does NOT take the same query parameters on every report, and it
+ * answers an unsupported one with a 400 rather than ignoring it. Every monthly
+ * report was being sent `summarize_column_by=Classes` and a `start_date`, which
+ * only the P&L and Balance Sheet accept — that is why the balance sheet run
+ * FAILED outright and the trial balance and both aging pulls came back with
+ * nothing to conform. Each report's real parameter shape is declared here
+ * instead of being assumed uniform.
+ */
+interface ReportSpec {
+  report: string;
+  /** A range (P&L, TB) or a position at a date (aging). */
+  period: 'range' | 'as_of';
+  acceptsBasis: boolean;
+  /**
+   * Whether a per-class breakdown may be requested. Requesting one is not the
+   * same as getting one: a company that does not class this report answers with
+   * a single total column, which conform reports rather than mistaking for zero.
+   */
+  acceptsClasses: boolean;
+  /** Explicit column list, for the detail reports that take one. */
+  columns?: string;
+}
+
+const MONTHLY_REPORTS: Record<string, ReportSpec> = {
+  profit_and_loss: { report: 'ProfitAndLoss', period: 'range', acceptsBasis: true, acceptsClasses: true },
+  balance_sheet: { report: 'BalanceSheet', period: 'range', acceptsBasis: true, acceptsClasses: true },
+  // QuickBooks' Trial Balance has no class dimension at all. It is pulled at
+  // company level as the tie-out against the classed P&L and balance sheet;
+  // asking it to summarise by class is what made it fail.
+  trial_balance: { report: 'TrialBalance', period: 'range', acceptsBasis: true, acceptsClasses: false },
 };
+
+/** The query parameters one month of a report actually takes. */
+export function reportParams(
+  spec: ReportSpec,
+  month: string,
+  withClasses: boolean,
+): Record<string, string> {
+  const monthEnd = lastDayOfMonth(month);
+  const params: Record<string, string> = {};
+
+  if (spec.period === 'range') {
+    params.start_date = month;
+    params.end_date = monthEnd;
+  } else {
+    // Aging is as-at a single date, under a different parameter name entirely.
+    params.report_date = monthEnd;
+  }
+
+  if (spec.columns) params.columns = spec.columns;
+  // Rule 3: ARG reports on the accrual basis. Never mix silently.
+  if (spec.acceptsBasis) params.accounting_method = 'Accrual';
+  if (spec.acceptsClasses && withClasses) params.summarize_column_by = 'Classes';
+
+  return params;
+}
+
+export const REPORT_SPECS = MONTHLY_REPORTS;
 
 interface TokenCache {
   accessToken: string;
@@ -195,9 +285,14 @@ async function callApi(path: string, params: Record<string, string>): Promise<un
  * QBO's report API summarises by month OR by class, not both in one call, so
  * classed monthly figures come from one call per month. That is more requests
  * but it is the only shape that yields a division dimension.
+ *
+ * A classed request that fails is retried once, unclassed. That is open item 1
+ * behaving as documented rather than as an outage: a company that does not class
+ * its balance sheet gets ARG Total figures and a conform note, where before the
+ * entity simply FAILED and the balance sheet never loaded at all.
  */
 async function fetchMonthlyReport(
-  reportName: string,
+  spec: ReportSpec,
   window: FetchWindow,
   extraParams: Record<string, string> = {},
   options?: FetchOptions,
@@ -208,27 +303,204 @@ async function fetchMonthlyReport(
   // Conform replaces a month wholesale, so half a month landing on its own would
   // read as a genuine collapse in that month's figures rather than as an
   // unfinished pull. A month is fetched entirely or not at all.
-  const months = monthsInWindow(window);
+  // Only the months the pull asked for, when it asked: the others are already
+  // held and unchanged (see FetchOptions.months).
+  const inWindow = monthsInWindow(window);
+  const months = options?.months ? inWindow.filter((month) => options.months!.includes(month)) : inWindow;
   const resumeAt = options?.cursor ? months.indexOf(options.cursor) : 0;
   const from = resumeAt < 0 ? 0 : resumeAt;
 
   for (let i = from; i < months.length; i++) {
     const month = months[i]!;
-    const payload = await callApi(`reports/${reportName}`, {
-      start_date: month,
-      end_date: lastDayOfMonth(month),
-      // Rule 3: ARG reports on the accrual basis. Never mix silently.
-      accounting_method: 'Accrual',
-      summarize_column_by: 'Classes',
-      ...extraParams,
-    });
-    records.push({ entity: reportName, key: month, payload });
+
+    let payload: unknown;
+    try {
+      payload = await callApi(`reports/${spec.report}`, {
+        ...reportParams(spec, month, true),
+        ...extraParams,
+      });
+    } catch (error) {
+      if (!spec.acceptsClasses || !(error instanceof ConnectorRequestError)) throw error;
+      payload = await callApi(`reports/${spec.report}`, {
+        ...reportParams(spec, month, false),
+        ...extraParams,
+      });
+    }
+
+    records.push({ entity: spec.report, key: month, payload });
 
     const next = months[i + 1];
     if (next && budgetSpent(options, records.length)) return { records, nextCursor: next };
   }
 
   return { records, nextCursor: null };
+}
+
+/**
+ * Every row of a QuickBooks entity, active and inactive, across all pages.
+ *
+ * `Active in (true, false)` is the documented way to stop QuickBooks filtering
+ * to active rows. Paging by STARTPOSITION matters at ARG's size: 314 accounts
+ * fits one page today, but a chart of accounts that grows past 1000 would start
+ * losing its tail silently, which is the same class of failure as the active
+ * filter and just as hard to notice.
+ */
+type QueryEntity = 'Account' | 'Class' | 'Invoice' | 'Bill' | 'Budget' | 'Customer';
+
+const QUERY_ENTITY_TO_ENTITY: Record<QueryEntity, string> = {
+  Account: 'accounts',
+  Class: 'classes',
+  Invoice: 'ar_aging',
+  Bill: 'ap_aging',
+  Budget: 'budgets',
+  Customer: 'customers',
+};
+
+async function queryAll(
+  entityName: QueryEntity,
+  where?: string,
+  fields = '*',
+): Promise<RawRecord[]> {
+  const pageSize = 1000;
+  const records: RawRecord[] = [];
+  let startPosition = 1;
+
+  // Reference data must include INACTIVE rows; transactions must not be
+  // filtered on Active at all. A deleted account still carries every balance it
+  // held on earlier balance sheets, so omitting it does not remove it from the
+  // report — only our ability to read one.
+  const clause =
+    where ??
+    (entityName === 'Account' || entityName === 'Class' || entityName === 'Customer'
+      ? 'Active in (true, false)'
+      : null);
+
+  for (;;) {
+    const payload = (await callApi('query', {
+      query:
+        `select ${fields} from ${entityName}` +
+        (clause ? ` where ${clause}` : '') +
+        ` startposition ${startPosition} maxresults ${pageSize}`,
+    })) as { QueryResponse?: Record<string, unknown[]> };
+
+    records.push({
+      entity: QUERY_ENTITY_TO_ENTITY[entityName],
+      key: `page-${startPosition}`,
+      payload,
+    });
+
+    const returned = (payload.QueryResponse?.[entityName] ?? []).length;
+    if (returned < pageSize) break;
+    startPosition += pageSize;
+  }
+
+  return records;
+}
+
+/**
+ * Invoices and credit memos, a page at a time, resumable.
+ *
+ * Only the columns the comparison reads are asked for — QuickBooks' query
+ * language takes a field list — because a full invoice carries every line item
+ * and two years of them is far more than this needs to move or keep.
+ *
+ * The first pass reads everything dated from January of last year; later passes
+ * read only what QuickBooks says was updated since the last completed one, which
+ * catches edits and voids (a voided invoice is updated to zero) as well as new
+ * invoices.
+ */
+const BILLING_FIELDS = 'Id, DocNumber, TxnDate, CustomerRef, TotalAmt, Balance, TxnTaxDetail, MetaData';
+const BILLING_KINDS = ['Invoice', 'CreditMemo'] as const;
+
+interface BillingCursor {
+  kind: number;
+  start: number;
+}
+
+async function fetchBilling(
+  options: FetchOptions | undefined,
+): Promise<{ records: RawRecord[]; nextCursor: string | null; watermark: Date | null }> {
+  const pageSize = 1000;
+  const records: RawRecord[] = [];
+  let watermark: Date | null = null;
+
+  let cursor: BillingCursor = { kind: 0, start: 1 };
+  if (options?.cursor) {
+    try {
+      cursor = JSON.parse(options.cursor) as BillingCursor;
+    } catch {
+      // A cursor this code did not write is a fresh start, not a failure.
+    }
+  }
+
+  const horizon = `${new Date().getUTCFullYear() - 1}-01-01`;
+  const clause = options?.since
+    ? `MetaData.LastUpdatedTime >= '${options.since.toISOString().replace(/\.\d{3}Z$/, 'Z')}'`
+    : `TxnDate >= '${horizon}'`;
+
+  for (;;) {
+    const kind = BILLING_KINDS[cursor.kind];
+    if (!kind) return { records, nextCursor: null, watermark };
+
+    const payload = (await callApi('query', {
+      query: `select ${BILLING_FIELDS} from ${kind} where ${clause} startposition ${cursor.start} maxresults ${pageSize}`,
+    })) as { QueryResponse?: Record<string, Array<{ MetaData?: { LastUpdatedTime?: string } }>> };
+
+    const rows = payload.QueryResponse?.[kind] ?? [];
+    records.push({ entity: 'invoices', key: `${kind}-${cursor.start}`, payload: { kind, rows } });
+    for (const row of rows) {
+      const updated = row.MetaData?.LastUpdatedTime ? new Date(row.MetaData.LastUpdatedTime) : null;
+      if (updated && !Number.isNaN(updated.getTime()) && (!watermark || updated > watermark)) {
+        watermark = updated;
+      }
+    }
+
+    cursor = rows.length < pageSize ? { kind: cursor.kind + 1, start: 1 } : { kind: cursor.kind, start: cursor.start + pageSize };
+    if (!BILLING_KINDS[cursor.kind]) return { records, nextCursor: null, watermark };
+    if (budgetSpent(options, records.reduce((sum, record) => sum + ((record.payload as { rows: unknown[] }).rows.length), 0))) {
+      return { records, nextCursor: JSON.stringify(cursor), watermark };
+    }
+  }
+}
+
+/**
+ * Every transaction type that moves a P&L or balance-sheet figure.
+ *
+ * Fed to QuickBooks' change-data-capture endpoint, which lists what was created,
+ * edited or deleted since a moment (up to 30 days back). Payroll paychecks are
+ * not exposed by Intuit's API at all, which is one reason the latest months are
+ * always re-checked regardless of what this reports.
+ */
+const CDC_ENTITIES = [
+  'Invoice', 'SalesReceipt', 'CreditMemo', 'RefundReceipt', 'Payment', 'Deposit',
+  'Bill', 'BillPayment', 'VendorCredit', 'Purchase', 'JournalEntry', 'Transfer',
+];
+
+/** QuickBooks keeps change data for 30 days; a day's margin stays inside it. */
+export const CDC_HORIZON_DAYS = 29;
+
+export async function qboChangedMonths(since: Date): Promise<{ months: string[]; undated: number }> {
+  const payload = (await callApi('cdc', {
+    entities: CDC_ENTITIES.join(','),
+    changedSince: since.toISOString().replace(/\.\d{3}Z$/, 'Z'),
+  })) as {
+    CDCResponse?: Array<{ QueryResponse?: Array<Record<string, unknown>> }>;
+  };
+
+  const months = new Set<string>();
+  let undated = 0;
+  for (const response of payload.CDCResponse ?? []) {
+    for (const group of response.QueryResponse ?? []) {
+      for (const [key, value] of Object.entries(group)) {
+        if (!Array.isArray(value) || !CDC_ENTITIES.includes(key)) continue;
+        for (const item of value as Array<{ TxnDate?: string; status?: string }>) {
+          if (item.TxnDate && /^\d{4}-\d{2}/.test(item.TxnDate)) months.add(`${item.TxnDate.slice(0, 7)}-01`);
+          else undated += 1;
+        }
+      }
+    }
+  }
+  return { months: [...months].sort(), undated };
 }
 
 export const qboConnector: SourceConnector = {
@@ -239,6 +511,8 @@ export const qboConnector: SourceConnector = {
 
   isConfigured: () => isConnected('QBO'),
 
+  changedMonths: qboChangedMonths,
+
   async fetch(entity: string, window: FetchWindow, options?: FetchOptions): Promise<RawBatch> {
     if (!(await qboConnector.isConfigured())) throw new ConnectorNotConfiguredError('QBO');
 
@@ -246,33 +520,69 @@ export const qboConnector: SourceConnector = {
     let nextCursor: string | null = null;
 
     switch (entity) {
+      // Aging comes from the open transactions themselves, not from an aging
+      // report. Neither AgedReceivables nor AgedReceivableDetail carries a class
+      // column — Intuit's documented column list for the detail report has no
+      // klass_name in it, and the summary report is grouped by customer or
+      // vendor — so no aging report can be split by division, which is what
+      // fact_aging is keyed on. Invoice and Bill both expose ClassRef, Balance
+      // and DueDate, so the division is QuickBooks' own attribution and the
+      // bucket is arithmetic on a real due date.
+      case 'ar_aging':
+        records = await queryAll('Invoice', "Balance > '0'");
+        break;
+      case 'ap_aging':
+        records = await queryAll('Bill', "Balance > '0'");
+        break;
       case 'profit_and_loss':
       case 'balance_sheet':
-      case 'trial_balance':
-      case 'ar_aging':
-      case 'ap_aging': {
-        const report = MONTHLY_REPORTS[entity]!;
-        ({ records, nextCursor } = await fetchMonthlyReport(report, window, {}, options));
+      case 'trial_balance': {
+        const spec = MONTHLY_REPORTS[entity]!;
+        ({ records, nextCursor } = await fetchMonthlyReport(spec, window, {}, options));
         break;
       }
+      // Reference data is paged and includes INACTIVE records.
+      //
+      // QuickBooks' query language filters to active rows unless told otherwise,
+      // and `maxresults 1000` silently truncates beyond the first page. Both
+      // defaults were wrong here in the same way: a deleted account still
+      // carries its historical balances on every prior balance sheet, so
+      // omitting it does not remove it from the report — it removes it from
+      // dim_account and blocks the month. That is what "27 balance-sheet
+      // accounts have no balance_sheet_line … (deleted)" was.
       case 'accounts':
-        records = [
-          {
-            entity: 'accounts',
-            key: 'all',
-            payload: await callApi('query', { query: 'select * from Account maxresults 1000' }),
-          },
-        ];
+        records = await queryAll('Account');
         break;
       case 'classes':
-        records = [
-          {
-            entity: 'classes',
-            key: 'all',
-            payload: await callApi('query', { query: 'select * from Class maxresults 1000' }),
-          },
-        ];
+        records = await queryAll('Class');
         break;
+      // Every budget, active or not; conform chooses which one is current. A
+      // budget is not windowed by the pull: it is a plan for a whole year, and a
+      // partial one would read as a budget that stops in the month the pull did.
+      case 'budgets':
+        records = await queryAll('Budget');
+        break;
+      // Every customer, active or not: an inactive customer can still have
+      // been billed this year.
+      case 'customers':
+        records = await queryAll(
+          'Customer',
+          undefined,
+          'Id, DisplayName, CompanyName, FullyQualifiedName, ParentRef, Job, PrimaryEmailAddr, WebAddr, Active',
+        );
+        break;
+      case 'invoices': {
+        const billing = await fetchBilling(options);
+        return {
+          sourceSystem: 'QBO',
+          entity,
+          window,
+          records: billing.records,
+          fetchedAt: new Date(),
+          nextCursor: billing.nextCursor,
+          watermark: billing.watermark,
+        };
+      }
       default:
         throw new Error(`Unknown QBO entity "${entity}".`);
     }
