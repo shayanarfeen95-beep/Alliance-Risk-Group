@@ -18,7 +18,7 @@ import * as t from '@/lib/db/schema';
 import { getSessionUser, type SessionUser } from '@/lib/auth/session';
 import { openSemanticSession, CONSOLIDATED_CODE, type SemanticSession } from '@/lib/semantic/resolve';
 import type { MonthKey } from '@/lib/semantic/periods';
-import { chooseDefaultMonth, resolveRange, type DateRange } from './range';
+import { chooseDefaultMonth, remainingMonthsOfYear, resolveRange, type DateRange } from './range';
 
 export type SearchParams = Record<string, string | string[] | undefined>;
 
@@ -147,10 +147,14 @@ export async function loadDashboardContext(
     .limit(1);
   const configuredMonth = normaliseMonth(defaultMonthRow[0]?.value ?? undefined);
 
+  // The rest of this year can be chosen too (it is labelled as upcoming); a
+  // view still never OPENS on one.
+  const selectableMonths = [...remainingMonthsOfYear(), ...availableMonths];
+
   const requested = normaliseMonth(first(searchParams.month));
   const month =
     // What the URL asks for, if there is anything there to show.
-    (requested && availableMonths.includes(requested) ? requested : null) ??
+    (requested && selectableMonths.includes(requested) ? requested : null) ??
     // Then the last completed month with figures (see chooseDefaultMonth: the
     // configured month only wins when it is later, and only while it holds data).
     chooseDefaultMonth(availableMonths, configuredMonth) ??
@@ -187,7 +191,7 @@ export async function loadDashboardContext(
       range: first(searchParams.range),
     },
     month,
-    availableMonths,
+    selectableMonths,
   );
 
   // The owner list comes from the deals this user can actually see, so a

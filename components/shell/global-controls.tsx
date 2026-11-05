@@ -98,6 +98,7 @@ export function GlobalControls({ shell }: { shell: ShellData }) {
           {shell.months.map((m) => (
             <option key={m.periodMonth} value={m.periodMonth}>
               {formatMonth(m.periodMonth)}
+              {m.upcoming ? ' · upcoming' : ''}
             </option>
           ))}
         </select>

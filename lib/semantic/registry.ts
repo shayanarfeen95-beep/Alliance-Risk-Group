@@ -48,6 +48,27 @@ function netProfitOf(pl: { revenue: Decimal; cogs: Decimal; opex: Decimal }): De
   return grossProfitOf(pl).minus(pl.opex);
 }
 
+/**
+ * Westport, November 2026: "Deal stage is any of Qualified Discovery, Proposal,
+ * Solution Alignment, Contracting, or Compliance Review (Sales Pipeline) … and
+ * get rid of the trailing 12 months and leave it open to any deal that meets
+ * the above qualifications, no matter when the create date is."
+ */
+export const OPEN_PIPELINE_STAGES = [
+  'Qualified Discovery',
+  'Proposal',
+  'Solution Alignment',
+  'Contracting',
+  'Compliance Review',
+] as const;
+
+/** Compared the way HubSpot's "is any of" compares: case and punctuation aside. */
+function sameLabel(stored: string | null | undefined, wanted: string): boolean {
+  if (!stored) return false;
+  const normal = (value: string) => value.toLowerCase().replace(/[^a-z0-9]/g, '');
+  return normal(stored) === normal(wanted);
+}
+
 function unavailable(reason: Unavailable['reason'], detail: string): KpiComputation {
   return { value: null, unavailable: { reason, detail }, citations: [] };
 }
@@ -800,6 +821,79 @@ const salesDefinitions: KpiDefinition[] = [
           { label: 'Open deals at month end', value: String(open.length), source: 'HubSpot' },
           money('Pipeline value', total, 'HubSpot'),
         ],
+      };
+    },
+  },
+  {
+    id: 'open_pipeline_value',
+    name: 'Pipeline Value (Leadership: open stages)',
+    category: 'sales',
+    definition:
+      'Value of the deals in an open working stage — Qualified Discovery, Proposal, Solution Alignment, Contracting or Compliance Review — whenever they were created.',
+    formula: 'SUM(amount) of deals whose stage at month end is any of the five open stages',
+    notes:
+      'Westport\'s definition, November 2026, matching their HubSpot filter: deal stage is any of the five, no limit on create date. The current month reads each deal\'s stage today, as HubSpot does; a past month reads the stage each deal was in at that month\'s end, from its stage history. Amounts are the deal\'s current amount.',
+    sourceSystem: 'HubSpot (deal stage history)',
+    format: 'currency',
+    higherIsBetter: true,
+    refreshCadence: 'Daily, overnight',
+    specReference: '§6 Sales',
+    compute: (input) => {
+      const scope = hubspotScope(input);
+      if (scope) return { value: null, unavailable: scope, citations: [] };
+      const stageIds = new Set(
+        input.bundle.dealStages
+          .filter((stage) => OPEN_PIPELINE_STAGES.some((name) => sameLabel(stage.label, name)))
+          .map((stage) => stage.stageId),
+      );
+      if (stageIds.size === 0) {
+        return unavailable(
+          'NO_DATA',
+          `Deal stages have not loaded, so deals cannot be narrowed to ${OPEN_PIPELINE_STAGES.join(', ')}.`,
+        );
+      }
+
+      const { endExclusive } = monthBounds(input.period.month);
+      // This month: today's stage, so the figure is the one HubSpot's own filter
+      // shows. A past month: the stage the deal was in when that month ended.
+      const today = endExclusive > new Date();
+      const lastEntryBefore = new Map<string, { stage: string; at: Date }>();
+      if (!today) {
+        for (const entry of input.bundle.stageEntries) {
+          if (entry.enteredAt >= endExclusive) continue;
+          const seen = lastEntryBefore.get(entry.dealId);
+          if (!seen || entry.enteredAt > seen.at) {
+            lastEntryBefore.set(entry.dealId, { stage: entry.stage, at: entry.enteredAt });
+          }
+        }
+      }
+
+      const labelOf = new Map(input.bundle.dealStages.map((stage) => [stage.stageId, stage.label]));
+      const byStage = new Map<string, { count: number; total: Decimal }>();
+      const open = input.bundle.deals.filter((deal) => {
+        const inScope =
+          input.isConsolidated ||
+          (deal.divisionCode !== null && input.divisions.includes(deal.divisionCode));
+        if (!inScope) return false;
+        if (deal.createdate && deal.createdate >= endExclusive) return false;
+        const stage = today ? deal.dealstage : (lastEntryBefore.get(deal.dealId)?.stage ?? deal.dealstage);
+        if (!stage || !stageIds.has(stage)) return false;
+        const label = labelOf.get(stage) ?? stage;
+        const row = byStage.get(label) ?? { count: 0, total: ZERO };
+        byStage.set(label, { count: row.count + 1, total: row.total.plus(deal.amount) });
+        return true;
+      });
+      const total = open.reduce((sum, deal) => sum.plus(deal.amount), ZERO);
+      return {
+        value: total,
+        citations: [
+          { label: 'Deals in an open stage', value: String(open.length), source: 'HubSpot' },
+          ...[...byStage.entries()].map(([label, row]) =>
+            money(`${label} (${row.count} deals)`, row.total, 'HubSpot'),
+          ),
+          money('Pipeline value', total, 'HubSpot'),
+        ],
+        components: { deals: new Decimal(open.length) },
       };
     },
   },

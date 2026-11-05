@@ -2,11 +2,13 @@ import 'server-only';
 import { desc, eq, sql } from 'drizzle-orm';
 import { getDb } from '@/lib/db/client';
 import * as t from '@/lib/db/schema';
-import { chooseDefaultMonth } from './range';
+import { chooseDefaultMonth, remainingMonthsOfYear } from './range';
 
 export interface ShellMonth {
   periodMonth: string;
   isClosed: boolean;
+  /** Later this year: offered so the year reads to its end, labelled as such. */
+  upcoming?: boolean;
 }
 
 export interface ShellData {
@@ -95,8 +97,14 @@ export async function loadShellData(
       config.get('DEFAULT_REPORTING_MONTH')?.value ?? null,
     ) ?? `${new Date(Date.UTC(new Date().getUTCFullYear(), new Date().getUTCMonth() - 1, 1)).toISOString().slice(0, 7)}-01`;
 
+  const upcoming: ShellMonth[] = remainingMonthsOfYear().map((periodMonth) => ({
+    periodMonth,
+    isClosed: false,
+    upcoming: true,
+  }));
+
   return {
-    months: monthRows,
+    months: [...upcoming, ...monthRows],
     divisions: divisionRows.filter((row) => visibleDivisions.includes(row.divisionCode)),
     consolidatedAvailable,
     defaultMonth,

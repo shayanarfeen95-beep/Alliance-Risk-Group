@@ -5,7 +5,9 @@ import { loadEosPanel } from '@/lib/dashboards/hubspot-eos';
 import { loadLeadership2026 } from '@/lib/dashboards/leadership-2026';
 import { loadBookedVsActual, type NewBusinessFilter } from '@/lib/dashboards/booked-vs-actual';
 import { scopeLeadership, LEADERSHIP_SCOPE } from '@/lib/dashboards/leadership-scope';
-import { companyNames, toDealRow } from '@/lib/dashboards/deal-rows';
+import { companyNames, toDealBillingIndex, toDealRow } from '@/lib/dashboards/deal-rows';
+import { loadAccountBilling } from '@/lib/billing/accounts';
+import { getDb } from '@/lib/db/client';
 import { DealDrillProvider } from '@/components/charts/deal-drill';
 import { buildDivisionColorMap } from '@/lib/charts/colors';
 import { formatMonth } from '@/lib/semantic/periods';
@@ -101,8 +103,25 @@ export default async function HubspotPage({
     .filter((deal) => referenced.has(deal.dealId))
     .map((deal) => toDealRow(deal, scope.stageLabel, company));
 
+  // What QuickBooks billed the account behind each won deal, for the Billed
+  // column beside Amount. Every won deal on the page, through the same
+  // comparison as the Account billing page; invoices from January of last
+  // year, the first QuickBooks billing pull's horizon.
+  const billingHorizon = new Date(Date.UTC(new Date().getUTCFullYear() - 1, 0, 1));
+  const billing = await loadAccountBilling(await getDb(), scope.session, {
+    wonFrom: new Date(Date.UTC(2000, 0, 1)),
+    wonTo: new Date(Date.now() + 24 * 60 * 60 * 1000),
+    billingFrom: billingHorizon,
+  })
+    .then((model) => toDealBillingIndex(model, billingHorizon.toISOString().slice(0, 10)))
+    .catch((error: unknown) => {
+      // The lists still render without the column; the failure is not hidden.
+      console.error('Billing for the deal lists could not be read', error);
+      return null;
+    });
+
   return (
-    <DealDrillProvider deals={drillDeals}>
+    <DealDrillProvider deals={drillDeals} billing={billing}>
     <div className="space-y-6">
       <header>
         <h1 className="text-[19px] font-semibold tracking-tight">HubSpot Leadership</h1>
@@ -244,13 +263,13 @@ export default async function HubspotPage({
 
         <ChartCard
           title="Bookings and open pipeline"
-          subtitle="Trailing twelve months"
+          subtitle="Month by month for the last twelve months — the pipeline itself has no create-date limit"
           series={model.bookingsTrendSeries}
           data={model.bookingsTrend}
           form="line"
           valueFormat="currency"
           height={260}
-          note="Both series resolve through the same definitions as the tiles above — this line cannot disagree with Dollars Booked."
+          note="Open pipeline is the Pipeline Value tile at each month's end: deals in Qualified Discovery, Proposal, Solution Alignment, Contracting or Compliance Review, whenever they were created. A past month uses the stage each deal was in then; this month, the stage today."
         />
       </div>
 

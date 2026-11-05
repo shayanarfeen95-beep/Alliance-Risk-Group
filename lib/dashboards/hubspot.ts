@@ -113,8 +113,12 @@ export interface HubspotViewModel {
  * Proposals Sent." Both are resolved over the Background Checks deals the page
  * is scoped to.
  */
-const LEADERSHIP_TILES: Array<{ id: string; hint: string }> = [
-  { id: 'pipeline_value', hint: 'SUM(amount) of Background Checks deals still open, as of the reporting date' },
+const LEADERSHIP_TILES: Array<{ id: string; hint: string; title?: string }> = [
+  {
+    id: 'open_pipeline_value',
+    title: 'Pipeline Value',
+    hint: 'SUM(amount) of Background Checks deals whose stage is any of Qualified Discovery, Proposal, Solution Alignment, Contracting or Compliance Review (Sales Pipeline) — any create date',
+  },
   {
     id: 'new_proposals_sent',
     hint: 'Background Checks deals ENTERING the Proposal stage in the month — from stage history, not current stage',
@@ -372,7 +376,7 @@ export function loadHubspotDashboard(
   const trendMonths: MonthKey[] = period.trailingTwelveMonths;
   const bookingsTrend = trendMonths.map((month) => {
     const booked = resolveKpi(session, 'dollars_booked', divisionCode, { month });
-    const pipeline = resolveKpi(session, 'pipeline_value', divisionCode, { month });
+    const pipeline = resolveKpi(session, 'open_pipeline_value', divisionCode, { month });
     return {
       x: month,
       xLabel: formatMonthShort(month),

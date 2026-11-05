@@ -33,6 +33,8 @@ export interface TileSpec {
   hint?: string;
   /** Link for drill-through. */
   href?: string;
+  /** The tile's own name, when the page calls the metric something shorter. */
+  title?: string;
 }
 
 const num = (result: { value: Decimal | null }): number | null =>
@@ -160,7 +162,7 @@ export function buildTile(
   const definition = getKpiDefinition(spec.id);
 
   return {
-    name: current.name,
+    name: spec.title ?? current.name,
     formatted: current.formatted,
     unavailable: current.unavailable,
     higherIsBetter: current.higherIsBetter,

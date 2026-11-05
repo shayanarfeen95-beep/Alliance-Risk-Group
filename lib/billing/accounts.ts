@@ -115,6 +115,12 @@ export interface AccountBillingRow {
   match: AccountMatch;
   /** Billed per month from the month won to now. */
   monthly: Array<{ month: string; billed: number }>;
+  /**
+   * Every invoice day read for the customer (net of credit memos, tax
+   * excluded), oldest first — so a list can total any period without another
+   * round trip: since won, year to date, or months somebody picks.
+   */
+  invoiceDays: Array<{ date: string; billed: number }>;
 }
 
 export interface AccountBilling {
@@ -143,6 +149,8 @@ export interface AccountBillingOptions {
   lineOfBusiness?: string | null;
   /** "Now", for pace. Defaults to the moment of the call. */
   asOf?: Date;
+  /** Read invoices from at least this day, for periods before the win. */
+  billingFrom?: Date;
 }
 
 // ---------------------------------------------------------------------------
@@ -295,6 +303,17 @@ function goLiveOf(deal: DealRecord, session: SemanticSession): Date {
   return entries[0] ?? deal.closedate!;
 }
 
+/** One entry per invoice day, oldest first; a customer's sub-customers folded in. */
+function dailyTotals(invoices: Array<{ date: string; billed: Decimal }>): Array<{ date: string; billed: number }> {
+  const byDay = new Map<string, Decimal>();
+  for (const invoice of invoices) {
+    byDay.set(invoice.date, (byDay.get(invoice.date) ?? new Decimal(0)).plus(invoice.billed));
+  }
+  return [...byDay.entries()]
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([date, billed]) => ({ date, billed: billed.toDecimalPlaces(2).toNumber() }));
+}
+
 export async function loadAccountBilling(
   db: Database,
   session: SemanticSession,
@@ -406,7 +425,9 @@ export async function loadAccountBilling(
     (min, deal) => (!min || deal.closedate! < min ? deal.closedate! : min),
     null,
   );
-  const since = earliestWon ? new Date(earliestWon.getTime() - 366 * DAY_MS) : asOf;
+  const yearBeforeFirstWin = earliestWon ? new Date(earliestWon.getTime() - 366 * DAY_MS) : asOf;
+  const since =
+    options.billingFrom && options.billingFrom < yearBeforeFirstWin ? options.billingFrom : yearBeforeFirstWin;
 
   const invoiceRows = allIds.length
     ? await db
@@ -521,6 +542,7 @@ export async function loadAccountBilling(
       status,
       match,
       monthly,
+      invoiceDays: dailyTotals(invoices),
     });
   }
 

@@ -63,6 +63,23 @@ export function formatMonthLabel(month: MonthKey): string {
   });
 }
 
+/**
+ * The rest of this calendar year after the current month, newest first.
+ *
+ * Westport, November 2026: "Month also ends in November, we should have
+ * December listed there as well." The months that have happened are the ones
+ * with figures; these are offered beside them, marked as upcoming, so the year
+ * can be read to its end — pipeline, bookings so far, budget — without an
+ * empty month passing for a month of results.
+ */
+export function remainingMonthsOfYear(today: Date = new Date()): MonthKey[] {
+  const months: MonthKey[] = [];
+  for (let m = 11; m > today.getUTCMonth(); m -= 1) {
+    months.push(`${today.getUTCFullYear()}-${String(m + 1).padStart(2, '0')}-01` as MonthKey);
+  }
+  return months;
+}
+
 /** Accepts '2026-03' or '2026-03-01'. */
 export function normaliseRangeMonth(value: string | undefined): MonthKey | null {
   if (!value) return null;

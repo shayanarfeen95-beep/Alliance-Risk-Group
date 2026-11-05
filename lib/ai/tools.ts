@@ -1528,7 +1528,7 @@ const findDeals: ToolDefinition = {
 const getLeadershipReview: ToolDefinition = {
   name: 'get_leadership_review',
   description:
-    'The HubSpot Leadership dashboard\'s figures for Background Checks deals in the Sales Pipeline: SQLs, MQLs, deals created, compliance reviews, proposals, total pipeline value (and minus closed lost), closed won, closed lost, average deal size (2026 and ICP over $10k) by month, and deals won / compliance reviews by lead source — each with Westport\'s definition. Use it for any question about that dashboard; use find_deals for the deals behind a figure.',
+    'The HubSpot Leadership dashboard\'s figures for Background Checks deals in the Sales Pipeline: the Pipeline Value tile, SQLs, MQLs, deals created, compliance reviews, proposals, total pipeline value (and minus closed lost), closed won, closed lost, average deal size (2026 and ICP over $10k) by month, and deals won / compliance reviews by lead source — each with Westport\'s definition. Use it for any question about that dashboard; use find_deals for the deals behind a figure.',
   input_schema: {
     type: 'object',
     additionalProperties: false,
@@ -1542,6 +1542,8 @@ const getLeadershipReview: ToolDefinition = {
         : await openSemanticSession(context.db, context.user, month);
     const scope = scopeLeadership(session);
     const model = loadLeadership2026(scope);
+    // The Pipeline Value tile at the top of the dashboard, through the same metric.
+    const pipelineValue = resolveKpi(scope.session, 'open_pipeline_value', CONSOLIDATED_CODE);
 
     const series = (points: MonthlySeries, format: 'count' | 'currency') =>
       Object.fromEntries(
@@ -1559,6 +1561,13 @@ const getLeadershipReview: ToolDefinition = {
         trailing: model.trailingLabel,
         notYetAvailable: model.gaps,
         figures: {
+          pipelineValue: {
+            asOf: formatMonth(month),
+            value: pipelineValue.unavailable ? 'not available' : pipelineValue.formatted,
+            breakdown: pipelineValue.citations.map((c) => `${c.label}: ${c.value}`),
+            definition:
+              'Deal stage is any of Qualified Discovery, Proposal, Solution Alignment, Contracting or Compliance Review (Sales Pipeline), any create date — the current month reads stages as of today.',
+          },
           sqlsByMonth: series(model.sqlsByMonth, 'count'),
           mqlsByMonth: series(model.mqlsByMonth, 'count'),
           dealsCreatedByMonth: series(model.dealsCreatedByMonth, 'count'),
