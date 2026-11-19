@@ -2640,6 +2640,7 @@ const SCENARIO_NAMES: Record<string, { name: string; sortOrder: number }> = {
   MONTHLY_BUDGET: { name: 'FY Operating Budget (Sheets)', sortOrder: 1 },
   TENX: { name: '10X Growth Plan', sortOrder: 2 },
   FORECAST: { name: 'Forecast', sortOrder: 3 },
+  UPLOAD_BUDGET: { name: 'Uploaded budget', sortOrder: -1 },
 };
 
 /** Creates the scenario on first use, and keeps its description current. */
@@ -2682,9 +2683,13 @@ async function ensureScenario(
 async function conformBudget(
   db: Database,
   loadRunId: string,
-  scenarioCode: 'MONTHLY_BUDGET' | 'TENX' | 'FORECAST',
+  scenarioCode: 'MONTHLY_BUDGET' | 'TENX' | 'FORECAST' | 'UPLOAD_BUDGET',
   values: string[][],
   lookup: DivisionLookup,
+  source: { system: 'SHEETS' | 'UPLOAD'; description: string } = {
+    system: 'SHEETS',
+    description: `Google Sheets, loaded ${new Date().toISOString().slice(0, 10)}`,
+  },
 ): Promise<{ written: number; notes: string[] }> {
   const rows: Array<{ periodMonth: string; divisionCode: string; lineItem: 'revenue' | 'cogs' | 'opex'; amount: Decimal }> = [];
   const unmappedDivisions = new Set<string>();
@@ -2820,12 +2825,7 @@ async function conformBudget(
 
   await ensurePeriods(db, [...new Set(rows.map((row) => row.periodMonth))]);
 
-  await ensureScenario(
-    db,
-    scenarioCode,
-    rows.map((row) => row.periodMonth),
-    `Google Sheets, loaded ${new Date().toISOString().slice(0, 10)}`,
-  );
+  await ensureScenario(db, scenarioCode, rows.map((row) => row.periodMonth), source.description);
 
   for (const row of rows) {
     const values = {
@@ -2834,7 +2834,7 @@ async function conformBudget(
       divisionCode: row.divisionCode,
       lineItem: row.lineItem,
       amount: n(row.amount),
-      sourceSystem: 'SHEETS' as const,
+      sourceSystem: source.system,
       loadRunId,
     };
 
@@ -3540,4 +3540,29 @@ async function conformInTransaction(
   }
 
   return { rowsWritten, notes: [`${batch.sourceSystem} has no conform step.`] };
+}
+
+
+/**
+ * A budget or forecast someone uploaded (Excel or CSV) — Westport's 2027 budget.
+ * The same reader as the Google Sheets budget: one row per month per division
+ * with Revenue / COGS / OpEx across, or divisions and lines down with months
+ * across. Upserted, so uploading a revised file replaces the months it covers.
+ */
+export async function loadUploadedPlan(
+  db: Database,
+  loadRunId: string,
+  kind: 'budget' | 'forecast',
+  values: string[][],
+  description: string,
+): Promise<{ written: number; notes: string[]; months: string[] }> {
+  const lookup = await divisionLookup(db);
+  const scenario = kind === 'budget' ? 'UPLOAD_BUDGET' : 'FORECAST';
+  const result = await conformBudget(db, loadRunId, scenario, values, lookup, { system: 'UPLOAD', description });
+  const [row] = await db
+    .select({ first: t.budgetScenario.firstMonth, last: t.budgetScenario.lastMonth })
+    .from(t.budgetScenario)
+    .where(eq(t.budgetScenario.scenarioCode, scenario))
+    .limit(1);
+  return { ...result, months: row ? [String(row.first), String(row.last)] : [] };
 }

@@ -92,7 +92,7 @@ export default async function ForecastPage({
   const sumOf = (pick: (d: DivisionContext) => number | null) =>
     scoped.every((d) => pick(d) === null) ? null : scoped.reduce((total, d) => total + (pick(d) ?? 0), 0);
 
-  const budgetScenario = preferredBudgetScenario(session.bundle);
+  const budgetScenario = preferredBudgetScenario(session.bundle, session.period.fiscalYear);
   const budgetName =
     session.bundle.scenarios.get(budgetScenario)?.description ??
     session.bundle.scenarios.get(budgetScenario)?.name ??

@@ -248,7 +248,7 @@ const comparePeriods: ToolDefinition = {
 
     if (against === 'budget' || against === 'tenx') {
       // The budget ARG measures against: QuickBooks' own when one is loaded.
-      const scenario = against === 'tenx' ? 'TENX' : preferredBudgetScenario(session.bundle);
+      const scenario = against === 'tenx' ? 'TENX' : preferredBudgetScenario(session.bundle, session.period.fiscalYear);
 
       /**
        * Which budget lines this metric is made of.

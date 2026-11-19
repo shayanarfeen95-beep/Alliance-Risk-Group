@@ -217,7 +217,7 @@ const budgetAttainment: Evaluator = {
   ],
   run(context) {
     const lineItem = String(context.goal.params?.lineItem ?? 'revenue');
-    const scenario = String(context.goal.params?.scenario || preferredBudgetScenario(context.session.bundle));
+    const scenario = String(context.goal.params?.scenario || preferredBudgetScenario(context.session.bundle, context.session.period.fiscalYear));
     const floor = numberParam(context.goal.params, 'minAttainment') ?? d(0.9);
 
     // Direction comes from the line item, not from the attainment metric.

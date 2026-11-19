@@ -154,7 +154,7 @@ export async function loadExecutive(
   // labelled columns. §7 warns that a reader seeing "−36,773" beside "84%"
   // reasonably assumes both are variances.
   // The budget ARG measures against: QuickBooks' own when one is loaded.
-  const budgetScenario = preferredBudgetScenario(session.bundle);
+  const budgetScenario = preferredBudgetScenario(session.bundle, session.period.fiscalYear);
   const baselines: BaselineRow[] = (
     [
       [budgetScenario === 'QBO_BUDGET' ? 'Budget (QuickBooks)' : 'Budget', budgetScenario],

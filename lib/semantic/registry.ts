@@ -84,7 +84,21 @@ function money(label: string, value: Decimal, source: Citation['source'], month?
  * the one it asked to be measured against — then the operating budget from
  * Google Sheets.
  */
-export function preferredBudgetScenario(bundle: FactBundle): string {
+/** A budget or forecast uploaded in Admin (Excel or CSV), e.g. the 2027 budget. */
+export const UPLOADED_BUDGET = 'UPLOAD_BUDGET';
+export const UPLOADED_FORECAST = 'UPLOAD_FORECAST';
+
+/**
+ * The budget a year is measured against: one uploaded for that year first —
+ * Westport, November 2026: "Would like to upload a Budget and Forecast for 2027
+ * and be able to have regular check-ins to how we are doing to plan" — then
+ * QuickBooks' own, then the Sheets budget.
+ */
+export function preferredBudgetScenario(bundle: FactBundle, year?: number): string {
+  if (year !== undefined) {
+    const prefix = `${UPLOADED_BUDGET}|${year}-`;
+    for (const key of bundle.budget.keys()) if (key.startsWith(prefix)) return UPLOADED_BUDGET;
+  }
   for (const key of bundle.budget.keys()) if (key.startsWith('QBO_BUDGET|')) return 'QBO_BUDGET';
   for (const key of bundle.company.keys()) if (key.startsWith('QBO_BUDGET|')) return 'QBO_BUDGET';
   return 'MONTHLY_BUDGET';
@@ -584,7 +598,7 @@ const financeDefinitions: KpiDefinition[] = [
     notes:
       'Attainment ratio, NOT variance %. A deliberate Westport convention — preserve it. The two columns are labelled distinctly ("Attainment %" and "Variance $") because in the Excel a reader sees "−36,773" beside "84%" and reasonably assumes both are variances. Direction matters: above 100% is good on revenue and gross profit, bad on COGS, OpEx and payroll.',
     compute: ({ period, bundle, divisions, options, isConsolidated }) => {
-      const scenario = String(options?.scenario ?? preferredBudgetScenario(bundle));
+      const scenario = String(options?.scenario ?? preferredBudgetScenario(bundle, period.fiscalYear));
       const lineItem = (options?.lineItem ?? 'revenue') as 'revenue' | 'cogs' | 'opex';
       const months = options?.scope === 'ytd' ? period.ytdMonths : [period.month];
 
@@ -1023,7 +1037,7 @@ const salesDefinitions: KpiDefinition[] = [
 
       const budget = budgetFor(
         bundle,
-        preferredBudgetScenario(bundle),
+        preferredBudgetScenario(bundle, period.fiscalYear),
         [period.month],
         divisions,
         'revenue',

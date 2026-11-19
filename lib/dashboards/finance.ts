@@ -364,7 +364,7 @@ export function loadFinance(
     : null;
 
   // --- Budget and outlook ---------------------------------------------------
-  const scenario = preferredBudgetScenario(bundle);
+  const scenario = preferredBudgetScenario(bundle, period.fiscalYear);
   const budgetLines = (months: MonthKey[]): BudgetLines => ({
     revenue: num(budgetFor(bundle, scenario, months, divisions, 'revenue', isConsolidated)),
     cogs: num(budgetFor(bundle, scenario, months, divisions, 'cogs', isConsolidated)),

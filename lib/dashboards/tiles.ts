@@ -84,7 +84,7 @@ export function buildTile(
   const budgetable = ['revenue', 'cogs', 'opex'].includes(spec.id);
   if (budgetable) {
     const attainment = resolveKpi(session, 'budget_attainment', divisionCode, {
-      options: { scenario: preferredBudgetScenario(session.bundle), lineItem: spec.id, scope: 'month' },
+      options: { scenario: preferredBudgetScenario(session.bundle, session.period.fiscalYear), lineItem: spec.id, scope: 'month' },
     });
     if (!attainment.unavailable && attainment.components?.budget) {
       const budget = attainment.components.budget.toNumber();

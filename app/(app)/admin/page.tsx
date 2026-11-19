@@ -36,6 +36,8 @@ import { syncableSources } from '@/lib/etl/ingest';
 import { listClassMap } from '@/lib/etl/class-map';
 import { loadDataHealth } from '@/lib/etl/health';
 import { formatMonth } from '@/lib/semantic/periods';
+import { PlanUpload } from '@/components/admin/plan-upload';
+import { SystemsReference } from '@/components/admin/systems-reference';
 
 export const metadata: Metadata = { title: 'Admin' };
 export const dynamic = 'force-dynamic';
@@ -149,6 +151,8 @@ export default async function AdminPage({
       ? [{ id: 'mapping', label: 'Class mapping', badge: unmapped.length ? String(unmapped.length) : undefined, badgeTone: 'warning' as const }]
       : []),
     { id: 'accounts', label: 'Account matching' },
+    { id: 'plans', label: 'Budget upload' },
+    { id: 'systems', label: 'Systems & documents' },
     ...(canManageUsers ? [{ id: 'people', label: 'People & access', badge: String(userRows.length) }] : []),
     { id: 'settings', label: 'Settings', badge: awaiting.length ? String(awaiting.length) : undefined, badgeTone: 'warning' },
     { id: 'audit', label: 'Audit trail' },
@@ -492,6 +496,22 @@ export default async function AdminPage({
 
       {/* --- Account matching ---------------------------------------------- */}
       {tab === 'accounts' ? await accountMatchingTab(db, user) : null}
+
+      {tab === 'plans' ? (
+        <PlanUpload
+          canEdit={can(user, 'EDIT_MAPPINGS')}
+          nextYear={new Date().getUTCFullYear() + 1}
+          plans={(await db.select().from(t.budgetScenario).orderBy(t.budgetScenario.sortOrder)).map((row) => ({
+            code: row.scenarioCode,
+            name: row.scenarioName,
+            description: row.description,
+            firstMonth: String(row.firstMonth),
+            lastMonth: String(row.lastMonth),
+          }))}
+        />
+      ) : null}
+
+      {tab === 'systems' ? <SystemsReference /> : null}
 
       {/* --- People -------------------------------------------------------- */}
       {tab === 'people' && canManageUsers ? (
