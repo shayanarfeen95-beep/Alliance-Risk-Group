@@ -53,6 +53,8 @@ describe('the order QuickBooks entities are pulled in', () => {
         // Billing by customer, for Account billing.
         'customers',
         'invoices',
+        // QuickBooks' closing date, last.
+        'book_close',
       ]),
     );
   });

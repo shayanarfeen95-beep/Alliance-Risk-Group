@@ -134,6 +134,63 @@ function isExcluded(lookup: DivisionLookup, classId: string | undefined, title: 
   });
 }
 
+/**
+ * QuickBooks' closing date, applied to the months here.
+ *
+ * Westport, November 2026: "Showing months not closed in QuickBooks when they
+ * are (ie, September and October closed but not reflecting)." A month was only
+ * ever closed by hand in Admin. QuickBooks keeps its own closing date
+ * (Preferences → AccountingInfoPrefs.BookCloseDate); every month that ends on
+ * or before it is closed here too. A month this step closed is reopened if the
+ * date moves back in QuickBooks; a month somebody closed in Admin is left alone.
+ */
+export async function conformBookClose(db: Database, payload: unknown, notes: string[]): Promise<number> {
+  const preferences = (payload as { QueryResponse?: { Preferences?: Array<Record<string, unknown>> } })?.QueryResponse
+    ?.Preferences?.[0] as { AccountingInfoPrefs?: { BookCloseDate?: string } } | undefined;
+  const closeDate = preferences?.AccountingInfoPrefs?.BookCloseDate?.slice(0, 10) ?? null;
+
+  await db
+    .insert(t.appConfig)
+    .values({
+      key: 'QBO_BOOKS_CLOSED_THROUGH',
+      value: closeDate ?? 'none',
+      description: 'QuickBooks closing date, read from its preferences on every pull.',
+      isConfirmed: true,
+    })
+    .onConflictDoUpdate({ target: t.appConfig.key, set: { value: closeDate ?? 'none' } });
+
+  if (!closeDate) {
+    notes.push('QuickBooks has no closing date set, so no month is marked closed from it.');
+    return 0;
+  }
+
+  const periods = await db
+    .select({ month: t.dimPeriod.periodMonth, isClosed: t.dimPeriod.isClosed, closedBy: t.dimPeriod.closedBy })
+    .from(t.dimPeriod);
+  let changed = 0;
+  for (const period of periods) {
+    const month = String(period.month).slice(0, 10);
+    const [year, monthOfYear] = month.split('-').map(Number) as [number, number];
+    const lastDay = new Date(Date.UTC(year, monthOfYear, 0)).toISOString().slice(0, 10);
+    const shouldBeClosed = lastDay <= closeDate;
+    if (shouldBeClosed && !period.isClosed) {
+      await db
+        .update(t.dimPeriod)
+        .set({ isClosed: true, closedAt: new Date(), closedBy: null })
+        .where(eq(t.dimPeriod.periodMonth, month));
+      changed += 1;
+    } else if (!shouldBeClosed && period.isClosed && period.closedBy === null) {
+      await db.update(t.dimPeriod).set({ isClosed: false, closedAt: null }).where(eq(t.dimPeriod.periodMonth, month));
+      changed += 1;
+    }
+  }
+  notes.push(
+    `QuickBooks' books are closed through ${closeDate}; every month to then is shown as closed` +
+      (changed ? ` (${changed} month${changed === 1 ? '' : 's'} updated).` : '.'),
+  );
+  return changed;
+}
+
 /** Periods are a dimension with a foreign key; a month must exist to be written. */
 async function ensurePeriods(db: Database, months: string[]): Promise<Set<string>> {
   const closed = new Set<string>();
@@ -3141,6 +3198,10 @@ async function conformInTransaction(
     // Billing by customer — not monthly reports, so before the per-month loop.
     if (batch.entity === 'customers') {
       rowsWritten += await conformQboCustomers(db, loadRunId, batch.records.map((record) => record.payload), notes);
+      return { rowsWritten, notes };
+    }
+    if (batch.entity === 'book_close') {
+      rowsWritten += await conformBookClose(db, batch.records[0]?.payload, notes);
       return { rowsWritten, notes };
     }
     if (batch.entity === 'invoices') {

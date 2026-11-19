@@ -115,6 +115,14 @@ const ENTITIES: EntityDescriptor[] = [
     description:
       'What each customer was billed and when, from the start of last year: total less sales tax, credit memos netted. After the first pull only what changed is read.',
   },
+  // Last, so a month's final figures have landed before it is marked closed.
+  {
+    entity: 'book_close',
+    label: 'Books closed through',
+    cadence: 'DAILY',
+    description:
+      'QuickBooks’ own closing date (Account and Settings → Advanced → Close the books). Every month up to it is shown as closed here, as it is in QuickBooks, and is no longer rewritten by a pull.',
+  },
 ];
 
 /**
@@ -571,6 +579,11 @@ export const qboConnector: SourceConnector = {
           'Id, DisplayName, CompanyName, FullyQualifiedName, ParentRef, Job, PrimaryEmailAddr, WebAddr, Active',
         );
         break;
+      case 'book_close': {
+        const payload = await callApi('query', { query: 'select * from Preferences' });
+        records = [{ entity: 'book_close', key: 'preferences', payload }];
+        break;
+      }
       case 'invoices': {
         const billing = await fetchBilling(options);
         return {
