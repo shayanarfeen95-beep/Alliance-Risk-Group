@@ -350,7 +350,7 @@ export function loadLeadership2026(
     );
   }
 
-  const lob = LEADERSHIP_SCOPE.lineOfBusiness;
+  const lob = scope.lineOfBusiness ?? 'any';
   const definitions: Record<DefinedChart, string> = {
     mqlsByMonth: 'Contacts by the month they entered Marketing Qualified Lead, from lifecycle-stage history.',
     sqlsByMonth: `Date entered “Marketing Qualified Lead (Lifecycle Stage Pipeline)” is known, and Lead Source is any of ${LEADERSHIP_SCOPE.sqlLeadSources.join(', ')}. Counted in the month the contact entered MQL — from that field, or from lifecycle-stage history where HubSpot left it empty.`,

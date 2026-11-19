@@ -61,6 +61,8 @@ export interface LeadershipScope {
   totalDeals: number;
   /** Whether the Line of Business narrowing actually applied. */
   narrowedByLineOfBusiness: boolean;
+  /** The HubSpot Line of Business the page is narrowed to, or null for all. */
+  lineOfBusiness: string | null;
 }
 
 /** Compared ignoring case and punctuation, the way "is any of" compares. */
@@ -68,7 +70,42 @@ export function sameName(a: string | null | undefined, b: string): boolean {
   return hasOption(a ?? null, b);
 }
 
-export function scopeLeadership(session: SemanticSession): LeadershipScope {
+/**
+ * Every Line of Business value on the deals, exactly as HubSpot labels it, with
+ * how many deals carry it — Westport: "keep same naming conventions that we
+ * are using in Quickbooks and also Hubspot."
+ */
+export function linesOfBusiness(deals: DealRecord[]): Array<{ label: string; deals: number }> {
+  const counts = new Map<string, number>();
+  for (const deal of deals) {
+    for (const part of (deal.lineOfBusiness ?? '').split(';')) {
+      const label = part.trim();
+      if (label) counts.set(label, (counts.get(label) ?? 0) + 1);
+    }
+  }
+  return [...counts.entries()]
+    .map(([label, count]) => ({ label, deals: count }))
+    .sort((a, b) => b.deals - a.deals || a.label.localeCompare(b.label));
+}
+
+/** A ?lob= value: a HubSpot Line of Business label, "all", or the old "bc". */
+export function lineOfBusinessFromParam(
+  value: string | undefined,
+  deals: DealRecord[],
+  fallback: string | null,
+): string | null {
+  if (!value) return fallback;
+  if (value === 'all') return null;
+  if (value === 'bc') return LEADERSHIP_SCOPE.lineOfBusiness;
+  const match = linesOfBusiness(deals).find((option) => sameName(option.label, value));
+  return match ? match.label : fallback;
+}
+
+export function scopeLeadership(
+  session: SemanticSession,
+  /** A HubSpot Line of Business label; null for every line. Defaults to Westport's Background Checks. */
+  lineOfBusiness: string | null = LEADERSHIP_SCOPE.lineOfBusiness,
+): LeadershipScope {
   const { bundle } = session;
   const gaps: string[] = [];
 
@@ -91,8 +128,8 @@ export function scopeLeadership(session: SemanticSession): LeadershipScope {
   }
 
   // --- The line of business -------------------------------------------------
-  const lobKnown = bundle.deals.some((deal) => deal.lineOfBusiness !== null);
-  if (!lobKnown && bundle.deals.length > 0) {
+  const lobKnown = lineOfBusiness !== null && bundle.deals.some((deal) => deal.lineOfBusiness !== null);
+  if (lineOfBusiness !== null && !lobKnown && bundle.deals.length > 0) {
     gaps.push(
       `No deal carries a Line of Business yet, so this page cannot be narrowed to ${LEADERSHIP_SCOPE.lineOfBusiness} and includes every line of business. It fills in on the next HubSpot pull, which reads every deal again to fetch the field.`,
     );
@@ -100,7 +137,7 @@ export function scopeLeadership(session: SemanticSession): LeadershipScope {
 
   const inScope = (deal: DealRecord): boolean => {
     if (pipelineKnown && (!deal.pipeline || !pipelineIds.has(deal.pipeline))) return false;
-    if (lobKnown && !hasOption(deal.lineOfBusiness, LEADERSHIP_SCOPE.lineOfBusiness)) return false;
+    if (lobKnown && !hasOption(deal.lineOfBusiness, lineOfBusiness!)) return false;
     return true;
   };
 
@@ -121,7 +158,7 @@ export function scopeLeadership(session: SemanticSession): LeadershipScope {
   };
 
   const parts = [
-    lobKnown ? LEADERSHIP_SCOPE.lineOfBusiness : 'Every line of business',
+    lobKnown ? lineOfBusiness! : 'Every line of business',
     pipelineKnown ? LEADERSHIP_SCOPE.pipeline : 'every pipeline',
   ];
 
@@ -134,5 +171,6 @@ export function scopeLeadership(session: SemanticSession): LeadershipScope {
     gaps,
     totalDeals: bundle.deals.length,
     narrowedByLineOfBusiness: lobKnown,
+    lineOfBusiness: lobKnown ? lineOfBusiness : null,
   };
 }

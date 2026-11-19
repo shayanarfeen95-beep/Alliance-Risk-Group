@@ -13,7 +13,8 @@ import {
   loadAccountBilling,
   STATUS_LABEL,
 } from '@/lib/billing/accounts';
-import { LEADERSHIP_SCOPE } from '@/lib/dashboards/leadership-scope';
+import { lineOfBusinessFromParam, linesOfBusiness } from '@/lib/dashboards/leadership-scope';
+import { LineOfBusinessPicker } from '@/components/dashboard/lob-picker';
 import { StatTile } from '@/components/dashboard/stat-tile';
 import { Card, CardHeader, Unavailable } from '@/components/ui/primitives';
 import { AccountBillingTable } from '@/components/billing/account-billing-table';
@@ -37,7 +38,8 @@ export default async function AccountsPage({ searchParams }: { searchParams: Pro
   const params = await searchParams;
   const context = await loadDashboardContext(params);
   const { session, range } = context;
-  const lob = first(params.lob) === 'bc' ? LEADERSHIP_SCOPE.lineOfBusiness : null;
+  const lob = lineOfBusinessFromParam(first(params.lob), context.session.bundle.deals, null);
+  const lobOptions = linesOfBusiness(context.session.bundle.deals.filter((deal) => deal.isClosedWon));
 
   if (!session.consolidatedAvailable) {
     return (
@@ -58,17 +60,6 @@ export default async function AccountsPage({ searchParams }: { searchParams: Pro
     lineOfBusiness: lob,
   });
 
-  const lobHref = (value: 'all' | 'bc') => {
-    const next = new URLSearchParams();
-    for (const [key, raw] of Object.entries(params)) {
-      const single = first(raw);
-      if (single !== undefined && key !== 'lob') next.set(key, single);
-    }
-    if (value === 'bc') next.set('lob', 'bc');
-    const query = next.toString();
-    return `/accounts${query ? `?${query}` : ''}`;
-  };
-
   return (
     <div className="space-y-6">
       <header>
@@ -83,37 +74,13 @@ export default async function AccountsPage({ searchParams }: { searchParams: Pro
         </p>
       </header>
 
-      <div
-        className="flex flex-wrap items-center gap-3 rounded-[var(--radius)] border px-3 py-2"
-        style={{ borderColor: 'var(--border)', background: 'var(--surface-1)' }}
-      >
-        <span className="text-[11px] font-medium text-[var(--text-secondary)]">Line of business</span>
-        {(
-          [
-            ['all', 'All'],
-            ['bc', LEADERSHIP_SCOPE.lineOfBusiness],
-          ] as const
-        ).map(([id, label]) => {
-          const active = (id === 'bc') === Boolean(lob);
-          return (
-            <Link
-              key={id}
-              href={lobHref(id)}
-              className="rounded-[4px] border px-2 py-0.5 text-[11px] font-medium"
-              style={{
-                borderColor: active ? 'var(--text-primary)' : 'var(--border)',
-                background: active ? 'var(--text-primary)' : 'transparent',
-                color: active ? 'var(--text-inverse)' : 'var(--text-secondary)',
-              }}
-            >
-              {label}
-            </Link>
-          );
-        })}
-        <span className="text-[11px] text-[var(--text-muted)]">
-          Change which deals are included with the date range at the top of the page.
-        </span>
-      </div>
+      <LineOfBusinessPicker
+        path="/accounts"
+        params={params}
+        options={lobOptions}
+        selected={lob}
+        note="Change which deals are included with the Period at the top of the page."
+      />
 
       {model.unavailable ? <Unavailable reason="SOURCE_NOT_LOADED" detail={model.unavailable} /> : null}
 

@@ -4,7 +4,13 @@ import { loadHubspotDashboard } from '@/lib/dashboards/hubspot';
 import { loadEosPanel } from '@/lib/dashboards/hubspot-eos';
 import { loadLeadership2026 } from '@/lib/dashboards/leadership-2026';
 import { loadBookedVsActual, type NewBusinessFilter } from '@/lib/dashboards/booked-vs-actual';
-import { scopeLeadership, LEADERSHIP_SCOPE } from '@/lib/dashboards/leadership-scope';
+import {
+  scopeLeadership,
+  linesOfBusiness,
+  lineOfBusinessFromParam,
+  LEADERSHIP_SCOPE,
+} from '@/lib/dashboards/leadership-scope';
+import { LineOfBusinessPicker } from '@/components/dashboard/lob-picker';
 import { companyNames, stageHistoryIndex, toDealBillingIndex, toDealRow } from '@/lib/dashboards/deal-rows';
 import { loadAccountBilling } from '@/lib/billing/accounts';
 import { getDb } from '@/lib/db/client';
@@ -58,7 +64,10 @@ export default async function HubspotPage({
   // Westport: everything on this page is the background screening business —
   // Line of Business is Background Checks, in the Sales Pipeline. Narrowed once
   // here; every panel below reads the narrowed deals.
-  const scope = scopeLeadership(session);
+  // Another HubSpot Line of Business can be chosen (?lob=), named as HubSpot names it.
+  const lobOptions = linesOfBusiness(session.bundle.deals);
+  const chosenLob = lineOfBusinessFromParam(first(resolvedParams.lob), session.bundle.deals, LEADERSHIP_SCOPE.lineOfBusiness);
+  const scope = scopeLeadership(session, chosenLob);
   const model = loadHubspotDashboard(scope, divisionCode, colors, { range, ownerName, pipeline: null });
   const eos = loadEosPanel(scope.session, divisionCode, { range, ownerName, pipeline: null });
   const leadership = loadLeadership2026(scope);
@@ -66,13 +75,14 @@ export default async function HubspotPage({
 
   // Background Checks deals billed as the division that does background
   // screening, so booked and billed describe the same business.
-  const screening = session.bundle.divisions.find((division) =>
-    /background/i.test(division.lineOfBusiness),
-  );
+  const screening =
+    scope.lineOfBusiness && /background/i.test(scope.lineOfBusiness)
+      ? session.bundle.divisions.find((division) => /background/i.test(division.lineOfBusiness))
+      : undefined;
   const bookedVsActual = loadBookedVsActual(scope.session, divisionCode, {
     newBusiness,
     bookedLabel: scope.narrowedByLineOfBusiness
-      ? `${LEADERSHIP_SCOPE.lineOfBusiness} deals`
+      ? `${scope.lineOfBusiness} deals`
       : 'deals of every line of business',
     billed:
       screening && scope.narrowedByLineOfBusiness
@@ -129,16 +139,24 @@ export default async function HubspotPage({
       <header>
         <h1 className="text-[19px] font-semibold tracking-tight">HubSpot Leadership</h1>
         <p className="mt-1 max-w-2xl text-[12.5px] leading-relaxed text-[var(--text-secondary)]">
-          The monthly leadership review for the background screening business — deals whose Line
-          of Business is {LEADERSHIP_SCOPE.lineOfBusiness}, in the {LEADERSHIP_SCOPE.pipeline}.
-          Every chart states what it counts, in Westport&rsquo;s definitions, and lists its deals
-          when you click a bar.
+          The monthly leadership review — deals whose Line of Business is{' '}
+          {scope.lineOfBusiness ?? 'any'}, in the {LEADERSHIP_SCOPE.pipeline}. Background Checks is
+          Westport&rsquo;s default; choose another line below. Every chart states what it counts, in
+          Westport&rsquo;s definitions, and lists its deals when you click a bar.
         </p>
         <p className="mt-0.5 text-[12px] text-[var(--text-muted)]">
           {scope.label} · {formatMonth(session.period.month)} · deals scoped to{' '}
           {model.scope.rangeLabel} · sourced from HubSpot
         </p>
       </header>
+
+      <LineOfBusinessPicker
+        path="/hubspot"
+        params={resolvedParams}
+        options={lobOptions}
+        selected={scope.lineOfBusiness}
+        note="Every panel below follows it."
+      />
 
       {/* The filter strip. Every panel below obeys all of it — a filter that
           applies to some cards and not others is worse than no filter.
