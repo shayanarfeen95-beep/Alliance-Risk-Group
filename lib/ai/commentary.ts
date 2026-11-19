@@ -117,6 +117,19 @@ export function buildFactPack(session: SemanticSession, findings: Finding[] = []
     if (netProfit.value !== null) push(`${division} net profit`, netProfit.formatted);
   }
 
+  // QuickBooks classes outside the divisions are part of ARG Total. Named, so
+  // the narrative does not attribute their costs to a division or leave the
+  // divisions failing to add up to the total.
+  for (const other of session.consolidatedAvailable ? session.bundle.otherClasses : []) {
+    const netProfit = resolveKpi(session, 'net_profit', other.code);
+    if (netProfit.value === null || netProfit.value.isZero()) continue;
+    push(
+      `${other.name} net profit`,
+      netProfit.formatted,
+      'a QuickBooks class that is not a division; part of ARG Total. Z Alloc holds shared costs until they are allocated to the divisions at month end.',
+    );
+  }
+
   // Budget attainment at the scope level, both figures, separately labelled.
   const attainment = resolveKpi(session, 'budget_attainment', scope, {
     options: { lineItem: 'revenue' },
@@ -250,6 +263,19 @@ export function deterministicDraft(
     paragraphs.push(`By division: ${divisionLines.join('; ')}.`);
   }
 
+  const outsideLines = (session.consolidatedAvailable ? session.bundle.otherClasses : [])
+    .map((other) => {
+      const np = factValue(facts, `${other.name} net profit`);
+      return np ? `${other.name} ${np}` : null;
+    })
+    .filter((line): line is string => line !== null);
+  if (outsideLines.length) {
+    paragraphs.push(
+      `ARG Total also includes QuickBooks classes that are not a division: ${outsideLines.join('; ')} net. ` +
+        `Shared costs sit there until they are allocated to the divisions at month end.`,
+    );
+  }
+
   const movers = facts.filter((fact) => fact.label.startsWith('Account movement:'));
   if (movers.length) {
     paragraphs.push(
@@ -345,7 +371,8 @@ export async function generateCommentary(
 ): Promise<Commentary> {
   const facts = [
     ...buildFactPack(session, findings),
-    ...accountMovers(session, session.visibleDivisions),
+    // At ARG Total, accounts on classes outside the divisions move the total too.
+    ...accountMovers(session, session.consolidatedScope),
   ];
 
   const fallback: Commentary = {

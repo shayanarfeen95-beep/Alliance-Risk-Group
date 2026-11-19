@@ -18,6 +18,7 @@ export default async function LoginPage({
   // session lookup also opens the database, so guarding only the setup check
   // still allowed a broken production connection to escape as a generic 500.
   let unreachable = false;
+  let overQuota = false;
   try {
     if (await getSessionUser()) redirect(next ?? '/executive');
 
@@ -29,10 +30,12 @@ export default async function LoginPage({
   } catch (error) {
     // `redirect` throws by design; only a genuine failure gets the screen.
     if (error && typeof error === 'object' && 'digest' in error) throw error;
+    console.error('Sign-in page could not reach the database:', error);
     unreachable = true;
+    overQuota = isQuotaRefusal(error);
   }
 
-  if (unreachable) return <ConfigurationNeeded unreachable />;
+  if (unreachable) return <ConfigurationNeeded unreachable overQuota={overQuota} />;
 
   return (
     <main className="flex min-h-dvh items-center justify-center px-6 py-12">
@@ -77,4 +80,19 @@ function safeNext(value: string | null): string | null {
   if (!value) return null;
   if (!value.startsWith('/') || value.startsWith('//')) return null;
   return value;
+}
+
+/**
+ * Whether the database refused because the Neon plan's allowance is spent.
+ *
+ * Neon answers with HTTP 402 and "exceeded the quota" — on the driver's error
+ * itself or on the cause it wraps, depending on which driver threw.
+ */
+function isQuotaRefusal(error: unknown): boolean {
+  for (let current = error, depth = 0; current && depth < 4; depth += 1) {
+    const text = current instanceof Error ? current.message : String(current);
+    if (/exceeded the (compute time |data transfer )?quota|HTTP status 402/i.test(text)) return true;
+    current = current instanceof Error ? (current as Error & { cause?: unknown }).cause : undefined;
+  }
+  return false;
 }

@@ -6,7 +6,7 @@ import { formatNumber, formatSignedNumber, sentimentColorVar, sentimentOf } from
 import { sumPl } from '@/lib/semantic/facts';
 import { officialForecast } from '@/lib/forecast/service';
 import { accuracyOf, scoreForecast } from '@/lib/forecast/engine';
-import { CONSOLIDATED_CODE } from '@/lib/semantic/resolve';
+import { CONSOLIDATED_CODE, scopeFor } from '@/lib/semantic/resolve';
 import { ChartCard } from '@/components/charts/chart-card';
 import { Card, CardHeader, DataTable, Td, Th } from '@/components/ui/primitives';
 
@@ -22,12 +22,15 @@ export default async function ForecastAccuracyPage({
   const { session, divisionCode } = context;
   const { period } = session;
 
+  // Forecasts are made per division; the actual they are scored against is
+  // ARG Total as QuickBooks reports it — classes outside the divisions included.
   const divisions =
     divisionCode === CONSOLIDATED_CODE ? session.visibleDivisions : [divisionCode];
+  const actualScope = scopeFor(session, divisionCode);
 
   // --- This month's scorecard -------------------------------------------
   const locked = await officialForecast(period.month, divisions);
-  const actualPl = sumPl(session.bundle, period.month, divisions);
+  const actualPl = sumPl(session.bundle, period.month, actualScope);
   const hasActuals = session.bundle.pl.has(`${period.month}|${divisions[0]}`);
 
   const rows = scoreForecast(
@@ -42,7 +45,7 @@ export default async function ForecastAccuracyPage({
   const trendPoints = await Promise.all(
     trendMonths.map(async (month) => {
       const monthly = await officialForecast(month, divisions);
-      const monthActual = sumPl(session.bundle, month, divisions);
+      const monthActual = sumPl(session.bundle, month, actualScope);
       const actualRevenue = session.bundle.pl.has(`${month}|${divisions[0]}`)
         ? monthActual.revenue.toNumber()
         : null;

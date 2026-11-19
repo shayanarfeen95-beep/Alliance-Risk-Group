@@ -55,7 +55,12 @@ export default async function ViewsPage({
         <ViewBuilder
           month={context.session.period.month}
           fields={{
-            stages: tally((deal) => deal.dealstage ?? 'Not recorded'),
+            stages: tally((deal) =>
+              deal.dealstage
+                ? (context.session.bundle.dealStages.find((stage) => stage.stageId === deal.dealstage)?.label ??
+                  deal.dealstage)
+                : 'Not recorded',
+            ),
             owners: tally((deal) => deal.ownerName ?? 'Unassigned'),
             sources: tally((deal) => deal.sourceLabel ?? 'Not recorded'),
           }}

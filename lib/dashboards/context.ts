@@ -18,7 +18,7 @@ import * as t from '@/lib/db/schema';
 import { getSessionUser, type SessionUser } from '@/lib/auth/session';
 import { openSemanticSession, CONSOLIDATED_CODE, type SemanticSession } from '@/lib/semantic/resolve';
 import type { MonthKey } from '@/lib/semantic/periods';
-import { resolveRange, type DateRange } from './range';
+import { chooseDefaultMonth, remainingMonthsOfYear, resolveRange, type DateRange } from './range';
 
 export type SearchParams = Record<string, string | string[] | undefined>;
 
@@ -38,6 +38,8 @@ export interface DashboardContext {
   range: DateRange;
   /** Salespeople with at least one deal, for the Sales owner filter. */
   owners: string[];
+  /** Salespeople archived in HubSpot: kept on their deals, left out of pickers. */
+  inactiveOwners: string[];
   /** The selected salesperson, or null for everyone. */
   ownerName: string | null;
   /** HubSpot pipelines present in the visible deals. */
@@ -99,6 +101,34 @@ async function monthsWithData(db: Awaited<ReturnType<typeof getDb>>): Promise<Mo
   );
 }
 
+/** The month before this one: the latest a set of books can be complete for. */
+export function lastCompletedMonth(today: Date = new Date()): MonthKey {
+  const month = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth() - 1, 1));
+  return `${month.toISOString().slice(0, 7)}-01` as MonthKey;
+}
+
+/**
+ * The month a view opens on when nobody has chosen one — shared by every
+ * dashboard and the assistant, so they can never disagree.
+ *
+ * The assistant used to take DEFAULT_REPORTING_MONTH straight, which sat at its
+ * seeded 2026-03: asked "how did we do?" from a page with no month in its URL,
+ * it answered about March while the dashboard beside it showed August.
+ */
+export async function defaultReportingMonth(db: Awaited<ReturnType<typeof getDb>>): Promise<MonthKey> {
+  const thisMonth = `${new Date().toISOString().slice(0, 7)}-01`;
+  const availableMonths = (await monthsWithData(db)).filter((month) => month <= thisMonth);
+  const [configured] = await db
+    .select({ value: t.appConfig.value })
+    .from(t.appConfig)
+    .where(eq(t.appConfig.key, 'DEFAULT_REPORTING_MONTH'))
+    .limit(1);
+  return (
+    chooseDefaultMonth(availableMonths, normaliseMonth(configured?.value ?? undefined)) ??
+    lastCompletedMonth()
+  );
+}
+
 export async function loadDashboardContext(
   searchParams: SearchParams,
 ): Promise<DashboardContext> {
@@ -107,7 +137,10 @@ export async function loadDashboardContext(
 
   const db = await getDb();
 
-  const availableMonths = await monthsWithData(db);
+  // Months that have happened: a month ahead of the calendar can only hold
+  // future-dated entries, and offering it reads as a month of real results.
+  const thisMonth = `${new Date().toISOString().slice(0, 7)}-01`;
+  const availableMonths = (await monthsWithData(db)).filter((month) => month <= thisMonth);
 
   const defaultMonthRow = await db
     .select({ value: t.appConfig.value })
@@ -116,19 +149,30 @@ export async function loadDashboardContext(
     .limit(1);
   const configuredMonth = normaliseMonth(defaultMonthRow[0]?.value ?? undefined);
 
+  // The rest of this year can be chosen too (it is labelled as upcoming); a
+  // view still never OPENS on one.
+  const selectableMonths = [...remainingMonthsOfYear(), ...availableMonths];
+
   const requested = normaliseMonth(first(searchParams.month));
+  // The last completed month with figures (see chooseDefaultMonth: the
+  // configured month only wins when it is later, and only while it holds data).
+  const fallbackMonth = chooseDefaultMonth(availableMonths, configuredMonth) ?? lastCompletedMonth();
+
+  // One period control for every page: start and end days, or a preset. The
+  // reporting month — what the P&L's "month" column and every prior-month and
+  // prior-year comparison hang off — is the month the period ends in.
+  const range = resolveRange(
+    {
+      from: first(searchParams.from),
+      to: first(searchParams.to),
+      range: first(searchParams.range),
+      month: requested && selectableMonths.includes(requested) ? requested : undefined,
+    },
+    fallbackMonth,
+    selectableMonths,
+  );
   const month =
-    // What the URL asks for, if there is anything there to show.
-    (requested && availableMonths.includes(requested) ? requested : null) ??
-    // Then the configured reporting month — but only while it still holds data.
-    // Honouring it unconditionally is what put every dashboard on a month that
-    // nothing had ever loaded into, so a fully populated warehouse read as zeroes
-    // everywhere and no screen said which month it was even looking at.
-    (configuredMonth && availableMonths.includes(configuredMonth) ? configuredMonth : null) ??
-    // Otherwise the most recent month that actually has figures in it.
-    availableMonths[0] ??
-    configuredMonth ??
-    '2026-03-01';
+    selectableMonths.find((candidate) => candidate <= range.to) ?? fallbackMonth;
 
   const session = await openSemanticSession(db, user, month);
 
@@ -154,15 +198,6 @@ export async function loadDashboardContext(
       sql`ran_at = (select max(ran_at) from recon_result)`,
     );
 
-  const range = resolveRange(
-    {
-      from: first(searchParams.from),
-      to: first(searchParams.to),
-      range: first(searchParams.range),
-    },
-    month,
-    availableMonths,
-  );
 
   // The owner list comes from the deals this user can actually see, so a
   // division manager's filter does not name reps working other divisions.
@@ -178,10 +213,14 @@ export async function loadDashboardContext(
   // "who is sitting on the unassigned pipeline" is a question leadership asks.
   // Offering the option only when such a deal exists keeps the list honest.
   const hasUnassigned = session.bundle.deals.some((deal) => !deal.ownerName);
-  const owners = hasUnassigned ? [...named, 'Unassigned'] : named;
+  // People archived in HubSpot drop out of the picker; a link naming one still works.
+  const inactiveOwners = inactiveOwnersOf(session.bundle.config.get('HUBSPOT_INACTIVE_OWNERS')?.value);
+  const activeNamed = named.filter((name) => !inactiveOwners.includes(name));
+  const owners = hasUnassigned ? [...activeNamed, 'Unassigned'] : activeNamed;
 
   const requestedOwner = first(searchParams.owner);
-  const ownerName = requestedOwner && owners.includes(requestedOwner) ? requestedOwner : null;
+  const ownerName =
+    requestedOwner && (owners.includes(requestedOwner) || named.includes(requestedOwner)) ? requestedOwner : null;
 
   const pipelines = [
     ...new Set(
@@ -204,6 +243,7 @@ export async function loadDashboardContext(
     recon: { failed: reconRow?.failed ?? 0, total: reconRow?.total ?? 0 },
     range,
     owners,
+    inactiveOwners,
     ownerName,
     pipelines,
     pipeline,
@@ -223,4 +263,14 @@ export function dashboardHref(
     ...extra,
   });
   return `${page}?${params.toString()}`;
+}
+
+/** The stored list of archived owners, or none. */
+export function inactiveOwnersOf(value: string | null | undefined): string[] {
+  try {
+    const parsed = JSON.parse(value ?? '[]') as unknown;
+    return Array.isArray(parsed) ? parsed.filter((name): name is string => typeof name === 'string') : [];
+  } catch {
+    return [];
+  }
 }

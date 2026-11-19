@@ -22,7 +22,8 @@ import { CircleAlert, CircleCheck, Clock, Lock, LockOpen, LoaderCircle } from 'l
 import { formatMonth } from '@/lib/semantic/periods';
 import type { ShellData } from '@/lib/dashboards/shell';
 import { resolveRange } from '@/lib/dashboards/range';
-import { ActiveFilters, DateRangeControl, type ActiveFilter } from './filter-bar';
+import { ActiveFilters, type ActiveFilter } from './filter-bar';
+import { PeriodControl } from './period-control';
 
 const CONSOLIDATED = 'ARG_TOTAL';
 
@@ -32,33 +33,48 @@ export function GlobalControls({ shell }: { shell: ShellData }) {
   const searchParams = useSearchParams();
   const [pending, startTransition] = useTransition();
 
-  const rawMonth = searchParams.get('month');
-  const month = normaliseMonth(rawMonth) ?? shell.defaultMonth;
+  const rawMonth = normaliseMonth(searchParams.get('month'));
   const division = searchParams.get('division') ?? (shell.consolidatedAvailable ? CONSOLIDATED : shell.divisions[0]?.divisionCode ?? CONSOLIDATED);
-
-  const selected = shell.months.find((m) => m.periodMonth === month);
-  const isClosed = selected?.isClosed ?? false;
+  const selectable = shell.months.map((m) => m.periodMonth);
 
   // Resolved with the same function the server uses, so the control can never
-  // display a range different from the one the page was rendered for.
+  // display a period different from the one the page was rendered for.
   const range = resolveRange(
     {
       from: searchParams.get('from') ?? undefined,
       to: searchParams.get('to') ?? undefined,
       range: searchParams.get('range') ?? undefined,
+      month: rawMonth && selectable.includes(rawMonth) ? rawMonth : undefined,
     },
-    month,
-    shell.months.map((m) => m.periodMonth),
+    shell.defaultMonth,
+    selectable,
   );
+  // The month the period ends in: what the P&L's month column reads.
+  const month = selectable.find((candidate) => candidate <= range.to) ?? shell.defaultMonth;
+
+  const selected = shell.months.find((m) => m.periodMonth === month);
+  const isClosed = selected?.isClosed ?? false;
+  const earliestDay = selectable[selectable.length - 1] ?? range.fromDay;
+  const latestDay = `${new Date().getUTCFullYear()}-12-31`;
 
   const owner = searchParams.get('owner');
 
   const activeFilters: ActiveFilter[] = [
-    ...(range.preset !== 'ytd'
-      ? [{ param: 'range', label: 'Dates', value: range.label, icon: 'date' as const }]
-      : []),
+    ...(range.preset !== 'ytd' ? [{ param: 'range', label: 'Dates', value: range.label, icon: 'date' as const }] : []),
     ...(owner ? [{ param: 'owner', label: 'Salesperson', value: owner, icon: 'person' as const }] : []),
   ];
+
+  function applyPeriod(next: { preset: string; fromDay: string; toDay: string }) {
+    const params = new URLSearchParams(searchParams.toString());
+    params.set('range', next.preset);
+    params.set('from', next.fromDay);
+    params.set('to', next.toDay);
+    const endMonth = `${next.toDay.slice(0, 7)}-01`;
+    const anchor = selectable.find((candidate) => candidate <= endMonth);
+    if (anchor) params.set('month', anchor.slice(0, 7));
+    else params.delete('month');
+    startTransition(() => router.push(`${pathname}?${params.toString()}`));
+  }
 
   function update(key: string, value: string) {
     const params = new URLSearchParams(searchParams.toString());
@@ -71,25 +87,10 @@ export function GlobalControls({ shell }: { shell: ShellData }) {
       className="sticky top-0 z-20 border-b backdrop-blur"
       style={{ background: 'color-mix(in srgb, var(--page) 88%, transparent)', borderColor: 'var(--border)' }}
     >
-      <div className="flex flex-wrap items-center gap-x-3 gap-y-2 px-6 py-2.5">
-        {/* One month selector, read by every dashboard. */}
-        <label className="sr-only" htmlFor="reporting-month">
-          Reporting month
-        </label>
-        <select
-          id="reporting-month"
-          value={month}
-          onChange={(event) => update('month', event.target.value.slice(0, 7))}
-          className="h-8 rounded-[var(--radius)] border px-2.5 text-[12px] font-medium outline-none"
-          style={{ background: 'var(--surface-1)', borderColor: 'var(--border-strong)', color: 'var(--text-primary)' }}
-        >
-          {shell.months.map((m) => (
-            <option key={m.periodMonth} value={m.periodMonth}>
-              {formatMonth(m.periodMonth)}
-              {m.isClosed ? '' : ' — open'}
-            </option>
-          ))}
-        </select>
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-2 px-4 py-2.5 md:px-6">
+        {/* One period control, read by every dashboard. */}
+        <span className="text-[11px] font-medium uppercase tracking-wide text-[var(--text-muted)]">Period</span>
+        <PeriodControl range={range} earliestDay={earliestDay} latestDay={latestDay} onApply={applyPeriod} />
 
         {/* §9: any one division, or ARG Total, or all five side by side. */}
         <label className="sr-only" htmlFor="division">
@@ -110,8 +111,6 @@ export function GlobalControls({ shell }: { shell: ShellData }) {
           ))}
         </select>
 
-        <DateRangeControl range={range} months={shell.months} />
-
         {pending ? (
           <LoaderCircle size={13} className="animate-spin text-[var(--text-muted)]" aria-label="Loading" />
         ) : null}
@@ -126,8 +125,12 @@ export function GlobalControls({ shell }: { shell: ShellData }) {
             {shell.accountingBasis} basis
           </span>
 
-          <PeriodBadge isClosed={isClosed} />
-          <ReconBadge failed={shell.recon.failed} total={shell.recon.total} />
+          <PeriodBadge isClosed={isClosed} month={month} />
+          <ReconBadge
+            failed={shell.recon.failed}
+            total={shell.recon.total}
+            failures={shell.recon.failures}
+          />
           <RefreshBadge iso={shell.lastRefreshedAt} />
         </div>
       </div>
@@ -151,60 +154,102 @@ function normaliseMonth(value: string | null): string | null {
   return null;
 }
 
-function PeriodBadge({ isClosed }: { isClosed: boolean }) {
+function PeriodBadge({ isClosed, month }: { isClosed: boolean; month: string }) {
+  const label = formatMonth(month);
   return isClosed ? (
     <span
       className="inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[11px] font-medium"
       style={{ background: 'var(--surface-2)', color: 'var(--text-secondary)' }}
-      title="Books are closed for this month. Figures are final unless restated through a new version."
+      title={`The books for ${label} are closed. These figures are final.`}
     >
       <Lock size={11} aria-hidden />
-      Closed
+      {label} closed · final
     </span>
   ) : (
     <span
       className="inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[11px] font-medium"
       style={{ background: 'var(--status-warning-wash)', color: 'var(--status-warning)' }}
-      title="Books are not closed. Everything on this page is preliminary and will change."
+      title={`The books for ${label} have not been closed yet, so these figures come straight from QuickBooks as it stands today and can still change — a late invoice, an accrual or a reclass. They become final when the month is closed.`}
     >
       <LockOpen size={11} aria-hidden />
-      Open — preliminary
+      Books not closed · may change
     </span>
   );
 }
 
-function ReconBadge({ failed, total }: { failed: number; total: number }) {
+/**
+ * The data-check status, and what is behind it.
+ *
+ * This used to be a bare "3 failing" linking to a page that did not exist. A
+ * red number nobody can open is worse than no number: it says something is
+ * wrong without saying what, or whether the figure in front of you is affected.
+ * It now opens in place and lists each failing check in words.
+ */
+function ReconBadge({
+  failed,
+  total,
+  failures,
+}: {
+  failed: number;
+  total: number;
+  failures: Array<{ name: string; month: string | null; detail: string }>;
+}) {
   if (total === 0) {
     return (
       <span
         className="inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[11px] font-medium"
         style={{ background: 'var(--surface-2)', color: 'var(--text-muted)' }}
-        title="Reconciliation checks have not run yet."
+        title="The data checks run after every pull. None has run yet."
       >
         <CircleAlert size={11} aria-hidden />
-        No checks run
+        Data checks not run yet
       </span>
     );
   }
 
   const ok = failed === 0;
   return (
-    <a
-      href="/admin/reconciliation"
-      className="inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[11px] font-medium"
-      style={{
-        background: ok ? 'var(--status-good-wash)' : 'var(--status-critical-wash)',
-        color: ok ? 'var(--status-good)' : 'var(--status-critical)',
-      }}
-      title={
-        ok
-          ? `All ${total} reconciliation checks pass. Figures tie to source.`
-          : `${failed} of ${total} reconciliation checks are failing. Figures on this page may not tie to source.`
-      }
-    >
-      {ok ? <CircleCheck size={11} aria-hidden /> : <CircleAlert size={11} aria-hidden />}
-      {ok ? `${total} checks pass` : `${failed} failing`}
-    </a>
+    <details className="relative">
+      <summary
+        className="inline-flex cursor-pointer list-none items-center gap-1.5 rounded-full px-2.5 py-1 text-[11px] font-medium"
+        style={{
+          background: ok ? 'var(--status-good-wash)' : 'var(--status-critical-wash)',
+          color: ok ? 'var(--status-good)' : 'var(--status-critical)',
+        }}
+      >
+        {ok ? <CircleCheck size={11} aria-hidden /> : <CircleAlert size={11} aria-hidden />}
+        {ok ? 'Ties to QuickBooks' : `${failed} data check${failed === 1 ? '' : 's'} failing`}
+      </summary>
+      <div
+        className="absolute right-0 z-30 mt-1.5 w-[min(420px,85vw)] rounded-[var(--radius)] border p-3 text-[11.5px] leading-relaxed shadow-lg"
+        style={{ background: 'var(--surface-1)', borderColor: 'var(--border)', color: 'var(--text-secondary)' }}
+      >
+        <p className="mb-2">
+          After every pull, {total} automatic checks confirm the figures agree with QuickBooks: each
+          division&apos;s P&amp;L ties to its accounts, ARG Total ties to QuickBooks&apos; own total, the
+          balance sheet balances and every class is assigned.
+        </p>
+        {ok ? (
+          <p style={{ color: 'var(--status-good)' }}>All {total} checks pass.</p>
+        ) : (
+          <ul className="space-y-2">
+            {failures.map((failure, index) => (
+              <li key={index} className="border-t pt-2" style={{ borderColor: 'var(--border)' }}>
+                <span className="font-medium text-[var(--text-primary)]">
+                  {failure.name}
+                  {failure.month ? ` — ${formatMonth(failure.month)}` : ''}
+                </span>
+                <br />
+                {failure.detail}
+              </li>
+            ))}
+            {failed > failures.length ? (
+              <li className="text-[var(--text-muted)]">…and {failed - failures.length} more in Admin → Data.</li>
+            ) : null}
+          </ul>
+        )}
+      </div>
+    </details>
   );
 }
 

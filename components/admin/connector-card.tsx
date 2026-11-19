@@ -40,10 +40,26 @@ export interface ConnectorCardProps {
   canManage: boolean;
 }
 
+const TAB_LABELS: Record<string, string> = {
+  monthly_budget: 'Monthly budget',
+  tenx_budget: '10X plan',
+  forecast: 'Forecast',
+  headcount: 'Headcount',
+};
+
+/** "Monthly budget ← “Monthly Budget ” · … · Headcount: no tab" — before anything is pulled. */
+function describeTabs(tabs: Record<string, string | null>): string {
+  const parts = Object.entries(TAB_LABELS).map(([entity, label]) =>
+    tabs[entity] ? `${label} ← “${tabs[entity]!.trim()}”` : `${label}: no tab found`,
+  );
+  return `Spreadsheet linked. ${parts.join(' · ')}. Pull Google Sheets from Data & pulls to load it.`;
+}
+
 export function ConnectorCard(props: ConnectorCardProps) {
   const router = useRouter();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
   const [showManual, setShowManual] = useState(false);
   const [fields, setFields] = useState<Record<string, string>>({});
 
@@ -66,6 +82,7 @@ export function ConnectorCard(props: ConnectorCardProps) {
       }
       setShowManual(false);
       setFields({});
+      if (payload.tabs) setNotice(describeTabs(payload.tabs as Record<string, string | null>));
       router.refresh();
     } catch {
       setError('The request did not complete.');
@@ -148,6 +165,9 @@ export function ConnectorCard(props: ConnectorCardProps) {
 
       {error && (
         <p className="mt-3 text-[11px] leading-relaxed text-[var(--status-critical)]">{error}</p>
+      )}
+      {notice && !error && (
+        <p className="mt-3 text-[11px] leading-relaxed" style={{ color: 'var(--status-good)' }}>{notice}</p>
       )}
 
       {props.needsCompanyId && (

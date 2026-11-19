@@ -4,6 +4,7 @@ import Decimal from 'decimal.js';
 import { CONSOLIDATED_CODE, type SemanticSession } from '@/lib/semantic/resolve';
 import { monthBounds, formatMonthShort, addMonths, monthRange } from '@/lib/semantic/periods';
 import { SERIES_SLOTS } from '@/lib/charts/colors';
+import { hasOption } from '@/lib/connectors/hubspot-fields';
 import {
   ViewSpecSchema,
   executeViewSpec,
@@ -53,6 +54,8 @@ export const PipelineViewSchema = z
         owners: z.array(z.string()).max(30).optional(),
         sources: z.array(z.string()).max(30).optional(),
         pipelines: z.array(z.string()).max(10).optional(),
+        /** HubSpot's Line of Business, by option label — "Background Checks". */
+        linesOfBusiness: z.array(z.string()).max(10).optional(),
         divisions: z.array(z.string()).max(8).optional(),
         minAmount: z.number().nonnegative().optional(),
         dateField: z.enum(['closedate', 'createdate']).optional(),
@@ -131,6 +134,14 @@ function executePipelineView(session: SemanticSession, spec: PipelineView): Exec
   const from = monthBounds(addMonths(session.period.month, -(months - 1))).start;
   const to = monthBounds(session.period.month).endExclusive;
 
+  // Stages and pipelines are matched and shown by NAME. A filter may name the
+  // id or the label; a chart grouped by stage reads "Proposal", not a number.
+  const stageLabel = new Map(bundle.dealStages.map((stage) => [stage.stageId, stage.label]));
+  const pipelineLabel = new Map(bundle.dealStages.map((stage) => [stage.pipelineId, stage.pipelineLabel]));
+  const named = (wanted: string[] | undefined, id: string | null, label: string | undefined) =>
+    !wanted?.length ||
+    wanted.some((value) => value === id || (label !== undefined && value.toLowerCase() === label.toLowerCase()));
+
   const deals = bundle.deals.filter((deal) => {
     if (deal.divisionCode !== null && !divisions.has(deal.divisionCode)) return false;
 
@@ -140,14 +151,20 @@ function executePipelineView(session: SemanticSession, spec: PipelineView): Exec
     if (status === 'lost' && !(deal.isClosed && !deal.isClosedWon)) return false;
     if (status === 'closed' && !deal.isClosed) return false;
 
-    if (filters.stages?.length && !filters.stages.includes(deal.dealstage ?? '')) return false;
+    if (!named(filters.stages, deal.dealstage, stageLabel.get(deal.dealstage ?? ''))) return false;
     if (filters.owners?.length && !filters.owners.includes(deal.ownerName ?? UNASSIGNED)) {
       return false;
     }
     if (filters.sources?.length && !filters.sources.includes(deal.sourceLabel ?? UNRECORDED)) {
       return false;
     }
-    if (filters.pipelines?.length && !filters.pipelines.includes(deal.pipeline ?? '')) return false;
+    if (!named(filters.pipelines, deal.pipeline, pipelineLabel.get(deal.pipeline ?? ''))) return false;
+    if (
+      filters.linesOfBusiness?.length &&
+      !filters.linesOfBusiness.some((value) => hasOption(deal.lineOfBusiness, value))
+    ) {
+      return false;
+    }
     if (filters.minAmount !== undefined && deal.amount.lessThan(filters.minAmount)) return false;
 
     // An open deal has no close date, so a range on closedate would empty the
@@ -162,13 +179,13 @@ function executePipelineView(session: SemanticSession, spec: PipelineView): Exec
   const keyOf = (deal: (typeof deals)[number]): string => {
     switch (spec.groupBy) {
       case 'stage':
-        return deal.dealstage ?? UNRECORDED;
+        return deal.dealstage ? (stageLabel.get(deal.dealstage) ?? deal.dealstage) : UNRECORDED;
       case 'owner':
         return deal.ownerName ?? UNASSIGNED;
       case 'source':
         return deal.sourceLabel ?? UNRECORDED;
       case 'pipeline':
-        return deal.pipeline ?? UNRECORDED;
+        return deal.pipeline ? (pipelineLabel.get(deal.pipeline) ?? deal.pipeline) : UNRECORDED;
       case 'month': {
         const date = dateField === 'closedate' ? deal.closedate : deal.createdate;
         if (!date) return UNRECORDED;
@@ -258,6 +275,7 @@ export function describeFilters(
 
   if (filters.owners?.length) parts.push(`owned by ${filters.owners.join(', ')}`);
   if (filters.sources?.length) parts.push(`sourced from ${filters.sources.join(', ')}`);
+  if (filters.linesOfBusiness?.length) parts.push(`Line of Business ${filters.linesOfBusiness.join(', ')}`);
   if (filters.stages?.length) parts.push(`in stage ${filters.stages.join(', ')}`);
   if (filters.pipelines?.length) parts.push(`in pipeline ${filters.pipelines.join(', ')}`);
   if (filters.minAmount) parts.push(`at least $${filters.minAmount.toLocaleString()}`);
@@ -288,14 +306,28 @@ export function pipelineViewJsonSchema(): Record<string, unknown> {
         additionalProperties: false,
         properties: {
           status: { type: 'string', enum: ['all', 'open', 'won', 'lost', 'closed'] },
-          stages: { type: 'array', items: { type: 'string' } },
+          stages: {
+            type: 'array',
+            items: { type: 'string' },
+            description: 'Stage names as HubSpot shows them, e.g. "Proposal" (ids also accepted).',
+          },
           owners: {
             type: 'array',
             items: { type: 'string' },
             description: 'Salesperson names exactly as they appear on deals.',
           },
           sources: { type: 'array', items: { type: 'string' } },
-          pipelines: { type: 'array', items: { type: 'string' } },
+          pipelines: {
+            type: 'array',
+            items: { type: 'string' },
+            description: 'Pipeline names, e.g. "Sales Pipeline" (ids also accepted).',
+          },
+          linesOfBusiness: {
+            type: 'array',
+            items: { type: 'string' },
+            description:
+              'HubSpot Line of Business values, e.g. "Background Checks". The HubSpot Leadership dashboard is Background Checks in the Sales Pipeline only.',
+          },
           divisions: { type: 'array', items: { type: 'string' } },
           minAmount: { type: 'number' },
           dateField: { type: 'string', enum: ['closedate', 'createdate'] },

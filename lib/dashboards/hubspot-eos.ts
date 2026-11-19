@@ -70,8 +70,14 @@ export interface EosViewModel {
   };
   discoveryCalls: { total: number; byRep: RepCount[] };
   demos: { total: number; byRep: RepCount[] };
-  pipelineAdded: { total: number; deals: number; byRep: RepAmount[]; bySource: SourceAmount[] };
-  closed: { total: number; deals: number; byRep: RepAmount[] };
+  pipelineAdded: {
+    total: number;
+    deals: number;
+    byRep: RepAmount[];
+    bySource: SourceAmount[];
+    dealIds: string[];
+  };
+  closed: { total: number; deals: number; byRep: RepAmount[]; dealIds: string[] };
   /** True when meetings loaded but none carries a type. */
   typesUnavailable: boolean;
   /** True when deals loaded but none carries a source. */
@@ -121,9 +127,9 @@ export function loadEosPanel(
   const inScope = (code: string | null) =>
     isConsolidated || (code !== null && code === divisionCode);
 
-  const rangeStart = monthBounds(options.range.from).start;
+  const rangeStart = options.range.start;
   // Exclusive, so the last month of the range is included whole.
-  const rangeEnd = monthBounds(options.range.to).endExclusive;
+  const rangeEnd = options.range.endExclusive;
   const within = (value: Date | null): boolean =>
     value !== null && value >= rangeStart && value < rangeEnd;
 
@@ -286,11 +292,13 @@ export function loadEosPanel(
       deals: added.length,
       byRep: amountByRep(added),
       bySource,
+      dealIds: added.map((deal) => deal.dealId),
     },
     closed: {
       total: wonTotal.toNumber(),
       deals: won.length,
       byRep: amountByRep(won),
+      dealIds: won.map((deal) => deal.dealId),
     },
     // "No meeting carries a type" and "no meetings loaded" are different facts
     // and must not render the same.

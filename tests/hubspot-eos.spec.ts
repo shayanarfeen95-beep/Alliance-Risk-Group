@@ -14,6 +14,7 @@
  * standardise; and a meeting logged without a type has to keep counting in the
  * total. Each of those is a way to be quietly wrong.
  */
+import { resolveRange } from '@/lib/dashboards/range';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createTestDb, loadSeededUser, type TestDb } from './helpers/db';
 import { seedDatabase } from '@/lib/seed/load';
@@ -39,7 +40,7 @@ let runId: string;
  */
 const MONTH = '2026-08-01';
 
-const RANGE = { from: '2026-08-01', to: '2026-08-01', preset: 'this_month' as const, label: 'Aug 2026' };
+const RANGE = resolveRange({ from: '2026-08-01', to: '2026-08-31' }, '2026-08-01', ['2026-08-01']);
 
 function batch(entity: string, payloads: unknown[]): RawBatch {
   return {

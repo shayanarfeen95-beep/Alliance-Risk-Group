@@ -61,3 +61,22 @@ describe('a provider error inside a delivered proxy call', () => {
     expect(unwrapForTest<typeof page>({ data: page }, 'the deals request')).toEqual(page);
   });
 });
+
+describe('a provider body handed back as text', () => {
+  // What failed every Google Sheets pull: the proxy reached Google, and Composio
+  // returned Google's JSON as a string. "The response carried: string."
+  it('parses a JSON body that arrives as a string inside the proxy envelope', () => {
+    const sheets = { sheets: [{ properties: { title: 'Budget' } }] };
+    const response = { data: { status: 200, headers: {}, data: JSON.stringify(sheets) } };
+    expect(unwrapForTest<typeof sheets>(response, 'the tab listing')).toEqual(sheets);
+  });
+
+  it('parses a bare JSON string body', () => {
+    const values = { range: 'Budget!A1:B2', values: [['a', 'b']] };
+    expect(unwrapForTest<typeof values>({ data: JSON.stringify(values) }, 'the range')).toEqual(values);
+  });
+
+  it('leaves a plain string alone', () => {
+    expect(unwrapForTest<string>({ data: 'OK' }, 'the ping')).toBe('OK');
+  });
+});
