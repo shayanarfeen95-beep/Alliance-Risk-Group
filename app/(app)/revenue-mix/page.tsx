@@ -113,7 +113,10 @@ export default async function RevenueMixPage({ searchParams }: { searchParams: P
                 { id: 'existing', label: 'Existing customers', color: 'var(--series-1)' },
                 { id: 'netNew', label: 'Net new', color: 'var(--series-3)' },
               ]}
-              data={mix.lines.map((line) => ({ x: line.key, xLabel: line.label, existing: line.existing, netNew: line.netNew }))}
+              data={mix.lines
+                // A sliver (e.g. a small credit on no class) stays in the table, not the chart's scale.
+                .filter((line) => Math.abs(line.total) >= Math.abs(mix.total.total) * 0.01)
+                .map((line) => ({ x: line.key, xLabel: line.label, existing: line.existing, netNew: line.netNew }))}
               form="stackedBar"
               valueFormat="currency"
               height={280}
