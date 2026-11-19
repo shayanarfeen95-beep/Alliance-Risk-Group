@@ -85,6 +85,7 @@ const ROW_SOURCE: Record<string, () => { table: string; column?: string; kind?: 
   'QBO:customers': () => ({ table: 'dim_qbo_customer' }),
   'QBO:invoices': () => ({ table: 'fact_invoice' }),
   'QBO:book_close': () => ({ table: 'dim_period' }),
+  'QBO:customer_income': () => ({ table: 'fact_customer_revenue' }),
   'HUBSPOT:mql_contacts': () => ({ table: 'fact_contact', column: 'mql_entered_at' }),
   'SHEETS:monthly_budget': () => ({ table: 'fact_budget' }),
   'SHEETS:tenx_budget': () => ({ table: 'fact_budget' }),

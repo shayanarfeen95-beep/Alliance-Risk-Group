@@ -141,6 +141,13 @@
       "when": 1789140000000,
       "tag": "0019_chat_threads",
       "breakpoints": true
+    },
+    {
+      "idx": 20,
+      "version": "7",
+      "when": 1789150000000,
+      "tag": "0020_customer_revenue",
+      "breakpoints": true
     }
   ]
 }

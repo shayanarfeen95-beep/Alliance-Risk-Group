@@ -1093,6 +1093,29 @@ export const factInvoice = pgTable(
 );
 
 /**
+ * Revenue by customer, month and QuickBooks class (business line), from the
+ * Income by Customer report. `class_key` 'ALL' is the unfiltered company report,
+ * which also holds revenue on no class.
+ */
+export const factCustomerRevenue = pgTable(
+  'fact_customer_revenue',
+  {
+    periodMonth: date('period_month').notNull(),
+    classKey: text('class_key').notNull(),
+    className: text('class_name'),
+    divisionCode: text('division_code'),
+    customerId: text('customer_id').notNull(),
+    customerName: text('customer_name'),
+    income: money('income').notNull().default('0'),
+    loadRunId: uuid('load_run_id').references(() => loadRun.id),
+  },
+  (t) => [
+    primaryKey({ columns: [t.periodMonth, t.classKey, t.customerId], name: 'fact_customer_revenue_pk' }),
+    index('fact_customer_revenue_customer_idx').on(t.customerId, t.periodMonth),
+  ],
+);
+
+/**
  * Which QuickBooks customer a HubSpot company is — when a person has decided.
  *
  * Suggested matches are computed, never stored: only Westport's confirmation,

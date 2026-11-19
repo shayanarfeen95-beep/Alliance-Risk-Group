@@ -209,6 +209,82 @@ async function inactiveOwnerNames(db: Database): Promise<string[]> {
   return [...new Set([...latest.values()].filter((owner) => owner.archived && !active.has(owner.name)).map((o) => o.name))].sort();
 }
 
+/**
+ * One month of Income by Customer for one class (or 'ALL'), replaced whole.
+ *
+ * Only a report's own customer rows are stored — not a section's header or its
+ * summary — so a parent's total is never added on top of its jobs; the
+ * analysis rolls jobs up to their parent from the customer list.
+ */
+export async function conformCustomerIncome(
+  db: Database,
+  loadRunId: string,
+  payload: unknown,
+  lookup: DivisionLookup,
+  notes: string[],
+): Promise<number> {
+  const { month, classId, className, report } = payload as {
+    month: string;
+    classId: string;
+    className: string;
+    report: QboReport;
+  };
+  if (!month || !classId || !report) return 0;
+
+  const columns = report.Columns?.Column ?? [];
+  let incomeIndex = columns.findIndex((column) => /^\s*(total\s+)?income\s*$/i.test(column.ColTitle ?? ''));
+  if (incomeIndex < 0) incomeIndex = columns.findIndex((column) => column.ColType === 'Money');
+  if (incomeIndex < 0) {
+    notes.push(`Income by Customer for ${month.slice(0, 7)} (${className}) had no income column; nothing was written.`);
+    return 0;
+  }
+
+  const divisionCode =
+    classId === 'ALL'
+      ? null
+      : (resolveDivision(lookup, classId, className) ?? (isExcluded(lookup, classId, className) ? 'EXCLUDED' : null));
+
+  const byCustomer = new Map<string, { name: string; income: Decimal }>();
+  const walk = (rows: QboRow[] | undefined) => {
+    for (const row of rows ?? []) {
+      if (row.Rows?.Row) walk(row.Rows.Row);
+      const cells = row.ColData;
+      if (!cells?.length) continue;
+      const name = cells[0]?.value?.trim() ?? '';
+      const id = cells[0]?.id ?? (name ? `name:${name}` : '');
+      if (!id || /^total/i.test(name)) continue;
+      const value = amount(cells[incomeIndex]);
+      if (value.isZero()) continue;
+      const entry = byCustomer.get(id) ?? { name, income: new Decimal(0) };
+      entry.income = entry.income.plus(value);
+      byCustomer.set(id, entry);
+    }
+  };
+  walk(report.Rows?.Row);
+
+  await db
+    .delete(t.factCustomerRevenue)
+    .where(sql`${t.factCustomerRevenue.periodMonth} = ${month} and ${t.factCustomerRevenue.classKey} = ${classId}`);
+  const values = [...byCustomer.entries()].map(([customerId, entry]) => ({
+    periodMonth: month,
+    classKey: classId,
+    className,
+    divisionCode,
+    customerId,
+    customerName: entry.name,
+    income: entry.income.toFixed(4),
+    loadRunId,
+  }));
+  for (let i = 0; i < values.length; i += 500) {
+    await db.insert(t.factCustomerRevenue).values(values.slice(i, i + 500));
+  }
+  if (classId === 'ALL' && values.length) {
+    const total = values.reduce((sum, row) => sum.plus(row.income), new Decimal(0));
+    notes.push(`${month.slice(0, 7)}: ${values.length} customers billed $${total.toFixed(0)} of income.`);
+  }
+  return values.length;
+}
+
 /** Periods are a dimension with a foreign key; a month must exist to be written. */
 async function ensurePeriods(db: Database, months: string[]): Promise<Set<string>> {
   const closed = new Set<string>();
@@ -3216,6 +3292,12 @@ async function conformInTransaction(
     // Billing by customer — not monthly reports, so before the per-month loop.
     if (batch.entity === 'customers') {
       rowsWritten += await conformQboCustomers(db, loadRunId, batch.records.map((record) => record.payload), notes);
+      return { rowsWritten, notes };
+    }
+    if (batch.entity === 'customer_income') {
+      for (const record of batch.records) {
+        rowsWritten += await conformCustomerIncome(db, loadRunId, record.payload, lookup, notes);
+      }
       return { rowsWritten, notes };
     }
     if (batch.entity === 'book_close') {

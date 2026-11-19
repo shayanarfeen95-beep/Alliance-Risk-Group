@@ -14,6 +14,7 @@ import { formatNumber } from '@/lib/format';
 import { companyPl, hasPl, isOtherClassCode, sumPl, key } from '@/lib/semantic/facts';
 import { connectorStatuses, getConnector, type SourceSystemCode } from '@/lib/connectors';
 import { executeViewSpec, viewSpecJsonSchema, ViewSpecError } from './viewspec';
+import { loadRevenueMix } from '@/lib/billing/revenue-mix';
 import { executeSavedView, pipelineViewJsonSchema } from '@/lib/views/spec';
 import { listViews, saveView } from '@/lib/views/store';
 import type { ChartCardProps } from '@/components/charts/chart-card';
@@ -1620,6 +1621,83 @@ const getLeadershipReview: ToolDefinition = {
  * billed": each won HubSpot account beside the QuickBooks invoices of the
  * customer it is matched to. Nothing here is computed by the model.
  */
+/**
+ * Existing customers against net-new revenue, by business line — the Revenue
+ * mix page. Westport asked the assistant this ("SHRC work … then just
+ * Background Screening") and it had nothing to answer from.
+ */
+const getRevenueMix: ToolDefinition = {
+  name: 'get_revenue_mix',
+  description:
+    'Of total revenue, how much came from EXISTING customers and how much is NET NEW, by business line (QuickBooks class grouped into ARG divisions such as SHRC, LITS, Claims), for any months — plus existing-customer growth against the same months last year, the largest net-new customers, and the existing customers growing or declining most. Existing = the customer earned income in that business line in an earlier month; at ARG Total, in any line. From QuickBooks Income by Customer, accrual basis. Use for "existing vs new revenue", "how much of SHRC revenue is new business", "net new by division for the 2027 budget".',
+  input_schema: {
+    type: 'object',
+    additionalProperties: false,
+    properties: {
+      from: { type: 'string', description: 'First month, YYYY-MM. Defaults to January of the reporting year.' },
+      to: { type: 'string', description: 'Last month, YYYY-MM. Defaults to the reporting month.' },
+      division: { type: 'string', description: 'A division code or name (e.g. "SHRC"); omit for every business line.' },
+    },
+  },
+  async run(input, context) {
+    if (!context.session.consolidatedAvailable) {
+      return {
+        result: { available: false, explanation: 'Revenue by customer covers the whole company; it is available only to people who can see ARG Total.' },
+      };
+    }
+    const month = context.session.period.month;
+    const asMonth = (value: unknown) =>
+      typeof value === 'string' && /^\d{4}-\d{2}/.test(value) ? (`${value.slice(0, 7)}-01` as MonthKey) : null;
+    const to = asMonth(input.to) ?? month;
+    const from = asMonth(input.from) ?? (`${to.slice(0, 4)}-01-01` as MonthKey);
+    const months: MonthKey[] = [];
+    for (let cursor = from; cursor <= to; ) {
+      months.push(cursor);
+      const [y, m] = cursor.split('-').map(Number) as [number, number];
+      cursor = `${m === 12 ? y + 1 : y}-${String(m === 12 ? 1 : m + 1).padStart(2, '0')}-01` as MonthKey;
+      if (months.length > 48) break;
+    }
+    const wanted = typeof input.division === 'string' ? input.division.trim().toLowerCase() : '';
+    const division = wanted
+      ? context.session.bundle.divisions.find(
+          (d) => d.divisionCode.toLowerCase() === wanted || d.divisionName.toLowerCase().includes(wanted),
+        )?.divisionCode ?? null
+      : null;
+    const mix = await loadRevenueMix(context.db, context.session, { months, divisionCode: division });
+    const money = (value: number) => formatNumber(value, 'currency');
+    const line = (row: (typeof mix.lines)[number]) => ({
+      businessLine: row.label,
+      quickBooksClasses: row.classes,
+      revenue: money(row.total),
+      existing: money(row.existing),
+      netNew: money(row.netNew),
+      existingShare: row.total ? `${Math.round((row.existing / row.total) * 100)}%` : null,
+      existingCustomers: row.existingCustomers,
+      newCustomers: row.newCustomers,
+      existingSameMonthsLastYear: money(row.existingPriorYear),
+      existingGrowth: money(row.existingGrowth),
+    });
+    return {
+      result: {
+        period: `${from.slice(0, 7)} to ${to.slice(0, 7)}`,
+        unavailable: mix.unavailable,
+        customerHistoryFrom: mix.historyFrom,
+        monthsOfHistoryBeforePeriod: mix.monthsOfHistory,
+        rule: 'Existing = earned income in that business line in an earlier loaded month (at ARG Total: in any line). Net new = did not. Jobs count as their parent customer.',
+        total: line(mix.total),
+        byBusinessLine: mix.lines.map(line),
+        byMonth: mix.byMonth.map((point) => ({ month: point.month.slice(0, 7), existing: money(point.existing), netNew: money(point.netNew) })),
+        largestNetNew: mix.topNew.map((c) => ({ customer: c.name, businessLine: c.line, revenue: money(c.revenue), firstBilled: c.firstMonth })),
+        existingGrowingMost: mix.topGrowth.map((c) => ({ customer: c.name, businessLine: c.line, revenue: money(c.revenue), sameMonthsLastYear: money(c.priorYear) })),
+        existingDecliningMost: mix.topDecline.map((c) => ({ customer: c.name, businessLine: c.line, revenue: money(c.revenue), sameMonthsLastYear: money(c.priorYear) })),
+        page: '/revenue-mix',
+      },
+      activity: `Split revenue into existing and net-new customers, ${from.slice(0, 7)} to ${to.slice(0, 7)}`,
+      citations: [{ label: 'Revenue (Income by Customer)', value: String(Math.round(mix.total.total)), source: 'QBO' }],
+    };
+  },
+};
+
 const getAccountBilling: ToolDefinition = {
   name: 'get_account_billing',
   description:
@@ -1828,6 +1906,7 @@ export const AGENT_TOOLS: ToolDefinition[] = [
   findDeals,
   getLeadershipReview,
   getAccountBilling,
+  getRevenueMix,
   saveViewTool,
   listSavedViews,
   listSources,

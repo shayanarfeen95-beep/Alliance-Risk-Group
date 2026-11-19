@@ -15,6 +15,7 @@ import {
   Filter,
   LayoutGrid,
   Receipt,
+  PieChart,
   Menu,
   X,
 } from 'lucide-react';
@@ -38,6 +39,7 @@ const NAV_GROUPS: Array<{ label: string; items: Array<{ href: string; label: str
       { href: '/sales', label: 'Sales', icon: TrendingUp },
       { href: '/hubspot', label: 'HubSpot Leadership', icon: Filter },
       { href: '/accounts', label: 'Account billing', icon: Receipt },
+      { href: '/revenue-mix', label: 'Revenue mix', icon: PieChart },
       { href: '/marketing', label: 'Marketing', icon: Megaphone },
       { href: '/views', label: 'Views', icon: LayoutGrid },
     ],

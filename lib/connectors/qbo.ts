@@ -115,6 +115,15 @@ const ENTITIES: EntityDescriptor[] = [
     description:
       'What each customer was billed and when, from the start of last year: total less sales tax, credit memos netted. After the first pull only what changed is read.',
   },
+  // Revenue by customer and business line: which revenue is existing customers
+  // and which is new business.
+  {
+    entity: 'customer_income',
+    label: 'Revenue by customer and business line',
+    cadence: 'DAILY',
+    description:
+      'QuickBooks’ Income by Customer report, month by month and once per class, so each customer’s revenue is known per business line — and total revenue can be split into existing customers and net-new ones. Ties to the P&L’s income, accrual basis.',
+  },
   // Last, so a month's final figures have landed before it is marked closed.
   {
     entity: 'book_close',
@@ -425,6 +434,65 @@ interface BillingCursor {
   start: number;
 }
 
+/**
+ * Income by Customer, one month and one class at a time.
+ *
+ * Westport, November 2026: "how much revenue will come from existing clients vs.
+ * net new … by business line." The report filtered to one class gives each
+ * customer's Income in that class — a plain three-column report, nothing to
+ * guess about. One more call per month without a class is the company total,
+ * so revenue on no class is not lost from ARG Total. Resumable between calls.
+ */
+async function fetchCustomerIncome(
+  window: FetchWindow,
+  options: FetchOptions | undefined,
+): Promise<{ records: RawRecord[]; nextCursor: string | null }> {
+  const classes = (
+    (await callApi('query', { query: 'select Id, Name, FullyQualifiedName from Class maxresults 1000' })) as {
+      QueryResponse?: { Class?: Array<{ Id?: string; Name?: string; FullyQualifiedName?: string }> };
+    }
+  ).QueryResponse?.Class ?? [];
+  const passes: Array<{ id: string; name: string }> = [
+    ...classes.filter((c) => c.Id).map((c) => ({ id: String(c.Id), name: c.FullyQualifiedName ?? c.Name ?? String(c.Id) })),
+    { id: 'ALL', name: 'All' },
+  ];
+
+  const inWindow = monthsInWindow(window);
+  const months = options?.months ? inWindow.filter((month) => options.months!.includes(month)) : inWindow;
+  let cursor = { month: 0, pass: 0 };
+  if (options?.cursor) {
+    try {
+      cursor = JSON.parse(options.cursor) as typeof cursor;
+    } catch {
+      // A cursor this code did not write is a fresh start.
+    }
+  }
+
+  const records: RawRecord[] = [];
+  for (let m = cursor.month; m < months.length; m++) {
+    const month = months[m]!;
+    for (let p = m === cursor.month ? cursor.pass : 0; p < passes.length; p++) {
+      const pass = passes[p]!;
+      const report = await callApi('reports/CustomerIncome', {
+        start_date: month,
+        end_date: lastDayOfMonth(month),
+        accounting_method: 'Accrual',
+        ...(pass.id === 'ALL' ? {} : { class: pass.id }),
+      });
+      records.push({
+        entity: 'customer_income',
+        key: `${month}|${pass.id}`,
+        payload: { month, classId: pass.id, className: pass.name, report },
+      });
+      const next = p + 1 < passes.length ? { month: m, pass: p + 1 } : { month: m + 1, pass: 0 };
+      if (next.month < months.length && budgetSpent(options, records.length)) {
+        return { records, nextCursor: JSON.stringify(next) };
+      }
+    }
+  }
+  return { records, nextCursor: null };
+}
+
 async function fetchBilling(
   options: FetchOptions | undefined,
 ): Promise<{ records: RawRecord[]; nextCursor: string | null; watermark: Date | null }> {
@@ -583,6 +651,17 @@ export const qboConnector: SourceConnector = {
         const payload = await callApi('query', { query: 'select * from Preferences' });
         records = [{ entity: 'book_close', key: 'preferences', payload }];
         break;
+      }
+      case 'customer_income': {
+        const income = await fetchCustomerIncome(window, options);
+        return {
+          sourceSystem: 'QBO',
+          entity,
+          window,
+          records: income.records,
+          fetchedAt: new Date(),
+          nextCursor: income.nextCursor,
+        };
       }
       case 'invoices': {
         const billing = await fetchBilling(options);
