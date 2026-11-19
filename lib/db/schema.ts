@@ -603,6 +603,8 @@ export const factDeal = pgTable(
     lineOfBusiness: text('line_of_business'),
     /** HubSpot's "Date Compliance Review Completed" — a deal property, not a meeting. */
     complianceReviewCompletedAt: timestamp('compliance_review_completed_at', { withTimezone: true }),
+    /** HubSpot's "Estimated Close Date", when the portal has the field. */
+    estimatedCloseDate: timestamp('estimated_close_date', { withTimezone: true }),
     /** HubSpot's "Created by": a user id, which is not an owner id. */
     createdByUserId: text('created_by_user_id'),
     /** That user's name, resolved from the owners list at load. */

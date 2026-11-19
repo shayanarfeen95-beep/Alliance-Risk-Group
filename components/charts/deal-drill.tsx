@@ -47,7 +47,9 @@ export function useDeals(): Map<string, DealRow> | null {
   return useContext(DealContext);
 }
 
-type SortKey = 'amount' | 'billed' | 'name' | 'owner' | 'closed' | 'created';
+type SortKey =
+  | 'amount' | 'billed' | 'ofBooked' | 'name' | 'company' | 'owner' | 'stage'
+  | 'closed' | 'created' | 'reviewed' | 'source' | 'expectedClose';
 
 export function DealList({
   title,
@@ -63,6 +65,7 @@ export function DealList({
   const deals = useDeals();
   const billing = useContext(BillingContext);
   const [sort, setSort] = useState<SortKey>('amount');
+  const [dir, setDir] = useState<1 | -1>(-1);
   const [period, setPeriod] = useState<BillingPeriod>({ kind: 'since_won' });
 
   const accountFor = (row: DealRow): DealBilling | null => {
@@ -79,17 +82,29 @@ export function DealList({
   const rows = useMemo(() => {
     if (!deals) return [];
     const unique = [...new Set(ids)].map((id) => deals.get(id)).filter((row): row is DealRow => Boolean(row));
-    const compare: Record<SortKey, (a: DealRow, b: DealRow) => number> = {
-      amount: (a, b) => b.amount - a.amount,
-      billed: (a, b) => (billedFor(b) ?? -1) - (billedFor(a) ?? -1),
-      name: (a, b) => a.name.localeCompare(b.name),
-      owner: (a, b) => a.owner.localeCompare(b.owner),
-      closed: (a, b) => (b.closed ?? '').localeCompare(a.closed ?? ''),
-      created: (a, b) => (b.created ?? '').localeCompare(a.created ?? ''),
+    // Ascending comparisons; the direction is applied once, below.
+    const text = (a: string | null | undefined, b: string | null | undefined) => (a ?? '').localeCompare(b ?? '');
+    const ofBooked = (row: DealRow) => {
+      const billed = billedFor(row);
+      return billed === null || row.amount <= 0 ? -1 : billed / row.amount;
     };
-    return unique.sort(compare[sort]);
+    const compare: Record<SortKey, (a: DealRow, b: DealRow) => number> = {
+      amount: (a, b) => a.amount - b.amount,
+      billed: (a, b) => (billedFor(a) ?? -1) - (billedFor(b) ?? -1),
+      ofBooked: (a, b) => ofBooked(a) - ofBooked(b),
+      name: (a, b) => text(a.name, b.name),
+      company: (a, b) => text(a.company, b.company),
+      owner: (a, b) => text(a.owner, b.owner),
+      stage: (a, b) => text(a.stage, b.stage),
+      closed: (a, b) => text(a.closed, b.closed),
+      created: (a, b) => text(a.created, b.created),
+      reviewed: (a, b) => text(a.reviewed, b.reviewed),
+      source: (a, b) => text(a.source, b.source),
+      expectedClose: (a, b) => text(a.expectedClose, b.expectedClose),
+    };
+    return unique.sort((a, b) => compare[sort](a, b) * dir);
     // billedFor reads billing and period, both listed here.
-  }, [deals, ids, sort, billing, period]);
+  }, [deals, ids, sort, dir, billing, period]);
 
   if (!deals) return null;
   const total = rows.reduce((sum, row) => sum + row.amount, 0);
@@ -107,25 +122,33 @@ export function DealList({
   }
   const billedTotal = [...billedAccounts.values()].reduce((sum, value) => sum + value, 0);
 
-  const header = (key: SortKey | null, label: string, align: 'left' | 'right' = 'left') => (
-    <th
-      className={`border-b px-2.5 py-1.5 text-[10px] font-semibold uppercase tracking-[0.06em] ${align === 'right' ? 'text-right' : 'text-left'}`}
-      style={{ borderColor: 'var(--border)', color: 'var(--text-muted)' }}
-    >
-      {key ? (
+  // Every column sorts. Click again to reverse.
+  const header = (key: SortKey, label: string, align: 'left' | 'right' = 'left') => {
+    const active = sort === key;
+    return (
+      <th
+        aria-sort={active ? (dir === 1 ? 'ascending' : 'descending') : 'none'}
+        className={`whitespace-nowrap border-b px-2.5 py-1.5 text-[10px] font-semibold uppercase tracking-[0.06em] ${align === 'right' ? 'text-right' : 'text-left'}`}
+        style={{ borderColor: 'var(--border)', color: active ? 'var(--text-primary)' : 'var(--text-muted)' }}
+      >
         <button
           type="button"
-          onClick={() => setSort(key)}
-          className="uppercase hover:text-[var(--text-primary)]"
-          style={{ fontWeight: sort === key ? 700 : 600 }}
+          onClick={() => {
+            if (active) setDir(dir === 1 ? -1 : 1);
+            else {
+              setSort(key);
+              setDir(align === 'right' ? -1 : 1);
+            }
+          }}
+          className="inline-flex items-center gap-1 uppercase hover:text-[var(--text-primary)]"
+          title={`Sort by ${label.toLowerCase()}`}
         >
           {label}
+          <span aria-hidden className="text-[9px]">{active ? (dir === 1 ? '▲' : '▼') : '↕'}</span>
         </button>
-      ) : (
-        label
-      )}
-    </th>
-  );
+      </th>
+    );
+  };
 
   return (
     <div
@@ -156,20 +179,21 @@ export function DealList({
         <p className="px-3 py-2.5 text-[11.5px] text-[var(--text-muted)]">{emptyLabel}</p>
       ) : (
         <div className="max-h-[320px] overflow-auto">
-          <table className={`w-full ${showBilling ? 'min-w-[940px]' : 'min-w-[760px]'} border-collapse text-[11.5px]`}>
+          <table className={`w-full ${showBilling ? 'min-w-[1020px]' : 'min-w-[840px]'} border-collapse text-[11.5px]`}>
             <thead className="sticky top-0" style={{ background: 'var(--surface-2)' }}>
               <tr>
                 {header('name', 'Deal')}
-                {header(null, 'Company')}
+                {header('company', 'Company')}
                 {header('owner', 'Owner')}
-                {header(null, 'Stage')}
+                {header('stage', 'Stage')}
                 {header('amount', 'Amount', 'right')}
                 {showBilling ? header('billed', 'Billed', 'right') : null}
-                {showBilling ? header(null, 'Of booked', 'right') : null}
+                {showBilling ? header('ofBooked', 'Of booked', 'right') : null}
                 {header('created', 'Created')}
                 {header('closed', 'Closed')}
-                {header(null, 'Review done')}
-                {header(null, 'Lead source')}
+                {header('expectedClose', 'Est. close')}
+                {header('reviewed', 'Review done')}
+                {header('source', 'Lead source')}
               </tr>
             </thead>
             <tbody>
@@ -196,6 +220,9 @@ export function DealList({
                   {showBilling ? <BilledCells row={row} account={accountFor(row)} billed={billedFor(row)} /> : null}
                   <Cell>{row.created ?? '—'}</Cell>
                   <Cell>{row.closed ?? '—'}</Cell>
+                  <Cell title={row.status === 'Open' ? 'Estimated close date (HubSpot)' : undefined}>
+                    {row.status === 'Open' ? (row.expectedClose ?? '—') : '—'}
+                  </Cell>
                   <Cell>{row.reviewed ?? '—'}</Cell>
                   <Cell>{row.source}</Cell>
                 </tr>

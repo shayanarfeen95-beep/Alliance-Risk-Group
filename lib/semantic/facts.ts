@@ -114,6 +114,8 @@ export interface DealRecord {
   lineOfBusiness: string | null;
   /** HubSpot's Date Compliance Review Completed. */
   complianceReviewCompletedAt: Date | null;
+  /** HubSpot's "Estimated Close Date", when the portal has the field. */
+  estimatedCloseDate: Date | null;
   /** Who created the deal in HubSpot (a user, not necessarily the owner). */
   createdByName: string | null;
   companyId: string | null;
@@ -521,6 +523,7 @@ export async function loadFactBundle(
         dealType: t.factDeal.dealType,
         lineOfBusiness: t.factDeal.lineOfBusiness,
         complianceReviewCompletedAt: t.factDeal.complianceReviewCompletedAt,
+        estimatedCloseDate: t.factDeal.estimatedCloseDate,
         createdByName: t.factDeal.createdByName,
         companyId: t.factDeal.companyId,
       })
@@ -815,6 +818,7 @@ export async function loadFactBundle(
       dealType: row.dealType,
       lineOfBusiness: row.lineOfBusiness,
       complianceReviewCompletedAt: row.complianceReviewCompletedAt,
+      estimatedCloseDate: row.estimatedCloseDate,
       createdByName: row.createdByName,
       companyId: row.companyId,
     })),

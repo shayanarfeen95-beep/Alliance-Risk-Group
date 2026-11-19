@@ -20,6 +20,11 @@ export interface DealRow {
   closed: string | null;
   /** Date Compliance Review Completed. */
   reviewed: string | null;
+  /**
+   * When it is expected to close: HubSpot's Estimated Close Date, or, on an
+   * open deal, its Close Date (which HubSpot uses as the expected date).
+   */
+  expectedClose: string | null;
   source: string;
   lineOfBusiness: string | null;
   createdBy: string | null;
@@ -43,6 +48,7 @@ export function toDealRow(
     created: day(deal.createdate),
     closed: deal.isClosed ? day(deal.closedate) : null,
     reviewed: day(deal.complianceReviewCompletedAt),
+    expectedClose: day(deal.estimatedCloseDate ?? (deal.isClosed ? null : deal.closedate)),
     source: deal.sourceLabel ?? 'Not recorded',
     lineOfBusiness: deal.lineOfBusiness,
     createdBy: deal.createdByName,

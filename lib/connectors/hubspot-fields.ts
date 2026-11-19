@@ -54,6 +54,13 @@ export const LEADERSHIP_FIELDS = {
     match: [/^\s*date compliance review completed\s*$/i, /compliance review (completed|complete|date)/i],
     fallback: ['date_compliance_review_completed', 'compliance_review_completed'],
   },
+  /** "Estimated Close Date should be listed … it is a HUBSPOT field." */
+  estimatedCloseDate: {
+    object: 'deals',
+    label: 'Estimated Close Date',
+    match: [/^\s*est(imated|\.)?\s*close\s*date\s*$/i, /estimated\s+close/i, /expected\s+close\s+date/i],
+    fallback: ['estimated_close_date', 'est_close_date'],
+  },
   contactLeadSource: {
     object: 'contacts',
     label: 'Lead Source',
@@ -84,7 +91,7 @@ export const CONTACT_MQL_ENTERED = 'hs_v2_date_entered_marketingqualifiedlead';
  */
 export const HUBSPOT_FIELDS_VERSION: Partial<Record<string, string>> = {
   // Line of Business, Date Compliance Review Completed, Created by.
-  deals: '2026-10-29.leadership',
+  deals: '2026-11-19.estimated-close',
   // Also every contact whose Lead Source is one of the SQL sources.
   mql_contacts: '2026-10-30.lead-source',
 };

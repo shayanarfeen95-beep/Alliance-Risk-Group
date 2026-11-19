@@ -1841,6 +1841,7 @@ async function conformDeals(
       complianceReviewCompletedAt: date(
         readField(LEADERSHIP_FIELDS.complianceReviewCompleted, p, catalog),
       ),
+      estimatedCloseDate: date(readField(LEADERSHIP_FIELDS.estimatedCloseDate, p, catalog)),
       createdByUserId: createdBy,
       createdByName: createdBy ? (userNames.get(createdBy) ?? null) : null,
       companyId: record.associations?.companies?.results?.[0]?.id ?? null,

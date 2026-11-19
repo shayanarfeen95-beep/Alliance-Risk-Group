@@ -1399,7 +1399,7 @@ function dayBound(value: unknown, end: boolean): Date | null {
 const findDeals: ToolDefinition = {
   name: 'find_deals',
   description:
-    'List HubSpot deals by name with their company, owner (for a won deal, who closed it), amount, stage, dates, lead source and Line of Business. Filter by status, owner, stage, pipeline, lead source, Line of Business, company, amount and by close, create or compliance-review dates. Use for "which deals closed in September and who closed them", "what is in Proposal", "Mario\'s open deals over $20k". Set leadershipScope to read the same deals as the HubSpot Leadership dashboard (Line of Business Background Checks, Sales Pipeline).',
+    'List HubSpot deals by name with their company, owner (for a won deal, who closed it), amount, stage, dates, lead source and Line of Business. Filter by status, owner, stage, pipeline, lead source, Line of Business, company, amount and by close, create, compliance-review or ESTIMATED CLOSE dates (HubSpot\'s Estimated Close Date). Use for "which deals closed in September and who closed them", "what is in Proposal", "Mario\'s open deals over $20k", "which deals will close by 12/31" (status open, expectedCloseTo). Set leadershipScope to read the same deals as the HubSpot Leadership dashboard (Line of Business Background Checks, Sales Pipeline).',
   input_schema: {
     type: 'object',
     additionalProperties: false,
@@ -1415,6 +1415,12 @@ const findDeals: ToolDefinition = {
       createdTo: { type: 'string' },
       reviewedFrom: { type: 'string', description: 'Date Compliance Review Completed, from.' },
       reviewedTo: { type: 'string', description: 'Date Compliance Review Completed, to.' },
+      expectedCloseFrom: {
+        type: 'string',
+        description:
+          'Estimated Close Date (HubSpot), from — for "which deals will close by 12/31". Open deals without the custom field use their HubSpot Close Date, which is the expected date.',
+      },
+      expectedCloseTo: { type: 'string', description: 'Estimated Close Date, to (inclusive).' },
       owner: { type: 'string', description: 'Salesperson name, or part of it.' },
       stage: { type: 'string', description: 'Stage name as HubSpot shows it, e.g. "Proposal".' },
       pipeline: { type: 'string', description: 'Pipeline name, e.g. "Sales Pipeline".' },
@@ -1452,6 +1458,10 @@ const findDeals: ToolDefinition = {
       if (!within(deal.closedate, input.closedFrom, input.closedTo)) return false;
       if (!within(deal.createdate, input.createdFrom, input.createdTo)) return false;
       if (!within(deal.complianceReviewCompletedAt, input.reviewedFrom, input.reviewedTo)) return false;
+      if (input.expectedCloseFrom || input.expectedCloseTo) {
+        const expected = deal.estimatedCloseDate ?? (deal.isClosed ? null : deal.closedate);
+        if (!within(expected, input.expectedCloseFrom, input.expectedCloseTo)) return false;
+      }
       if (!like(deal.ownerName ?? 'Unassigned', input.owner)) return false;
       if (typeof input.stage === 'string' && scope.stageLabel(deal.dealstage).toLowerCase() !== input.stage.toLowerCase()) {
         return false;
@@ -1505,6 +1515,7 @@ const findDeals: ToolDefinition = {
             created: row.created,
             closed: row.closed,
             complianceReviewCompleted: row.reviewed,
+            estimatedCloseDate: row.expectedClose,
             leadSource: row.source,
             lineOfBusiness: row.lineOfBusiness,
             createdBy: row.createdBy,

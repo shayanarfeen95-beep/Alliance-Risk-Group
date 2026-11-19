@@ -66,6 +66,13 @@ export function StatusBadge({ status }: { status: BillingStatus }) {
   );
 }
 
+type SortKey =
+  | 'account' | 'owner' | 'won' | 'live' | 'booked' | 'expected' | 'billed'
+  | 'ofExpected' | 'ofContract' | 'lastInvoice' | 'status';
+
+/** Most urgent first when sorted by status. */
+const STATUS_ORDER: BillingStatus[] = ['NOT_BILLING', 'BEHIND', 'WAITING', 'NO_MATCH', 'ON_PACE', 'AHEAD', 'REACHED'];
+
 const pct = (value: number | null) => (value === null ? '—' : `${Math.round(value * 100)}%`);
 
 export function AccountBillingTable({ rows, initialFilter = 'all' }: { rows: AccountBillingRow[]; initialFilter?: Filter }) {
@@ -82,7 +89,25 @@ export function AccountBillingTable({ rows, initialFilter = 'all' }: { rows: Acc
     return out;
   }, [rows]);
 
-  const shown = rows.filter((row) => {
+  // Every column sorts: click once for one direction, again for the other.
+  const [sort, setSort] = useState<{ key: SortKey; dir: 1 | -1 }>({ key: 'booked', dir: -1 });
+  const sortValue = (row: AccountBillingRow, key: SortKey): string | number => {
+    switch (key) {
+      case 'account': return row.account.toLowerCase();
+      case 'owner': return (row.owners[0] ?? '').toLowerCase();
+      case 'won': return row.wonOn;
+      case 'live': return row.goLiveOn;
+      case 'booked': return row.booked;
+      case 'expected': return row.expectedToDate;
+      case 'billed': return row.billedSinceWon;
+      case 'ofExpected': return row.pctOfExpected ?? -1;
+      case 'ofContract': return row.pctOfContract ?? -1;
+      case 'lastInvoice': return row.lastInvoice ?? '';
+      case 'status': return STATUS_ORDER.indexOf(row.status);
+    }
+  };
+
+  const filtered = rows.filter((row) => {
     if (filter === 'attention' && row.status !== 'NOT_BILLING' && row.status !== 'BEHIND') return false;
     if (filter !== 'all' && filter !== 'attention' && row.status !== filter) return false;
     if (query) {
@@ -93,15 +118,35 @@ export function AccountBillingTable({ rows, initialFilter = 'all' }: { rows: Acc
     }
     return true;
   });
+  const shown = [...filtered].sort((a, b) => {
+    const x = sortValue(a, sort.key);
+    const y = sortValue(b, sort.key);
+    const order = typeof x === 'number' && typeof y === 'number' ? x - y : String(x).localeCompare(String(y));
+    return order * sort.dir;
+  });
 
-  const th = (label: string, align: 'left' | 'right' = 'right') => (
-    <th
-      className={`whitespace-nowrap border-b px-2.5 py-2 text-[10.5px] font-semibold uppercase tracking-[0.06em] ${align === 'left' ? 'text-left' : 'text-right'}`}
-      style={{ borderColor: 'var(--border)', color: 'var(--text-muted)' }}
-    >
-      {label}
-    </th>
-  );
+  const th = (label: string, key: SortKey, align: 'left' | 'right' = 'right') => {
+    const active = sort.key === key;
+    return (
+      <th
+        aria-sort={active ? (sort.dir === 1 ? 'ascending' : 'descending') : 'none'}
+        className={`whitespace-nowrap border-b px-2.5 py-2 text-[10.5px] font-semibold uppercase tracking-[0.06em] ${align === 'left' ? 'text-left' : 'text-right'}`}
+        style={{ borderColor: 'var(--border)', color: active ? 'var(--text-primary)' : 'var(--text-muted)' }}
+      >
+        <button
+          type="button"
+          onClick={() =>
+            setSort(active ? { key, dir: sort.dir === 1 ? -1 : 1 } : { key, dir: align === 'left' ? 1 : -1 })
+          }
+          className="inline-flex items-center gap-1 uppercase hover:text-[var(--text-primary)]"
+          title={`Sort by ${label.toLowerCase()}`}
+        >
+          {label}
+          <span aria-hidden className="text-[9px]">{active ? (sort.dir === 1 ? '▲' : '▼') : '↕'}</span>
+        </button>
+      </th>
+    );
+  };
   const td = 'border-b px-2.5 py-2 align-top';
 
   return (
@@ -139,17 +184,17 @@ export function AccountBillingTable({ rows, initialFilter = 'all' }: { rows: Acc
         <table className="w-full min-w-[1180px] border-collapse text-[12px]">
           <thead className="sticky top-0 z-[1]" style={{ background: 'var(--surface-1)' }}>
             <tr>
-              {th('Account', 'left')}
-              {th('Owner', 'left')}
-              {th('Won')}
-              {th('Live since')}
-              {th('Booked')}
-              {th('Expected by now')}
-              {th('Billed since won')}
-              {th('Of expected')}
-              {th('Of contract')}
-              {th('Last invoice')}
-              {th('Status', 'left')}
+              {th('Account', 'account', 'left')}
+              {th('Owner', 'owner', 'left')}
+              {th('Won', 'won')}
+              {th('Live since', 'live')}
+              {th('Booked', 'booked')}
+              {th('Expected by now', 'expected')}
+              {th('Billed since won', 'billed')}
+              {th('Of expected', 'ofExpected')}
+              {th('Of contract', 'ofContract')}
+              {th('Last invoice', 'lastInvoice')}
+              {th('Status', 'status', 'left')}
             </tr>
           </thead>
           <tbody>
