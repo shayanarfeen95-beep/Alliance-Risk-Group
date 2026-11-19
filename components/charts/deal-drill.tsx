@@ -456,7 +456,7 @@ function DealDetail({ deal, billing, onClose }: { deal: DealRow; billing: DealBi
           {fact('Amount', formatNumber(deal.amount, 'currency'))}
           {fact('Status', deal.status)}
           {fact('Stage now', deal.stage)}
-          {fact('Days in this stage', deal.daysInStage === null ? '—' : `${deal.daysInStage} days`)}
+          {fact('Days in this stage', deal.daysInStage === null ? 'not recorded by HubSpot' : `${deal.daysInStage} days`)}
           {fact('Created', deal.created)}
           {fact(deal.status === 'Open' ? 'Estimated close' : 'Closed', deal.status === 'Open' ? deal.expectedClose : deal.closed)}
           {fact('Compliance review done', deal.reviewed)}
@@ -514,6 +514,17 @@ function DealDetail({ deal, billing, onClose }: { deal: DealRow; billing: DealBi
                   <p className="text-[10.5px] text-[var(--text-muted)]">entered {entry.entered}</p>
                 </li>
               ))}
+              {deal.stageHistory[deal.stageHistory.length - 1]?.stage !== deal.stage ? (
+                <li className="relative">
+                  <span
+                    aria-hidden
+                    className="absolute -left-[21px] top-1 h-2.5 w-2.5 rounded-full border-2"
+                    style={{ borderColor: 'var(--text-primary)', background: 'var(--surface-1)' }}
+                  />
+                  <p className="text-[12px] font-medium">{deal.stage} (now)</p>
+                  <p className="text-[10.5px] text-[var(--text-muted)]">HubSpot has no date for this move</p>
+                </li>
+              ) : null}
             </ol>
           )}
         </div>
