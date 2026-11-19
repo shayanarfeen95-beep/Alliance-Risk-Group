@@ -50,6 +50,8 @@ export interface DealRow {
   lineOfBusiness: string | null;
   createdate: string | null;
   closedate: string | null;
+  /** Estimated Close Date, or an open deal's Close Date. */
+  expectedClose: string | null;
   status: 'Won' | 'Lost' | 'Open';
   daysToClose: number | null;
 }
@@ -66,6 +68,8 @@ export interface SalespersonRow {
   openValue: number;
   /** Won ÷ (won + lost) closed in the range. Null when nothing closed. */
   winRate: number | null;
+  /** Archived in HubSpot: shown only while they have deals closed in the range. */
+  inactive: boolean;
 }
 
 export interface SalesViewModel {
@@ -88,6 +92,20 @@ export interface SalesViewModel {
     counts: Record<DealStatusFilter, number>;
   };
   bySalesperson: SalespersonRow[];
+  /**
+   * The deals behind every figure, so a click lists them. Westport: "it is
+   * showing $42K in booked in October, but not able to see who it's from."
+   */
+  drill: {
+    /** Month → won deals closed in it (the bookings trend). */
+    bookedByMonth: Record<string, string[]>;
+    /** Stage id → open deals in it. */
+    openByStage: Record<string, string[]>;
+    /** Salesperson → their deals in the range. */
+    byOwner: Record<string, string[]>;
+    /** Every deal any of these lists name. */
+    dealIds: string[];
+  };
   unavailable?: string;
 }
 
@@ -102,6 +120,8 @@ export interface SalesOptions {
   ownerName: string | null;
   /** Narrows the deal table to won, lost or open deals. */
   status?: DealStatusFilter;
+  /** Salespeople archived in HubSpot. */
+  inactiveOwners?: string[];
 }
 
 export function loadSales(
@@ -157,6 +177,12 @@ export function loadSales(
     stageTotals.set(stage, entry);
   }
 
+  const openByStage: Record<string, string[]> = {};
+  for (const deal of bundle.deals) {
+    if (deal.isClosed || !inScope(deal.divisionCode)) continue;
+    (openByStage[deal.dealstage ?? 'unknown'] ??= []).push(deal.dealId);
+  }
+
   const pipelineByStage: PipelineStageRow[] = [...stageTotals.entries()]
     .map(([stage, entry]) => ({
       stage,
@@ -196,6 +222,21 @@ export function loadSales(
     xLabel: formatMonthShort(month),
     booked: num(resolveKpi(session, 'dollars_booked', divisionCode, { month })),
   }));
+  // The won deals behind each bar: closed won in that month, as Dollars Booked counts them.
+  const bookedByMonth: Record<string, string[]> = {};
+  for (const month of period.trailingTwelveMonths) {
+    const { start, endExclusive } = monthBounds(month);
+    bookedByMonth[month] = bundle.deals
+      .filter(
+        (deal) =>
+          deal.isClosedWon &&
+          inScope(deal.divisionCode) &&
+          deal.closedate !== null &&
+          deal.closedate >= start &&
+          deal.closedate < endExclusive,
+      )
+      .map((deal) => deal.dealId);
+  }
 
   // --- Deal-level table --------------------------------------------------
   //
@@ -218,12 +259,15 @@ export function loadSales(
   // --- By salesperson ----------------------------------------------------
   // Built before the owner filter is applied, so selecting one rep still shows
   // where they sit against the others rather than collapsing to a single row.
+  const inactive = new Set(options.inactiveOwners ?? []);
+  const byOwner: Record<string, string[]> = {};
   const bySalespersonMap = new Map<string, SalespersonRow>();
   for (const deal of scopedDeals) {
     const owner = deal.ownerName ?? 'Unassigned';
+    (byOwner[owner] ??= []).push(deal.dealId);
     const row =
       bySalespersonMap.get(owner) ??
-      { owner, won: 0, wonValue: 0, lost: 0, open: 0, openValue: 0, winRate: null };
+      { owner, won: 0, wonValue: 0, lost: 0, open: 0, openValue: 0, winRate: null, inactive: inactive.has(owner) };
 
     if (deal.isClosedWon) {
       row.won += 1;
@@ -238,6 +282,8 @@ export function loadSales(
   }
 
   const bySalesperson = [...bySalespersonMap.values()]
+    // Someone who has left drops off once nothing they closed is in the range.
+    .filter((row) => !row.inactive || row.won + row.lost > 0)
     .map((row) => ({
       ...row,
       // Same denominator convention as the Booking Rate KPI: deals *closed* in
@@ -272,6 +318,7 @@ export function loadSales(
       lineOfBusiness: deal.lineOfBusiness,
       createdate: deal.createdate?.toISOString().slice(0, 10) ?? null,
       closedate: deal.closedate?.toISOString().slice(0, 10) ?? null,
+      expectedClose: (deal.estimatedCloseDate ?? (deal.isClosed ? null : deal.closedate))?.toISOString().slice(0, 10) ?? null,
       status: (deal.isClosedWon ? 'Won' : deal.isClosed ? 'Lost' : 'Open') as DealRow['status'],
       daysToClose:
         deal.createdate && deal.closedate
@@ -305,6 +352,18 @@ export function loadSales(
       counts,
     },
     bySalesperson,
+    drill: {
+      bookedByMonth,
+      openByStage,
+      byOwner,
+      dealIds: [
+        ...new Set([
+          ...Object.values(bookedByMonth).flat(),
+          ...Object.values(openByStage).flat(),
+          ...scopedDeals.map((deal) => deal.dealId),
+        ]),
+      ],
+    },
     unavailable,
   };
 }

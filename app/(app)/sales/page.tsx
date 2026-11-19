@@ -8,6 +8,11 @@ import { KpiTile } from '@/components/dashboard/kpi-tile';
 import { ChartCard } from '@/components/charts/chart-card';
 import { Card, CardHeader, DataTable, SectionTitle, Td, Th, Unavailable } from '@/components/ui/primitives';
 import { OwnerFilter } from '@/components/dashboard/owner-filter';
+import { DrillRows } from '@/components/dashboard/drill-rows';
+import { DealDrillProvider, DealLink } from '@/components/charts/deal-drill';
+import { companyNames, stageHistoryIndex, toDealBillingIndex, toDealRow } from '@/lib/dashboards/deal-rows';
+import { loadAccountBilling } from '@/lib/billing/accounts';
+import { getDb } from '@/lib/db/client';
 import type { DealStatusFilter } from '@/lib/dashboards/sales';
 import Link from 'next/link';
 
@@ -28,11 +33,35 @@ export default async function SalesPage({
 }) {
   const params = await searchParams;
   const context = await loadDashboardContext(params);
-  const { session, divisionCode, range, owners, ownerName } = context;
+  const { session, divisionCode, range, owners, ownerName, inactiveOwners } = context;
   const colors = buildDivisionColorMap(session.bundle.divisions);
   const rawStatus = Array.isArray(params.status) ? params.status[0] : params.status;
   const status = STATUS_TABS.some((tab) => tab.id === rawStatus) ? (rawStatus as DealStatusFilter) : 'all';
-  const model = loadSales(session, divisionCode, colors, { range, ownerName, status });
+  const model = loadSales(session, divisionCode, colors, { range, ownerName, status, inactiveOwners });
+
+  // Every figure lists its deals, and every deal opens its detail.
+  const stageName = (stageId: string | null) =>
+    stageId ? (session.bundle.dealStages.find((stage) => stage.stageId === stageId)?.label ?? stageId) : '—';
+  const history = stageHistoryIndex(session.bundle.stageEntries, stageName);
+  const company = companyNames(session.bundle.companies);
+  const wanted = new Set(model.drill.dealIds);
+  const drillDeals = session.bundle.deals
+    .filter((deal) => wanted.has(deal.dealId))
+    .map((deal) => {
+      const row = toDealRow(deal, stageName, company, history);
+      return inactiveOwners.includes(row.owner) ? { ...row, owner: `${row.owner} (inactive)` } : row;
+    });
+  const billingHorizon = new Date(Date.UTC(new Date().getUTCFullYear() - 1, 0, 1));
+  const billing = await loadAccountBilling(await getDb(), session, {
+    wonFrom: new Date(Date.UTC(2000, 0, 1)),
+    wonTo: new Date(Date.now() + 24 * 60 * 60 * 1000),
+    billingFrom: billingHorizon,
+  })
+    .then((result) => toDealBillingIndex(result, billingHorizon.toISOString().slice(0, 10)))
+    .catch((error: unknown) => {
+      console.error('Billing for the Sales deal lists could not be read', error);
+      return null;
+    });
 
   // Each tab keeps every other filter on the page.
   const tabHref = (id: DealStatusFilter) => {
@@ -53,6 +82,7 @@ export default async function SalesPage({
         divisionCode);
 
   return (
+    <DealDrillProvider deals={drillDeals} billing={billing}>
     <div className="space-y-6">
       <header>
         <h1 className="text-[19px] font-semibold tracking-tight">Sales</h1>
@@ -98,45 +128,30 @@ export default async function SalesPage({
 
         <Card>
           <CardHeader title="Pipeline by stage" subtitle="Open deals as of the reporting date" />
-          {model.pipelineByStage.length === 0 ? (
-            <p className="text-[12px] text-[var(--text-muted)]">No open deals in scope.</p>
-          ) : (
-            <DataTable>
-              <thead>
-                <tr>
-                  <Th align="left">Stage</Th>
-                  <Th align="left">Pipeline</Th>
-                  <Th>Deals</Th>
-                  <Th>Value</Th>
-                </tr>
-              </thead>
-              <tbody>
-                {model.pipelineByStage.map((row) => (
-                  <tr key={row.stage}>
-                    <Td align="left" numeric={false}>
-                      {row.label}
-                    </Td>
-                    <Td align="left" numeric={false} muted>
-                      {row.pipeline}
-                    </Td>
-                    <Td>{formatNumber(row.count, 'count')}</Td>
-                    <Td>{formatNumber(row.value, 'currency')}</Td>
-                  </tr>
-                ))}
-              </tbody>
-            </DataTable>
-          )}
+          <DrillRows
+            emptyLabel="No open deals in scope."
+            headers={[{ label: 'Stage' }, { label: 'Pipeline', align: 'left' }, { label: 'Deals' }, { label: 'Value' }]}
+            rows={model.pipelineByStage.map((row) => ({
+              id: row.stage,
+              cells: [row.label, row.pipeline, formatNumber(row.count, 'count'), formatNumber(row.value, 'currency')],
+              dealIds: model.drill.openByStage[row.stage] ?? [],
+              listTitle: `Open in ${row.label}`,
+            }))}
+          />
+          <p className="pt-2 text-[10.5px] text-[var(--text-muted)]">Click a stage to list its deals.</p>
         </Card>
       </div>
 
       <ChartCard
         title="Bookings trend"
-        subtitle="Dollars booked, trailing twelve months"
+        subtitle="Dollars booked, last twelve months — click a bar for the deals behind it"
         series={model.bookingsTrendSeries}
         data={model.bookingsTrend}
         form="bar"
         valueFormat="currency"
         height={240}
+        drill={model.drill.bookedByMonth}
+        showValues
       />
 
       {/* Per-salesperson performance — the leaderboard leadership asked for. */}
@@ -145,43 +160,38 @@ export default async function SalesPage({
           By salesperson
         </SectionTitle>
         <Card>
-          {model.bySalesperson.length === 0 ? (
-            <p className="text-[12px] text-[var(--text-muted)]">
-              No deals closed or open in {model.dealScope.rangeLabel}.
-            </p>
-          ) : (
-            <DataTable>
-              <thead>
-                <tr>
-                  <Th align="left">Salesperson</Th>
-                  <Th>Won</Th>
-                  <Th>Value won</Th>
-                  <Th>Lost</Th>
-                  <Th>Win rate</Th>
-                  <Th>Open</Th>
-                  <Th>Open value</Th>
-                </tr>
-              </thead>
-              <tbody>
-                {model.bySalesperson.map((row) => (
-                  <tr key={row.owner}>
-                    <Td align="left" numeric={false}>
-                      {row.owner}
-                    </Td>
-                    <Td>{row.won}</Td>
-                    <Td>{formatNumber(row.wonValue, 'currency')}</Td>
-                    <Td muted>{row.lost}</Td>
-                    {/* Null rather than 0% when nothing closed — a rep with no
-                        closed deals has no win rate, which is not the same as
-                        losing every one. */}
-                    <Td muted>{row.winRate === null ? '—' : `${Math.round(row.winRate * 100)}%`}</Td>
-                    <Td muted>{row.open}</Td>
-                    <Td muted>{formatNumber(row.openValue, 'currency')}</Td>
-                  </tr>
-                ))}
-              </tbody>
-            </DataTable>
-          )}
+          <DrillRows
+            emptyLabel={`No deals closed or open in ${model.dealScope.rangeLabel}.`}
+            headers={[
+              { label: 'Salesperson' },
+              { label: 'Won' },
+              { label: 'Value won' },
+              { label: 'Lost' },
+              { label: 'Win rate' },
+              { label: 'Open' },
+              { label: 'Open value' },
+            ]}
+            rows={model.bySalesperson.map((row) => ({
+              id: row.owner,
+              cells: [
+                row.inactive ? `${row.owner} (inactive)` : row.owner,
+                String(row.won),
+                formatNumber(row.wonValue, 'currency'),
+                String(row.lost),
+                // Null rather than 0% when nothing closed: no win rate is not losing every deal.
+                row.winRate === null ? '—' : `${Math.round(row.winRate * 100)}%`,
+                String(row.open),
+                formatNumber(row.openValue, 'currency'),
+              ],
+              dealIds: model.drill.byOwner[row.owner] ?? [],
+              listTitle: `${row.owner}'s deals in ${model.dealScope.rangeLabel}`,
+              muted: row.inactive,
+            }))}
+          />
+          <p className="pt-2 text-[10.5px] text-[var(--text-muted)]">
+            Click a salesperson to list their deals. People archived in HubSpot are marked inactive and drop off once
+            nothing they closed is in the period.
+          </p>
         </Card>
       </section>
 
@@ -228,6 +238,7 @@ export default async function SalesPage({
               <Th align="left">Line of business</Th>
               <Th align="left">Created</Th>
               <Th align="left">Closed</Th>
+              <Th align="left">Est. close</Th>
               <Th>Days</Th>
             </tr>
           </thead>
@@ -235,7 +246,9 @@ export default async function SalesPage({
             {model.deals.map((deal) => (
               <tr key={deal.dealId}>
                 <Td align="left" numeric={false}>
-                  {deal.dealName}
+                  <DealLink dealId={deal.dealId} className="font-medium">
+                    {deal.dealName}
+                  </DealLink>
                 </Td>
                 <Td align="left" numeric={false} muted>
                   {deal.company ?? '—'}
@@ -279,7 +292,10 @@ export default async function SalesPage({
                   {deal.createdate ?? '—'}
                 </Td>
                 <Td align="left" muted>
-                  {deal.closedate ?? '—'}
+                  {deal.status === 'Open' ? '—' : (deal.closedate ?? '—')}
+                </Td>
+                <Td align="left" muted>
+                  {deal.status === 'Open' ? (deal.expectedClose ?? '—') : '—'}
                 </Td>
                 <Td muted>{deal.daysToClose ?? '—'}</Td>
               </tr>
@@ -301,5 +317,6 @@ export default async function SalesPage({
         )}
       </Card>
     </div>
+    </DealDrillProvider>
   );
 }

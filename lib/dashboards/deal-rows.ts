@@ -28,6 +28,33 @@ export interface DealRow {
   source: string;
   lineOfBusiness: string | null;
   createdBy: string | null;
+  /** Every stage the deal entered, oldest first — "where they are in stages". */
+  stageHistory: Array<{ stage: string; entered: string }>;
+  /** Days since it entered the stage it is in now. */
+  daysInStage: number | null;
+}
+
+/** Deal id → its stage entries, oldest first, with stage names. */
+export function stageHistoryIndex(
+  entries: Array<{ dealId: string; stage: string; enteredAt: Date }>,
+  stageLabel: (stageId: string | null) => string,
+): Map<string, Array<{ stage: string; entered: string }>> {
+  const byDeal = new Map<string, Array<{ stage: string; at: Date }>>();
+  for (const entry of entries) {
+    const list = byDeal.get(entry.dealId) ?? [];
+    list.push({ stage: entry.stage, at: entry.enteredAt });
+    byDeal.set(entry.dealId, list);
+  }
+  const out = new Map<string, Array<{ stage: string; entered: string }>>();
+  for (const [dealId, list] of byDeal) {
+    out.set(
+      dealId,
+      list
+        .sort((a, b) => a.at.getTime() - b.at.getTime())
+        .map((item) => ({ stage: stageLabel(item.stage), entered: item.at.toISOString().slice(0, 10) })),
+    );
+  }
+  return out;
 }
 
 const day = (value: Date | null) => (value ? value.toISOString().slice(0, 10) : null);
@@ -36,8 +63,17 @@ export function toDealRow(
   deal: DealRecord,
   stageLabel: (stageId: string | null) => string,
   companyName: (companyId: string | null) => string | null,
+  history?: Map<string, Array<{ stage: string; entered: string }>>,
+  today: Date = new Date(),
 ): DealRow {
+  const stageHistory = history?.get(deal.dealId) ?? [];
+  const current = stageLabel(deal.dealstage);
+  const enteredCurrent = [...stageHistory].reverse().find((entry) => entry.stage === current)?.entered ?? null;
   return {
+    stageHistory,
+    daysInStage: enteredCurrent
+      ? Math.max(0, Math.floor((today.getTime() - new Date(`${enteredCurrent}T00:00:00Z`).getTime()) / 86_400_000))
+      : null,
     id: deal.dealId,
     name: deal.dealName ?? `Deal ${deal.dealId}`,
     company: companyName(deal.companyId),

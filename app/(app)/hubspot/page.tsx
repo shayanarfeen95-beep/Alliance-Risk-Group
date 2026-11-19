@@ -5,10 +5,10 @@ import { loadEosPanel } from '@/lib/dashboards/hubspot-eos';
 import { loadLeadership2026 } from '@/lib/dashboards/leadership-2026';
 import { loadBookedVsActual, type NewBusinessFilter } from '@/lib/dashboards/booked-vs-actual';
 import { scopeLeadership, LEADERSHIP_SCOPE } from '@/lib/dashboards/leadership-scope';
-import { companyNames, toDealBillingIndex, toDealRow } from '@/lib/dashboards/deal-rows';
+import { companyNames, stageHistoryIndex, toDealBillingIndex, toDealRow } from '@/lib/dashboards/deal-rows';
 import { loadAccountBilling } from '@/lib/billing/accounts';
 import { getDb } from '@/lib/db/client';
-import { DealDrillProvider } from '@/components/charts/deal-drill';
+import { DealDrillProvider, DealLink } from '@/components/charts/deal-drill';
 import { buildDivisionColorMap } from '@/lib/charts/colors';
 import { formatMonth } from '@/lib/semantic/periods';
 import { formatNumber } from '@/lib/format';
@@ -97,11 +97,14 @@ export default async function HubspotPage({
     ].flatMap((series) => Object.values(series.drill).flat()),
     ...Object.values(leadership.dealsWonBySource.idsBySource).flat(),
     ...Object.values(leadership.complianceReviewsBySource.idsBySource).flat(),
+    // The board's cards open their deal too.
+    ...model.board.flatMap((column) => column.cards.map((card) => card.dealId)),
   ]);
   const company = companyNames(session.bundle.companies);
+  const history = stageHistoryIndex(scope.session.bundle.stageEntries, scope.stageLabel);
   const drillDeals = scope.deals
     .filter((deal) => referenced.has(deal.dealId))
-    .map((deal) => toDealRow(deal, scope.stageLabel, company));
+    .map((deal) => toDealRow(deal, scope.stageLabel, company, history));
 
   // What QuickBooks billed the account behind each won deal, for the Billed
   // column beside Amount. Every won deal on the page, through the same
@@ -302,7 +305,7 @@ export default async function HubspotPage({
                       style={{ borderColor: 'var(--border)', background: 'var(--surface-1)' }}
                     >
                       <p className="truncate text-[11.5px] font-medium" title={card.dealName}>
-                        {card.dealName}
+                        <DealLink dealId={card.dealId}>{card.dealName}</DealLink>
                       </p>
                       <p className="text-[11px] text-[var(--text-secondary)]">
                         {formatNumber(card.amount, 'currency')}

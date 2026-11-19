@@ -11,7 +11,7 @@
  * chart refers to them by id. Handing each chart its own copy would send the
  * same deal to the browser once per chart it appears in.
  */
-import { createContext, useContext, useMemo, useState, type ReactNode } from 'react';
+import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from 'react';
 import { X } from 'lucide-react';
 import { formatNumber } from '@/lib/format';
 import {
@@ -24,6 +24,8 @@ import {
 
 const DealContext = createContext<Map<string, DealRow> | null>(null);
 const BillingContext = createContext<DealBillingIndex | null>(null);
+/** Opens a deal's detail panel. */
+const OpenDealContext = createContext<((dealId: string) => void) | null>(null);
 
 export function DealDrillProvider({
   deals,
@@ -36,10 +38,34 @@ export function DealDrillProvider({
   children: ReactNode;
 }) {
   const byId = useMemo(() => new Map(deals.map((deal) => [deal.id, deal])), [deals]);
+  const [openId, setOpenId] = useState<string | null>(null);
+  const open = openId ? byId.get(openId) : undefined;
   return (
     <DealContext.Provider value={byId}>
-      <BillingContext.Provider value={billing ?? null}>{children}</BillingContext.Provider>
+      <BillingContext.Provider value={billing ?? null}>
+        <OpenDealContext.Provider value={setOpenId}>
+          {children}
+          {open ? <DealDetail deal={open} billing={billing ?? null} onClose={() => setOpenId(null)} /> : null}
+        </OpenDealContext.Provider>
+      </BillingContext.Provider>
     </DealContext.Provider>
+  );
+}
+
+/** A deal's name that opens its detail — for boards and tables outside a DealList. */
+export function DealLink({ dealId, children, className }: { dealId: string; children: ReactNode; className?: string }) {
+  const openDeal = useContext(OpenDealContext);
+  const deals = useContext(DealContext);
+  if (!openDeal || !deals?.has(dealId)) return <span className={className}>{children}</span>;
+  return (
+    <button
+      type="button"
+      onClick={() => openDeal(dealId)}
+      className={`text-left underline-offset-2 hover:underline ${className ?? ''}`}
+      title="Open the deal's details"
+    >
+      {children}
+    </button>
   );
 }
 
@@ -64,6 +90,7 @@ export function DealList({
 }) {
   const deals = useDeals();
   const billing = useContext(BillingContext);
+  const openDeal = useContext(OpenDealContext);
   const [sort, setSort] = useState<SortKey>('amount');
   const [dir, setDir] = useState<1 | -1>(-1);
   const [period, setPeriod] = useState<BillingPeriod>({ kind: 'since_won' });
@@ -198,8 +225,16 @@ export function DealList({
             </thead>
             <tbody>
               {rows.map((row) => (
-                <tr key={row.id}>
-                  <Cell strong title={row.name}>{row.name}</Cell>
+                <tr key={row.id} className="hover:bg-[var(--surface-1)]">
+                  <Cell strong title={`${row.name} — open details`}>
+                    <button
+                      type="button"
+                      onClick={() => openDeal?.(row.id)}
+                      className="max-w-full truncate text-left underline-offset-2 hover:underline"
+                    >
+                      {row.name}
+                    </button>
+                  </Cell>
                   <Cell title={row.company ?? undefined}>{row.company ?? '—'}</Cell>
                   <Cell>{row.owner}</Cell>
                   <Cell>
@@ -370,6 +405,119 @@ function PeriodControl({
       <span className="ml-auto text-[var(--text-muted)]">
         As of {billing.asOf} · billing is per account, net of credit memos, excluding tax · * suggested match
       </span>
+    </div>
+  );
+}
+
+/** Everything about one deal, in one place — the "click on it to see more detail" Westport asked for. */
+function DealDetail({ deal, billing, onClose }: { deal: DealRow; billing: DealBillingIndex | null; onClose: () => void }) {
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => event.key === 'Escape' && onClose();
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [onClose]);
+
+  const accountKey = billing?.accountOf[deal.id];
+  const account = accountKey ? billing?.accounts[accountKey] : undefined;
+  const sinceWon = account?.customer && billing ? billedIn(account, { kind: 'since_won' }, billing.asOf) : null;
+  const ytd = account?.customer && billing ? billedIn(account, { kind: 'ytd' }, billing.asOf) : null;
+  const fact = (label: string, value: ReactNode) => (
+    <div className="flex flex-col gap-0.5">
+      <dt className="text-[10px] font-semibold uppercase tracking-[0.06em] text-[var(--text-muted)]">{label}</dt>
+      <dd className="text-[12.5px]">{value ?? '—'}</dd>
+    </div>
+  );
+
+  return (
+    <div className="fixed inset-0 z-50 flex justify-end" role="dialog" aria-modal="true" aria-label={deal.name}>
+      <button type="button" aria-label="Close" onClick={onClose} className="absolute inset-0 bg-black/30" />
+      <div
+        className="relative flex h-full w-full max-w-[520px] flex-col overflow-y-auto border-l shadow-2xl"
+        style={{ background: 'var(--surface-1)', borderColor: 'var(--border)' }}
+      >
+        <div className="flex items-start justify-between gap-3 border-b px-5 py-4" style={{ borderColor: 'var(--border)' }}>
+          <div>
+            <p className="text-[10.5px] font-semibold uppercase tracking-[0.06em] text-[var(--text-muted)]">Deal</p>
+            <h2 className="text-[16px] font-semibold leading-snug">{deal.name}</h2>
+            <p className="mt-0.5 text-[12px] text-[var(--text-secondary)]">
+              {deal.company ?? 'No company'} · {deal.owner}
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            className="inline-flex items-center gap-1 rounded-[6px] px-2 py-1 text-[11.5px] text-[var(--text-muted)] hover:bg-[var(--surface-2)]"
+          >
+            <X size={13} aria-hidden /> Close
+          </button>
+        </div>
+
+        <dl className="grid grid-cols-2 gap-x-4 gap-y-3 px-5 py-4">
+          {fact('Amount', formatNumber(deal.amount, 'currency'))}
+          {fact('Status', deal.status)}
+          {fact('Stage now', deal.stage)}
+          {fact('Days in this stage', deal.daysInStage === null ? '—' : `${deal.daysInStage} days`)}
+          {fact('Created', deal.created)}
+          {fact(deal.status === 'Open' ? 'Estimated close' : 'Closed', deal.status === 'Open' ? deal.expectedClose : deal.closed)}
+          {fact('Compliance review done', deal.reviewed)}
+          {fact('Lead source', deal.source)}
+          {fact('Line of business', deal.lineOfBusiness)}
+          {fact(deal.status === 'Won' ? 'Closed by' : 'Owner', deal.owner)}
+          {fact('Created by', deal.createdBy)}
+        </dl>
+
+        {deal.status === 'Won' ? (
+          <div className="mx-5 mb-4 rounded-[8px] border px-4 py-3" style={{ borderColor: 'var(--border)', background: 'var(--surface-2)' }}>
+            <p className="text-[10.5px] font-semibold uppercase tracking-[0.06em] text-[var(--text-muted)]">Billed in QuickBooks</p>
+            {account?.customer ? (
+              <>
+                <p className="mt-1 text-[12px]">
+                  {account.customer}
+                  {account.confirmed ? '' : ' · suggested match, confirm in Admin → Account matching'}
+                </p>
+                <div className="mt-2 grid grid-cols-3 gap-2 text-[12px]">
+                  <div><span className="block text-[10.5px] text-[var(--text-muted)]">Since won</span>{formatNumber(sinceWon ?? 0, 'currency')}</div>
+                  <div><span className="block text-[10.5px] text-[var(--text-muted)]">Year to date</span>{formatNumber(ytd ?? 0, 'currency')}</div>
+                  <div>
+                    <span className="block text-[10.5px] text-[var(--text-muted)]">Of booked</span>
+                    {account.booked > 0 && sinceWon !== null ? `${Math.round((sinceWon / account.booked) * 100)}%` : '—'}
+                  </div>
+                </div>
+              </>
+            ) : (
+              <p className="mt-1 text-[12px] text-[var(--text-secondary)]">
+                No QuickBooks customer is matched to this account yet. Match it in Admin → Account matching.
+              </p>
+            )}
+          </div>
+        ) : null}
+
+        <div className="px-5 pb-6">
+          <p className="mb-2 text-[10.5px] font-semibold uppercase tracking-[0.06em] text-[var(--text-muted)]">
+            Stage history
+          </p>
+          {deal.stageHistory.length === 0 ? (
+            <p className="text-[12px] text-[var(--text-muted)]">HubSpot has no stage history for this deal.</p>
+          ) : (
+            <ol className="relative space-y-2 border-l pl-4" style={{ borderColor: 'var(--border-strong)' }}>
+              {deal.stageHistory.map((entry, index) => (
+                <li key={`${entry.stage}-${entry.entered}-${index}`} className="relative">
+                  <span
+                    aria-hidden
+                    className="absolute -left-[21px] top-1 h-2.5 w-2.5 rounded-full border-2"
+                    style={{
+                      borderColor: index === deal.stageHistory.length - 1 ? 'var(--text-primary)' : 'var(--border-strong)',
+                      background: 'var(--surface-1)',
+                    }}
+                  />
+                  <p className="text-[12px] font-medium">{entry.stage}</p>
+                  <p className="text-[10.5px] text-[var(--text-muted)]">entered {entry.entered}</p>
+                </li>
+              ))}
+            </ol>
+          )}
+        </div>
+      </div>
     </div>
   );
 }

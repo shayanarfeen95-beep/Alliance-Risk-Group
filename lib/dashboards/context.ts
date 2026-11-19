@@ -38,6 +38,8 @@ export interface DashboardContext {
   range: DateRange;
   /** Salespeople with at least one deal, for the Sales owner filter. */
   owners: string[];
+  /** Salespeople archived in HubSpot: kept on their deals, left out of pickers. */
+  inactiveOwners: string[];
   /** The selected salesperson, or null for everyone. */
   ownerName: string | null;
   /** HubSpot pipelines present in the visible deals. */
@@ -211,10 +213,14 @@ export async function loadDashboardContext(
   // "who is sitting on the unassigned pipeline" is a question leadership asks.
   // Offering the option only when such a deal exists keeps the list honest.
   const hasUnassigned = session.bundle.deals.some((deal) => !deal.ownerName);
-  const owners = hasUnassigned ? [...named, 'Unassigned'] : named;
+  // People archived in HubSpot drop out of the picker; a link naming one still works.
+  const inactiveOwners = inactiveOwnersOf(session.bundle.config.get('HUBSPOT_INACTIVE_OWNERS')?.value);
+  const activeNamed = named.filter((name) => !inactiveOwners.includes(name));
+  const owners = hasUnassigned ? [...activeNamed, 'Unassigned'] : activeNamed;
 
   const requestedOwner = first(searchParams.owner);
-  const ownerName = requestedOwner && owners.includes(requestedOwner) ? requestedOwner : null;
+  const ownerName =
+    requestedOwner && (owners.includes(requestedOwner) || named.includes(requestedOwner)) ? requestedOwner : null;
 
   const pipelines = [
     ...new Set(
@@ -237,6 +243,7 @@ export async function loadDashboardContext(
     recon: { failed: reconRow?.failed ?? 0, total: reconRow?.total ?? 0 },
     range,
     owners,
+    inactiveOwners,
     ownerName,
     pipelines,
     pipeline,
@@ -256,4 +263,14 @@ export function dashboardHref(
     ...extra,
   });
   return `${page}?${params.toString()}`;
+}
+
+/** The stored list of archived owners, or none. */
+export function inactiveOwnersOf(value: string | null | undefined): string[] {
+  try {
+    const parsed = JSON.parse(value ?? '[]') as unknown;
+    return Array.isArray(parsed) ? parsed.filter((name): name is string => typeof name === 'string') : [];
+  } catch {
+    return [];
+  }
 }

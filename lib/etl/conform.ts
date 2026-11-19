@@ -191,6 +191,24 @@ export async function conformBookClose(db: Database, payload: unknown, notes: st
   return changed;
 }
 
+/** Names of owners whose latest HubSpot record is archived, and who are not active under another id. */
+async function inactiveOwnerNames(db: Database): Promise<string[]> {
+  const rows = await db
+    .select({ payload: t.rawPayload.payload })
+    .from(t.rawPayload)
+    .where(eq(t.rawPayload.entity, '/crm/v3/owners'))
+    .orderBy(t.rawPayload.fetchedAt);
+  const latest = new Map<string, { name: string; archived: boolean }>();
+  for (const row of rows) {
+    const owner = row.payload as { id?: string; firstName?: string; lastName?: string; email?: string; archived?: boolean };
+    if (!owner?.id) continue;
+    const name = [owner.firstName, owner.lastName].filter(Boolean).join(' ').trim() || owner.email || `Owner ${owner.id}`;
+    latest.set(owner.id, { name, archived: owner.archived === true });
+  }
+  const active = new Set([...latest.values()].filter((owner) => !owner.archived).map((owner) => owner.name));
+  return [...new Set([...latest.values()].filter((owner) => owner.archived && !active.has(owner.name)).map((o) => o.name))].sort();
+}
+
 /** Periods are a dimension with a foreign key; a month must exist to be written. */
 async function ensurePeriods(db: Database, months: string[]): Promise<Set<string>> {
   const closed = new Set<string>();
@@ -3354,6 +3372,21 @@ async function conformInTransaction(
             .set({ createdByName: userName })
             .where(eq(t.factDeal.createdByUserId, userId));
         }
+        // Who has left: HubSpot lists them only when asked for archived
+        // owners. Westport: "Sales reps showing that are no longer active in
+        // HubSpot, do these automatically purge?" Their deals keep their name;
+        // the salesperson picker and leaderboard leave them out.
+        const inactive = await inactiveOwnerNames(db);
+        await db
+          .insert(t.appConfig)
+          .values({
+            key: 'HUBSPOT_INACTIVE_OWNERS',
+            value: JSON.stringify(inactive),
+            description: 'Salespeople archived in HubSpot, read on every owners pull.',
+            isConfirmed: true,
+          })
+          .onConflictDoUpdate({ target: t.appConfig.key, set: { value: JSON.stringify(inactive) } });
+        if (inactive.length) notes.push(`${inactive.length} former salespeople (archived in HubSpot) are left out of the pickers.`);
         rowsWritten = names.size;
         notes.push(
           names.size
