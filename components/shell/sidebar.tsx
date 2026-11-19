@@ -64,6 +64,11 @@ export function Sidebar({ userName, userRole }: { userName: string; userRole: st
   const carried = new URLSearchParams();
   const month = searchParams.get('month');
   const division = searchParams.get('division');
+  // The period travels too: the same dates on every page.
+  for (const key of ['range', 'from', 'to']) {
+    const value = searchParams.get(key);
+    if (value) carried.set(key, value);
+  }
   if (month) carried.set('month', month);
   if (division) carried.set('division', division);
   const suffix = carried.toString() ? `?${carried.toString()}` : '';

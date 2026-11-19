@@ -2,6 +2,7 @@ import type { Metadata } from 'next';
 import type { ReactNode } from 'react';
 import { CircleAlert, CircleCheck, Download, Info } from 'lucide-react';
 import { loadDashboardContext, type SearchParams } from '@/lib/dashboards/context';
+import { monthsInRange } from '@/lib/dashboards/range';
 import {
   loadFinance,
   type AgingBlock,
@@ -25,9 +26,15 @@ export default async function FinancePage({
   searchParams: Promise<SearchParams>;
 }) {
   const context = await loadDashboardContext(await searchParams);
-  const { session, divisionCode } = context;
+  const { session, divisionCode, range } = context;
   const colors = buildDivisionColorMap(session.bundle.divisions);
-  const model = loadFinance(session, divisionCode, colors);
+  // The period from the date control at the top: its whole months, because the
+  // P&L comes from QuickBooks month by month.
+  const periodTitle = range.preset === 'ytd' ? 'Year to date' : 'Period';
+  const model = loadFinance(session, divisionCode, colors, {
+    periodMonths: monthsInRange(range).filter((m) => m <= session.period.month),
+    periodTitle,
+  });
 
   const month = session.period.month.slice(0, 7);
   const sections = [
@@ -48,11 +55,17 @@ export default async function FinancePage({
         <div>
           <h1 className="text-[19px] font-semibold tracking-tight">Finance</h1>
           <p className="mt-1 max-w-3xl text-[12.5px] leading-relaxed text-[var(--text-secondary)]">
-            {model.divisionLabel} · {model.monthLabel} and year to date ({model.ytdLabel}) ·{' '}
+            {model.divisionLabel} · {model.monthLabel} and {model.periodTitle.toLowerCase()} ({model.ytdLabel}) ·{' '}
             {session.accountingBasis} basis, straight from QuickBooks.{' '}
             {session.periodIsClosed
               ? 'The books for this month are closed; figures are final.'
               : 'The books for this month are not closed yet, so figures can still change.'}
+            {!range.wholeMonths ? (
+              <span className="mt-1 block text-[11.5px] text-[var(--text-muted)]">
+                Dates chosen: {range.label}. The P&amp;L comes from QuickBooks month by month, so the period here is the
+                whole months those dates fall in ({model.ytdLabel}).
+              </span>
+            ) : null}
           </p>
         </div>
         <a
@@ -97,7 +110,7 @@ export default async function FinancePage({
             <tr>
               <GroupTh align="left"> </GroupTh>
               <GroupTh span={4}>{model.monthLabel}</GroupTh>
-              <GroupTh span={4}>Year to date · {model.ytdLabel}</GroupTh>
+              <GroupTh span={4}>{model.periodTitle} · {model.ytdLabel}</GroupTh>
               <GroupTh span={2}>Full year {model.fiscalYear}</GroupTh>
             </tr>
             <tr>
@@ -149,7 +162,7 @@ export default async function FinancePage({
               <GroupTh>{model.monthLabel}</GroupTh>
               <GroupTh span={3}>vs {model.priorMonthLabel} (prior month)</GroupTh>
               <GroupTh span={3}>vs {model.priorYearLabel} (same month last year)</GroupTh>
-              <GroupTh span={4}>YTD {model.ytdLabel} vs {model.priorYtdLabel}</GroupTh>
+              <GroupTh span={4}>{model.periodTitle} {model.ytdLabel} vs {model.priorYtdLabel}</GroupTh>
             </tr>
             <tr>
               <Th align="left">Line</Th>
@@ -327,7 +340,7 @@ function headlineTiles(model: FinanceViewModel): HeadlineTile[] {
       href: '#pl',
     },
     { label: 'Net profit', value: money(netProfit.month.actual), ...vsPrior(netProfit.month.actual, netProfit.priorMonth, shortLabel(model.priorMonthLabel), true), hint: 'Gross profit − operating expenses.', href: '#change' },
-    { label: 'YTD net profit', value: money(netProfit.ytd.actual), ...vsBudget(netProfit.ytd, true), hint: `Net profit ${model.ytdLabel}.`, href: '#pl' },
+    { label: `${model.periodTitle === 'Year to date' ? 'YTD' : 'Period'} net profit`, value: money(netProfit.ytd.actual), ...vsBudget(netProfit.ytd, true), hint: `Net profit ${model.ytdLabel}.`, href: '#pl' },
     {
       label: 'Working capital',
       value: money(wc.workingCapital),

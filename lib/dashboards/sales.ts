@@ -205,8 +205,8 @@ export function loadSales(
   // filter leadership actually asked for. The card states which it is showing,
   // because a table scoped differently from the tiles above it is confusing
   // exactly until it is labelled.
-  const rangeStart = new Date(`${options.range.from}T00:00:00Z`);
-  const rangeEnd = monthBounds(options.range.to).endExclusive;
+  const rangeStart = options.range.start;
+  const rangeEnd = options.range.endExclusive;
 
   const inRange = (deal: (typeof bundle.deals)[number]) => {
     if (deal.closedate) return deal.closedate >= rangeStart && deal.closedate < rangeEnd;

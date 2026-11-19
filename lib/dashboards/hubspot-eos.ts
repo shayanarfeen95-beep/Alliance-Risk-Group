@@ -127,9 +127,9 @@ export function loadEosPanel(
   const inScope = (code: string | null) =>
     isConsolidated || (code !== null && code === divisionCode);
 
-  const rangeStart = monthBounds(options.range.from).start;
+  const rangeStart = options.range.start;
   // Exclusive, so the last month of the range is included whole.
-  const rangeEnd = monthBounds(options.range.to).endExclusive;
+  const rangeEnd = options.range.endExclusive;
   const within = (value: Date | null): boolean =>
     value !== null && value >= rangeStart && value < rangeEnd;
 

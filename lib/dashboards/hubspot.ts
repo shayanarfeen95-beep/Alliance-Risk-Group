@@ -171,11 +171,11 @@ export function loadHubspotDashboard(
   const inScope = (code: string | null) =>
     isConsolidated || (code !== null && code === divisionCode);
 
-  const rangeStart = monthBounds(options.range.from).start;
+  const rangeStart = options.range.start;
   // Exclusive, so the last month of the range is included whole. A `<=` against
   // the first of the month would silently drop everything after midnight on the
   // 1st — a month of deals, on the month a reader is most likely looking at.
-  const rangeEnd = monthBounds(options.range.to).endExclusive;
+  const rangeEnd = options.range.endExclusive;
 
   const pipelines = [
     ...new Set(bundle.deals.map((deal) => deal.pipeline).filter((value): value is string => Boolean(value))),

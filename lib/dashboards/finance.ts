@@ -187,6 +187,8 @@ export interface FinanceViewModel {
   priorMonthLabel: string;
   priorYearLabel: string;
   ytdLabel: string;
+  /** "Year to date", or what the chosen period is called. */
+  periodTitle: string;
   priorYtdLabel: string;
   fiscalYear: number;
   hasData: boolean;
@@ -311,8 +313,30 @@ export function loadFinance(
   session: SemanticSession,
   divisionCode: string,
   divisionColors: Record<string, string>,
+  options: {
+    /**
+     * The months the period column totals, from the page's date control.
+     * Without it, January to the reporting month (year to date).
+     */
+    periodMonths?: MonthKey[];
+    /** How the page names the period, e.g. "Year to date" or "Period". */
+    periodTitle?: string;
+  } = {},
 ): FinanceViewModel {
-  const { period, bundle } = session;
+  const { bundle } = session;
+  // The "year to date" column totals whatever period was chosen: Westport,
+  // November 2026 — "the finance dashboard … only allows a month to be selected".
+  // Every YTD figure below (actual, budget, prior year, by division) reads it.
+  const chosen = options.periodMonths?.length ? [...options.periodMonths].sort() : null;
+  const period = chosen
+    ? {
+        ...session.period,
+        ytdMonths: chosen,
+        priorYearYtdMonths: chosen.map(
+          (month) => `${Number(month.slice(0, 4)) - 1}${month.slice(4)}` as MonthKey,
+        ),
+      }
+    : session.period;
   const isConsolidated = divisionCode === CONSOLIDATED_CODE;
   // At ARG Total: the divisions and the classes outside them, as QuickBooks' Total.
   const divisions = scopeFor(session, divisionCode);
@@ -742,7 +766,11 @@ export function loadFinance(
   }
 
   const ytdFirst = period.ytdMonths[0]!;
+  const ytdLast = period.ytdMonths[period.ytdMonths.length - 1]!;
   const priorYtdFirst = period.priorYearYtdMonths[0] ?? period.priorYearMonth;
+  const priorYtdLast = period.priorYearYtdMonths[period.priorYearYtdMonths.length - 1] ?? period.priorYearMonth;
+  const span = (a: MonthKey, b: MonthKey) =>
+    a === b ? formatMonthShort(a) : `${formatMonthShort(a)} – ${formatMonthShort(b)}`;
 
   return {
     divisionLabel,
@@ -750,8 +778,9 @@ export function loadFinance(
     monthLabel: formatMonth(period.month),
     priorMonthLabel: formatMonth(period.priorMonth),
     priorYearLabel: formatMonth(period.priorYearMonth),
-    ytdLabel: `${formatMonthShort(ytdFirst)} – ${formatMonthShort(period.month)}`,
-    priorYtdLabel: `${formatMonthShort(priorYtdFirst)} – ${formatMonthShort(period.priorYearMonth)}`,
+    ytdLabel: span(ytdFirst, ytdLast),
+    priorYtdLabel: span(priorYtdFirst, priorYtdLast),
+    periodTitle: options.periodTitle ?? 'Year to date',
     fiscalYear: period.fiscalYear,
     hasData: monthPl !== null,
     lines,

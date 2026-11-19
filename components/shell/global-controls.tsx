@@ -22,12 +22,10 @@ import { CircleAlert, CircleCheck, Clock, Lock, LockOpen, LoaderCircle } from 'l
 import { formatMonth } from '@/lib/semantic/periods';
 import type { ShellData } from '@/lib/dashboards/shell';
 import { resolveRange } from '@/lib/dashboards/range';
-import { ActiveFilters, DateRangeControl, type ActiveFilter } from './filter-bar';
+import { ActiveFilters, type ActiveFilter } from './filter-bar';
+import { PeriodControl } from './period-control';
 
 const CONSOLIDATED = 'ARG_TOTAL';
-
-/** Pages whose figures are lists of dated events, and so honour the date filter. */
-const RANGE_PAGES = ['/sales', '/hubspot', '/accounts'];
 
 export function GlobalControls({ shell }: { shell: ShellData }) {
   const router = useRouter();
@@ -35,39 +33,48 @@ export function GlobalControls({ shell }: { shell: ShellData }) {
   const searchParams = useSearchParams();
   const [pending, startTransition] = useTransition();
 
-  const rawMonth = searchParams.get('month');
-  const month = normaliseMonth(rawMonth) ?? shell.defaultMonth;
+  const rawMonth = normaliseMonth(searchParams.get('month'));
   const division = searchParams.get('division') ?? (shell.consolidatedAvailable ? CONSOLIDATED : shell.divisions[0]?.divisionCode ?? CONSOLIDATED);
-
-  const selected = shell.months.find((m) => m.periodMonth === month);
-  const isClosed = selected?.isClosed ?? false;
+  const selectable = shell.months.map((m) => m.periodMonth);
 
   // Resolved with the same function the server uses, so the control can never
-  // display a range different from the one the page was rendered for.
+  // display a period different from the one the page was rendered for.
   const range = resolveRange(
     {
       from: searchParams.get('from') ?? undefined,
       to: searchParams.get('to') ?? undefined,
       range: searchParams.get('range') ?? undefined,
+      month: rawMonth && selectable.includes(rawMonth) ? rawMonth : undefined,
     },
-    month,
-    shell.months.map((m) => m.periodMonth),
+    shell.defaultMonth,
+    selectable,
   );
+  // The month the period ends in: what the P&L's month column reads.
+  const month = selectable.find((candidate) => candidate <= range.to) ?? shell.defaultMonth;
+
+  const selected = shell.months.find((m) => m.periodMonth === month);
+  const isClosed = selected?.isClosed ?? false;
+  const earliestDay = selectable[selectable.length - 1] ?? range.fromDay;
+  const latestDay = `${new Date().getUTCFullYear()}-12-31`;
 
   const owner = searchParams.get('owner');
 
-  // The date-range filter scopes lists of dated events (deals, meetings). The
-  // financial pages are anchored on the month and ignore it, so offering it
-  // there put a second, conflicting date control beside the month selector —
-  // "the date ranges should be in one place".
-  const usesRange = RANGE_PAGES.some((page) => pathname === page || pathname.startsWith(`${page}/`));
-
   const activeFilters: ActiveFilter[] = [
-    ...(usesRange && range.preset !== 'ytd'
-      ? [{ param: 'range', label: 'Dates', value: range.label, icon: 'date' as const }]
-      : []),
+    ...(range.preset !== 'ytd' ? [{ param: 'range', label: 'Dates', value: range.label, icon: 'date' as const }] : []),
     ...(owner ? [{ param: 'owner', label: 'Salesperson', value: owner, icon: 'person' as const }] : []),
   ];
+
+  function applyPeriod(next: { preset: string; fromDay: string; toDay: string }) {
+    const params = new URLSearchParams(searchParams.toString());
+    params.set('range', next.preset);
+    params.set('from', next.fromDay);
+    params.set('to', next.toDay);
+    const endMonth = `${next.toDay.slice(0, 7)}-01`;
+    const anchor = selectable.find((candidate) => candidate <= endMonth);
+    if (anchor) params.set('month', anchor.slice(0, 7));
+    else params.delete('month');
+    startTransition(() => router.push(`${pathname}?${params.toString()}`));
+  }
 
   function update(key: string, value: string) {
     const params = new URLSearchParams(searchParams.toString());
@@ -81,27 +88,9 @@ export function GlobalControls({ shell }: { shell: ShellData }) {
       style={{ background: 'color-mix(in srgb, var(--page) 88%, transparent)', borderColor: 'var(--border)' }}
     >
       <div className="flex flex-wrap items-center gap-x-3 gap-y-2 px-4 py-2.5 md:px-6">
-        {/* One month selector, read by every dashboard. */}
-        <label
-          htmlFor="reporting-month"
-          className="text-[11px] font-medium uppercase tracking-wide text-[var(--text-muted)]"
-        >
-          Month
-        </label>
-        <select
-          id="reporting-month"
-          value={month}
-          onChange={(event) => update('month', event.target.value.slice(0, 7))}
-          className="h-8 rounded-[var(--radius)] border px-2.5 text-[12px] font-medium outline-none"
-          style={{ background: 'var(--surface-1)', borderColor: 'var(--border-strong)', color: 'var(--text-primary)' }}
-        >
-          {shell.months.map((m) => (
-            <option key={m.periodMonth} value={m.periodMonth}>
-              {formatMonth(m.periodMonth)}
-              {m.upcoming ? ' · upcoming' : ''}
-            </option>
-          ))}
-        </select>
+        {/* One period control, read by every dashboard. */}
+        <span className="text-[11px] font-medium uppercase tracking-wide text-[var(--text-muted)]">Period</span>
+        <PeriodControl range={range} earliestDay={earliestDay} latestDay={latestDay} onApply={applyPeriod} />
 
         {/* §9: any one division, or ARG Total, or all five side by side. */}
         <label className="sr-only" htmlFor="division">
@@ -121,8 +110,6 @@ export function GlobalControls({ shell }: { shell: ShellData }) {
             </option>
           ))}
         </select>
-
-        {usesRange ? <DateRangeControl range={range} months={shell.months} /> : null}
 
         {pending ? (
           <LoaderCircle size={13} className="animate-spin text-[var(--text-muted)]" aria-label="Loading" />

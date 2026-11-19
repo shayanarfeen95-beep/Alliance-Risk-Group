@@ -152,13 +152,25 @@ export async function loadDashboardContext(
   const selectableMonths = [...remainingMonthsOfYear(), ...availableMonths];
 
   const requested = normaliseMonth(first(searchParams.month));
+  // The last completed month with figures (see chooseDefaultMonth: the
+  // configured month only wins when it is later, and only while it holds data).
+  const fallbackMonth = chooseDefaultMonth(availableMonths, configuredMonth) ?? lastCompletedMonth();
+
+  // One period control for every page: start and end days, or a preset. The
+  // reporting month — what the P&L's "month" column and every prior-month and
+  // prior-year comparison hang off — is the month the period ends in.
+  const range = resolveRange(
+    {
+      from: first(searchParams.from),
+      to: first(searchParams.to),
+      range: first(searchParams.range),
+      month: requested && selectableMonths.includes(requested) ? requested : undefined,
+    },
+    fallbackMonth,
+    selectableMonths,
+  );
   const month =
-    // What the URL asks for, if there is anything there to show.
-    (requested && selectableMonths.includes(requested) ? requested : null) ??
-    // Then the last completed month with figures (see chooseDefaultMonth: the
-    // configured month only wins when it is later, and only while it holds data).
-    chooseDefaultMonth(availableMonths, configuredMonth) ??
-    lastCompletedMonth();
+    selectableMonths.find((candidate) => candidate <= range.to) ?? fallbackMonth;
 
   const session = await openSemanticSession(db, user, month);
 
@@ -184,15 +196,6 @@ export async function loadDashboardContext(
       sql`ran_at = (select max(ran_at) from recon_result)`,
     );
 
-  const range = resolveRange(
-    {
-      from: first(searchParams.from),
-      to: first(searchParams.to),
-      range: first(searchParams.range),
-    },
-    month,
-    selectableMonths,
-  );
 
   // The owner list comes from the deals this user can actually see, so a
   // division manager's filter does not name reps working other divisions.

@@ -53,8 +53,8 @@ export default async function AccountsPage({ searchParams }: { searchParams: Pro
 
   const db = await getDb();
   const model = await loadAccountBilling(db, session, {
-    wonFrom: monthBounds(range.from).start,
-    wonTo: monthBounds(range.to).endExclusive,
+    wonFrom: range.start,
+    wonTo: range.endExclusive,
     lineOfBusiness: lob,
   });
 

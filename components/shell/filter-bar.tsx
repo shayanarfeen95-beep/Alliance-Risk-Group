@@ -164,7 +164,7 @@ export function ActiveFilters({ filters }: { filters: ActiveFilter[] }) {
           key={filter.param}
           type="button"
           disabled={pending}
-          onClick={() => clear([filter.param, ...(filter.param === 'range' ? ['from', 'to'] : [])])}
+          onClick={() => clear([filter.param, ...(filter.param === 'range' ? ['from', 'to', 'month'] : [])])}
           title={`Remove the ${filter.label.toLowerCase()} filter`}
           className="group inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] transition-colors hover:bg-[var(--surface-2)] disabled:opacity-50"
           style={{ borderColor: 'var(--border)', color: 'var(--text-secondary)' }}
@@ -184,7 +184,7 @@ export function ActiveFilters({ filters }: { filters: ActiveFilter[] }) {
         <button
           type="button"
           disabled={pending}
-          onClick={() => clear([...filters.map((f) => f.param), 'from', 'to'])}
+          onClick={() => clear([...filters.map((f) => f.param), 'from', 'to', 'month'])}
           className="rounded-full px-2 py-1 text-[11px] text-[var(--text-muted)] underline-offset-2 hover:underline disabled:opacity-50"
         >
           Clear all
