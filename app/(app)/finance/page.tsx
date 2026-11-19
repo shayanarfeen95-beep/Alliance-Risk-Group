@@ -288,6 +288,45 @@ export default async function FinancePage({
 
       {/* --- Rolling trend -------------------------------------------------- */}
       <section id="trend" className="scroll-mt-32">
+      <div className="grid gap-4 xl:grid-cols-2">
+      <ChartCard
+        title="Revenue and profitability"
+        subtitle={`${model.divisionLabel} · revenue, gross profit and net profit, the fifteen months to the selected month`}
+        series={[
+          { id: 'revenue', label: 'Revenue', color: 'var(--series-1)' },
+          { id: 'grossProfit', label: 'Gross profit', color: 'var(--series-2)' },
+          { id: 'netProfit', label: 'Net profit', color: 'var(--series-4)' },
+        ]}
+        data={model.profitTrend}
+        form="line"
+        valueFormat="currency"
+        height={280}
+        showZeroLine
+        note={(() => {
+          const last = [...model.profitTrend].reverse().find((point) => point.netMargin !== null);
+          return last ? `Net margin ${last.xLabel}: ${(last.netMargin! * 100).toFixed(1)}%. Switch to the table for every month's figures.` : undefined;
+        })()}
+      />
+      <ChartCard
+        title="What changed"
+        subtitle={`${model.monthLabel} against the prior month and the same month last year`}
+        series={[
+          { id: 'pm', label: `vs ${model.priorMonthLabel}`, color: 'var(--series-1)' },
+          { id: 'py', label: `vs ${model.priorYearLabel}`, color: 'var(--series-3)' },
+        ]}
+        data={model.changes.map((row) => ({
+          x: row.label,
+          xLabel: row.label,
+          pm: row.vsPriorMonth.dollars,
+          py: row.vsPriorYear.dollars,
+        }))}
+        form="bar"
+        valueFormat="currency"
+        height={280}
+        showZeroLine
+        definition="The change analysis below, as a chart: each line's dollar change. For OpEx a rise is a cost increase."
+      />
+      </div>
       <ChartCard
         title="Revenue trend"
         subtitle="Monthly revenue by division, the fifteen months to the selected month"

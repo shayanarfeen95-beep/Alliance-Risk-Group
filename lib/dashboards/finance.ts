@@ -210,6 +210,8 @@ export interface FinanceViewModel {
   /** Each division beside ARG Total. Only at ARG Total, where there is more than one. */
   divisionBreakdown: DivisionBreakdownRow[] | null;
   trend: Array<{ x: string; xLabel: string } & Record<string, number | null | string>>;
+  /** Revenue, gross profit and net profit by month, with net margin. */
+  profitTrend: Array<{ x: string; xLabel: string; revenue: number | null; grossProfit: number | null; netProfit: number | null; netMargin: number | null }>;
   trendSeries: Array<{ id: string; label: string; color: string }>;
 }
 
@@ -704,6 +706,25 @@ export function loadFinance(
     return row;
   });
 
+  // --- Revenue and profitability, together ----------------------------------
+  // Alpyne checkpoint, 5 November 2026: "expanding finance trends beyond revenue
+  // to include a combined revenue-and-profitability chart". Same scope as the
+  // P&L above (at ARG Total, every class, as QuickBooks' Total).
+  const profitTrend = period.trailingFifteenMonths.map((month) => {
+    const pl = plFor(month);
+    const revenue = pl ? pl.revenue.toNumber() : null;
+    const grossProfit = pl ? pl.revenue.minus(pl.cogs).toNumber() : null;
+    const netProfit = pl ? pl.revenue.minus(pl.cogs).minus(pl.opex).toNumber() : null;
+    return {
+      x: month,
+      xLabel: formatMonthShort(month),
+      revenue,
+      grossProfit,
+      netProfit,
+      netMargin: revenue && netProfit !== null ? netProfit / revenue : null,
+    };
+  });
+
   // --- Division breakdown ---------------------------------------------------
   let divisionBreakdown: DivisionBreakdownRow[] | null = null;
   if (isConsolidated && bundle.divisions.length > 1) {
@@ -804,6 +825,7 @@ export function loadFinance(
     tenX,
     divisionBreakdown,
     trend,
+    profitTrend,
     trendSeries,
   };
 }

@@ -126,6 +126,9 @@ function MatchRow({ row, customers, canEdit }: { row: AccountBillingRow; custome
             Possible: {row.match.suggestions.map((s) => s.name).join(' · ')}
           </span>
         ) : null}
+        {row.match.reason ? (
+          <span className="mt-0.5 block max-w-[320px] text-[10.5px] text-[var(--text-muted)]">{row.match.reason}</span>
+        ) : null}
       </td>
       <td className={td} style={{ borderColor: 'var(--border)' }}>
         {canEdit ? (

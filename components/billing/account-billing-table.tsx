@@ -214,6 +214,9 @@ export function AccountBillingTable({ rows, initialFilter = 'all' }: { rows: Acc
                           {row.account}
                           <span className="block text-[10.5px] font-normal text-[var(--text-muted)]">
                             {row.match.customerName ? `QuickBooks: ${row.match.customerName}` : MATCH_LABEL[row.match.method]}
+                            <span className="block">
+                              HubSpot stage: {[...new Set(row.deals.map((deal) => deal.stage))].join(', ')}
+                            </span>
                           </span>
                         </span>
                       </span>
@@ -273,6 +276,12 @@ function AccountDetail({ row }: { row: AccountBillingRow }) {
         </table>
         <p className="mt-2 text-[11px] leading-relaxed text-[var(--text-secondary)]">
           QuickBooks customer: <strong>{row.match.customerName ?? 'none'}</strong> ({MATCH_LABEL[row.match.method]}).{' '}
+          {row.match.reason ? <span className="block text-[var(--text-secondary)]">Why: {row.match.reason}</span> : null}
+          {row.match.suggestions.length ? (
+            <span className="block text-[var(--text-secondary)]">
+              Similar QuickBooks customers: {row.match.suggestions.map((s) => s.name).join(' · ')}
+            </span>
+          ) : null}{' '}
           {row.match.suggestions.length ? `Possible matches: ${row.match.suggestions.map((s) => s.name).join(', ')}. ` : ''}
           <Link href="/admin?tab=accounts" className="underline underline-offset-2">
             Change the match

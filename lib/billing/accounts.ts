@@ -77,6 +77,12 @@ export interface AccountMatch {
   customerName: string | null;
   /** Weaker candidates, offered in Admin and never counted. */
   suggestions: CustomerOption[];
+  /**
+   * Why nothing was matched, in words — the Alpyne checkpoint could not tell
+   * whether Pro Max's "No match" meant no billing, no record, or a different
+   * name in each system.
+   */
+  reason?: string;
 }
 
 export interface AccountDeal {
@@ -274,11 +280,24 @@ export function suggestMatch(
       .map((c) => c.customerId),
   );
   const candidates = [...new Set([...exact, ...loose])].slice(0, 5);
+  const named = company.name ? `“${company.name}”` : 'its name';
+  const reason = [
+    domain
+      ? `No QuickBooks customer has ${domain} as its website or email domain`
+      : 'The HubSpot company has no domain, so it cannot be matched by domain',
+    exact.length > 1
+      ? `${exact.length} QuickBooks customers share the name ${named}, so none is picked`
+      : `no QuickBooks customer is named ${named}`,
+    candidates.length
+      ? 'similar names are listed — pick one in Admin → Account matching if it is the same account'
+      : 'nothing similar exists, so the customer is probably not set up in QuickBooks yet, or is under a different name',
+  ].join('; ');
   return {
     method: 'NONE',
     customerId: null,
     customerName: null,
     suggestions: candidates.map((id) => ({ id, name: nameOf(id) })),
+    reason: `${reason}.`,
   };
 }
 
