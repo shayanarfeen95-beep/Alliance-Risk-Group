@@ -20,12 +20,24 @@ import {
   ArrowUp,
   CircleAlert,
   Database,
+  History,
+  MessageSquarePlus,
   RefreshCw,
   Square,
   ShieldCheck,
   Sparkles,
 } from 'lucide-react';
 import { ChartCard, type ChartCardProps } from '@/components/charts/chart-card';
+
+const CHAT_STORAGE_KEY = 'arg-assistant-chat';
+
+interface ChatThread {
+  threadId: string;
+  title: string | null;
+  questions: number;
+  startedAt: string;
+  lastAt: string;
+}
 
 export interface PageContext {
   page: string;
@@ -103,6 +115,78 @@ export function AgentConversation({ pageContext }: { pageContext: PageContext })
   const [input, setInput] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Chat history. Westport: "is there chat history? … very insightful but then
+  // it disappeared!" The open chat survives a reload and a change of page, and
+  // every earlier chat can be listed and reopened.
+  const [threadId, setThreadId] = useState<string | null>(null);
+  const [showHistory, setShowHistory] = useState(false);
+  const [threads, setThreads] = useState<ChatThread[] | null>(null);
+  const [historyError, setHistoryError] = useState<string | null>(null);
+
+  useEffect(() => {
+    try {
+      const saved = JSON.parse(localStorage.getItem(CHAT_STORAGE_KEY) ?? 'null') as {
+        threadId: string | null;
+        messages: AgentMessage[];
+      } | null;
+      if (saved?.messages?.length) {
+        setMessages(saved.messages.filter((message) => !message.streaming && message.content));
+        setThreadId(saved.threadId ?? null);
+      }
+    } catch {
+      // A private window or blocked storage: the chat simply starts empty.
+    }
+  }, []);
+
+  useEffect(() => {
+    if (busy) return;
+    try {
+      if (messages.length === 0) localStorage.removeItem(CHAT_STORAGE_KEY);
+      else
+        localStorage.setItem(
+          CHAT_STORAGE_KEY,
+          // Charts are rebuilt by asking again; the words and citations are kept.
+          JSON.stringify({ threadId, messages: messages.slice(-40).map(({ view: _view, ...rest }) => rest) }),
+        );
+    } catch {
+      // Storage full or blocked: history is still on the server.
+    }
+  }, [messages, threadId, busy]);
+
+  async function openHistory() {
+    setShowHistory(true);
+    setHistoryError(null);
+    try {
+      const response = await fetch('/api/agent/history', { cache: 'no-store' });
+      const payload = (await response.json()) as { ok: boolean; threads?: ChatThread[]; error?: string };
+      if (!payload.ok) throw new Error(payload.error ?? 'Could not read your chats.');
+      setThreads(payload.threads ?? []);
+    } catch (problem) {
+      setHistoryError(problem instanceof Error ? problem.message : 'Could not read your chats.');
+    }
+  }
+
+  async function openThread(id: string) {
+    setHistoryError(null);
+    try {
+      const response = await fetch(`/api/agent/history?thread=${encodeURIComponent(id)}`, { cache: 'no-store' });
+      const payload = (await response.json()) as { ok: boolean; messages?: AgentMessage[]; error?: string };
+      if (!payload.ok) throw new Error(payload.error ?? 'Could not open that chat.');
+      setMessages(payload.messages ?? []);
+      setThreadId(id);
+      setShowHistory(false);
+      pinnedToBottom.current = true;
+    } catch (problem) {
+      setHistoryError(problem instanceof Error ? problem.message : 'Could not open that chat.');
+    }
+  }
+
+  function newChat() {
+    setMessages([]);
+    setThreadId(null);
+    setError(null);
+    setShowHistory(false);
+  }
   const scrollRef = useRef<HTMLDivElement>(null);
   const abortRef = useRef<AbortController | null>(null);
   const pinnedToBottom = useRef(true);
@@ -159,6 +243,7 @@ export function AgentConversation({ pageContext }: { pageContext: PageContext })
         body: JSON.stringify({
           messages: history.map((m) => ({ role: m.role, content: m.content })),
           pageContext,
+          threadId: threadId ?? undefined,
         }),
         signal: controller.signal,
       });
@@ -197,6 +282,9 @@ export function AgentConversation({ pageContext }: { pageContext: PageContext })
                 ...message,
                 content: message.content + String(event.delta ?? ''),
               }));
+              break;
+            case 'conversation':
+              if (typeof event.threadId === 'string') setThreadId(event.threadId);
               break;
             case 'reset':
               // The answer so far stated a figure no lookup returned; it is
@@ -307,7 +395,74 @@ export function AgentConversation({ pageContext }: { pageContext: PageContext })
 
   return (
     <>
-      <div ref={scrollRef} className="flex-1 space-y-4 overflow-y-auto px-4 py-4">
+      <div
+        className="flex shrink-0 items-center gap-1 border-b px-3 py-1.5"
+        style={{ borderColor: 'var(--border)' }}
+      >
+        <button
+          type="button"
+          onClick={() => (showHistory ? setShowHistory(false) : void openHistory())}
+          aria-pressed={showHistory}
+          className="inline-flex items-center gap-1.5 rounded-[6px] px-2 py-1 text-[11px] font-medium hover:bg-[var(--surface-2)]"
+          style={{ color: showHistory ? 'var(--text-primary)' : 'var(--text-secondary)' }}
+        >
+          <History size={12} aria-hidden /> {showHistory ? 'Back to chat' : 'Chat history'}
+        </button>
+        <button
+          type="button"
+          onClick={newChat}
+          disabled={busy}
+          className="ml-auto inline-flex items-center gap-1.5 rounded-[6px] px-2 py-1 text-[11px] font-medium text-[var(--text-secondary)] hover:bg-[var(--surface-2)] disabled:opacity-40"
+        >
+          <MessageSquarePlus size={12} aria-hidden /> New chat
+        </button>
+      </div>
+
+      {showHistory ? (
+        <div className="flex-1 overflow-y-auto px-3 py-3">
+          <p className="mb-2 px-1 text-[10.5px] font-medium uppercase tracking-wide text-[var(--text-muted)]">
+            Your chats
+          </p>
+          {historyError ? (
+            <p className="px-1 text-[11.5px]" style={{ color: 'var(--status-critical)' }}>{historyError}</p>
+          ) : threads === null ? (
+            <p className="px-1 text-[11.5px] text-[var(--text-muted)]">Loading…</p>
+          ) : threads.length === 0 ? (
+            <p className="px-1 text-[11.5px] text-[var(--text-muted)]">No chats yet.</p>
+          ) : (
+            <ul className="space-y-1">
+              {threads.map((thread) => (
+                <li key={thread.threadId}>
+                  <button
+                    type="button"
+                    onClick={() => void openThread(thread.threadId)}
+                    className="w-full rounded-[8px] border px-3 py-2 text-left transition-colors hover:bg-[var(--surface-2)]"
+                    style={{
+                      borderColor: thread.threadId === threadId ? 'var(--text-primary)' : 'var(--border)',
+                    }}
+                  >
+                    <span className="line-clamp-2 text-[12px] font-medium leading-snug">
+                      {thread.title || 'Untitled chat'}
+                    </span>
+                    <span className="mt-0.5 block text-[10.5px] text-[var(--text-muted)]">
+                      {new Date(thread.lastAt).toLocaleString('en-US', {
+                        month: 'short',
+                        day: 'numeric',
+                        hour: 'numeric',
+                        minute: '2-digit',
+                      })}
+                      {' · '}
+                      {thread.questions} question{thread.questions === 1 ? '' : 's'}
+                    </span>
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      ) : null}
+
+      <div ref={scrollRef} className={`flex-1 space-y-4 overflow-y-auto px-4 py-4 ${showHistory ? 'hidden' : ''}`}>
         {messages.length === 0 ? (
           <div className="space-y-4">
             <div
@@ -377,10 +532,7 @@ export function AgentConversation({ pageContext }: { pageContext: PageContext })
         {messages.length > 0 && !busy ? (
           <button
             type="button"
-            onClick={() => {
-              setMessages([]);
-              setError(null);
-            }}
+            onClick={newChat}
             className="mb-2 flex items-center gap-1.5 text-[10.5px] text-[var(--text-muted)] transition-colors hover:text-[var(--text-secondary)]"
           >
             <RefreshCw size={10} aria-hidden />

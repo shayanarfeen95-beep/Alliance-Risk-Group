@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import { getSessionUser } from '@/lib/auth/session';
 import { getDb } from '@/lib/db/client';
 import * as t from '@/lib/db/schema';
+import { and, eq } from 'drizzle-orm';
 import { openSemanticSession } from '@/lib/semantic/resolve';
 import { defaultReportingMonth } from '@/lib/dashboards/context';
 import { runAgentTurn, isAgentConfigured, AgentNotConfiguredError, type AgentStreamEvent } from '@/lib/ai/agent';
@@ -12,6 +13,8 @@ export const maxDuration = 120;
 interface RequestBody {
   messages: Array<{ role: 'user' | 'assistant'; content: string }>;
   pageContext: { page: string; month?: string; division?: string };
+  /** The chat this question continues, when it is a follow-up. */
+  threadId?: string;
 }
 
 function normaliseMonth(value: string | undefined): string | null {
@@ -56,15 +59,40 @@ export async function POST(request: Request) {
 
   const session = await openSemanticSession(db, user, month);
 
-  // One conversation row per exchange keeps the audit log navigable.
-  const [conversation] = await db
+  // A follow-up joins its chat — only one of this user's own.
+  const continuing =
+    typeof body.threadId === 'string' && /^[0-9a-f-]{36}$/i.test(body.threadId)
+      ? (
+          await db
+            .select({ id: t.agentConversation.id })
+            .from(t.agentConversation)
+            .where(and(eq(t.agentConversation.userId, user.id), eq(t.agentConversation.threadId, body.threadId)))
+            .limit(1)
+        )[0]
+        ? body.threadId
+        : null
+      : null;
+
+  // One conversation row per exchange keeps the audit log navigable; the
+  // thread ties a chat's exchanges together for its history.
+  const [inserted] = await db
     .insert(t.agentConversation)
     .values({
       userId: user.id,
       title: body.messages[body.messages.length - 1]?.content.slice(0, 120) ?? null,
+      threadId: continuing,
       pageContext: body.pageContext as object,
     })
     .returning();
+  const conversation = continuing
+    ? inserted
+    : (
+        await db
+          .update(t.agentConversation)
+          .set({ threadId: inserted!.id })
+          .where(eq(t.agentConversation.id, inserted!.id))
+          .returning()
+      )[0];
 
   await db.insert(t.aiQueryLog).values({
     conversationId: conversation!.id,
@@ -96,7 +124,7 @@ export async function POST(request: Request) {
         }
       };
 
-      send({ type: 'conversation', conversationId: conversation!.id });
+      send({ type: 'conversation', conversationId: conversation!.id, threadId: conversation!.threadId });
 
       try {
         const result = await runAgentTurn({

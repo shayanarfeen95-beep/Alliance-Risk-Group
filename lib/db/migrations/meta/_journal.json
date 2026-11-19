@@ -134,6 +134,13 @@
       "when": 1789130000000,
       "tag": "0018_estimated_close_date",
       "breakpoints": true
+    },
+    {
+      "idx": 19,
+      "version": "7",
+      "when": 1789140000000,
+      "tag": "0019_chat_threads",
+      "breakpoints": true
     }
   ]
 }

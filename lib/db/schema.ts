@@ -830,6 +830,8 @@ export const agentConversation = pgTable('agent_conversation', {
     .notNull()
     .references(() => users.id, { onDelete: 'cascade' }),
   title: text('title'),
+  /** The chat this question belongs to: the first question's id. */
+  threadId: uuid('thread_id'),
   /** The page and filters the agent was invoked from. */
   pageContext: jsonb('page_context'),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),

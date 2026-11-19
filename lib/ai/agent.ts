@@ -14,7 +14,7 @@ import {
   type ConversationMessage,
 } from './provider';
 import type { ChartCardProps } from '@/components/charts/chart-card';
-import { and, eq } from 'drizzle-orm';
+import { and, eq, inArray } from 'drizzle-orm';
 import { unsupportedFigures } from './figure-check';
 
 /**
@@ -153,10 +153,25 @@ export async function runAgentTurn(input: AgentTurnInput): Promise<AgentTurnResu
     .filter((message) => message.role === 'user')
     .map((message) => message.content);
   if (input.conversationId) {
+    // Every question of this chat, not only this one: a follow-up may quote a
+    // figure a tool returned two questions ago.
+    const [own] = await db
+      .select({ threadId: t.agentConversation.threadId })
+      .from(t.agentConversation)
+      .where(eq(t.agentConversation.id, input.conversationId))
+      .limit(1);
+    const ids = own?.threadId
+      ? (
+          await db
+            .select({ id: t.agentConversation.id })
+            .from(t.agentConversation)
+            .where(eq(t.agentConversation.threadId, own.threadId))
+        ).map((row) => row.id)
+      : [input.conversationId];
     const earlier = await db
       .select({ output: t.aiQueryLog.toolOutput })
       .from(t.aiQueryLog)
-      .where(and(eq(t.aiQueryLog.conversationId, input.conversationId), eq(t.aiQueryLog.role, 'tool')));
+      .where(and(inArray(t.aiQueryLog.conversationId, ids), eq(t.aiQueryLog.role, 'tool')));
     for (const row of earlier) if (row.output) evidence.push(JSON.stringify(row.output));
   }
   let checked = false;
